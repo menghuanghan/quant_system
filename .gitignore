@@ -158,3 +158,6 @@ cython_debug/
 docker/data/
 docker/volumes/
 *.db
+# Data directories
+data/
+logs/
