@@ -511,13 +511,13 @@ class ConsensusForecastCollector(BaseCollector):
         import akshare as ak
         
         try:
-            # 对于个股，使用详细研报数据聚合
+            # 使用机构推荐接口获取个股评级详情
             if ts_code:
                 symbol = ts_code.split('.')[0]
                 df = ak.stock_institute_recommend_detail(symbol=symbol)
             else:
-                # 对于全局，暂用分析师排行
-                df = ak.stock_analyst_rank_em()
+                # 全市场机构推荐池
+                df = ak.stock_institute_recommend(symbol="全部")
         except Exception as e:
             logger.warning(f"AkShare获取一致预期失败: {e}")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -525,14 +525,30 @@ class ConsensusForecastCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             
-        # 字段映射 (针对 stock_institute_recommend_detail)
+        # 字段映射
         column_mapping = {
             '股票代码': 'ts_code',
+            '股票简称': 'name',
             '股票名称': 'name',
             '评级日期': 'report_date',
-            '最新评级': 'rating_buy', # 借用
+            '最新评级日期': 'report_date',
+            '评级机构': 'analyst_count',  # 借用，实际是机构名
+            '最新评级': 'rating_buy',
         }
         df = df.rename(columns=column_mapping)
+        
+        # 补充交易所后缀
+        if 'ts_code' in df.columns:
+            def add_suffix(code):
+                if not code or '.' in str(code):
+                    return code
+                code = str(code).zfill(6)
+                if code.startswith(('6', '5')):
+                    return f"{code}.SH"
+                elif code.startswith(('0', '3', '2')):
+                    return f"{code}.SZ"
+                return code
+            df['ts_code'] = df['ts_code'].apply(add_suffix)
         
         # 确保包含所有字段
         for col in self.OUTPUT_FIELDS:

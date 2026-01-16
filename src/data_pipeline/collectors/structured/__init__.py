@@ -10,6 +10,8 @@
 - derivatives: 衍生品与多资产数据域（Derivatives & Multi-Asset Domain）
 - index_benchmark: 指数与基准数据域（Index & Benchmark Domain）
 - macro_exogenous: 宏观与高频外生变量域（Macro & Exogenous Domain）
+- expectations: 预期与预测分析域（Expectations & Forecasts Domain）
+- deep_risk_quality: 深度风险与质量因子域（Deep Risk & Quality Factors Domain）
 """
 
 # 导入基类和工具
@@ -48,6 +50,12 @@ from . import index_benchmark
 # 导入宏观与外生变量数据域模块
 from . import macro_exogenous
 
+# 导入预期与预测分析域模块
+from . import expectations
+
+# 导入深度风险与质量因子域模块
+from . import deep_risk_quality
+
 __all__ = [
     # 基类和工具
     'BaseCollector',
@@ -68,6 +76,8 @@ __all__ = [
     'derivatives',
     'index_benchmark',
     'macro_exogenous',
+    'expectations',
+    'deep_risk_quality',
 ]
 
 

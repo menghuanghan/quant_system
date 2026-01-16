@@ -234,16 +234,17 @@ class RefinitivESGCollector(BaseCollector):
     
     OUTPUT_FIELDS = [
         'ts_code',              # 股票代码
+        'stock_name',           # 股票名称
+        'date',                 # 日期
         'esg_score',            # ESG评分
-        'esg_score_date',       # ESG评分日期
-        'env_score',            # 环境总评
-        'env_score_date',       # 环境总评日期
-        'social_score',         # 社会责任总评
-        'social_score_date',    # 社会责任总评日期
-        'governance_score',     # 治理总评
-        'governance_score_date',# 治理总评日期
-        'industry',             # 行业
-        'exchange',             # 交易所
+        'esg_grade',            # ESG等级
+        'e_score',              # 环境分数
+        'e_grade',              # 环境等级
+        's_score',              # 社会分数
+        's_grade',              # 社会等级
+        'g_score',              # 公司治理分数
+        'g_grade',              # 公司治理等级
+        'market',               # 交易市场
     ]
     
     def collect(
@@ -299,7 +300,7 @@ class RefinitivESGCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['日期', '股票代码', '交易市场', '股票名称', 'ESG评分', 'ESG等级', '环境', '环境等级', '社会', '社会等级', '公司治理', '公司治理等级']
+        # AkShare实际返回: ['日期', '股票代码', '交易市场', '股票名称', 'ESG评分', 'ESG等级', '环境', '环境等级', '社会', '社会等级', '公司治理', '公司治理等级']
         column_mapping = {
             '股票代码': 'ts_code',
             '股票名称': 'stock_name',
@@ -319,7 +320,8 @@ class RefinitivESGCollector(BaseCollector):
         # 股票代码过滤
         if ts_code:
             code = ts_code.split('.')[0]
-            df = df[df['ts_code'] == code]
+            if 'ts_code' in df.columns:
+                df = df[df['ts_code'].astype(str) == code]
         
         return df
 

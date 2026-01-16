@@ -102,8 +102,39 @@ class InstitutionalRatingCollector(BaseCollector):
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     def _collect_from_akshare(self, date: Optional[str] = None) -> pd.DataFrame:
-        """从AkShare获取机构评级（由于ak.stock_rank_forecast_cninfo目前失效，暂返回空）"""
-        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        """从AkShare获取机构评级"""
+        import akshare as ak
+        
+        try:
+            # 使用机构推荐池接口
+            df = ak.stock_institute_recommend(symbol="全部")
+        except Exception as e:
+            logger.warning(f"AkShare获取机构评级失败: {e}")
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        
+        if df.empty:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        
+        # 字段映射
+        column_mapping = {
+            '股票代码': 'ts_code',
+            '股票简称': 'name',
+            '最新评级日期': 'rating_date',
+            '机构名称': 'org_name',
+            '最新评级': 'rating',
+        }
+        df = df.rename(columns=column_mapping)
+        
+        # 补充交易所后缀
+        if 'ts_code' in df.columns:
+            df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
+        
+        # 确保包含所有字段
+        for col in self.OUTPUT_FIELDS:
+            if col not in df.columns:
+                df[col] = None
+        
+        return df[self.OUTPUT_FIELDS]
     
     @retry_on_failure(max_retries=3, delay=1.0)
     def _collect_from_tushare(
@@ -382,25 +413,34 @@ class InstitutionalSurveyCollector(BaseCollector):
         import akshare as ak
         
         try:
-            # 经查，AkShare该接口现在主要按日期查询，不直接支持symbol
-            # 我们尝试获取最近一天的所有调研记录，之后再由上层逻辑过滤
-            df = ak.stock_jgdy_detail_em(date=datetime.now().strftime('%Y%m%d'))
+            # 使用机构调研统计接口
+            df = ak.stock_jgdy_tj_em(date=datetime.now().strftime('%Y%m%d'))
         except Exception as e:
-            logger.warning(f"AkShare获取机构调研失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            logger.warning(f"AkShare获取机构调研失败(stock_jgdy_tj_em): {e}")
+            # 尝试备用接口
+            try:
+                df = ak.stock_jgdy_detail_em(date=datetime.now().strftime('%Y%m%d'))
+            except Exception as e2:
+                logger.warning(f"AkShare获取机构调研失败(stock_jgdy_detail_em): {e2}")
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 列名映射
         column_mapping = {
+            '代码': 'ts_code',
+            '名称': 'name',
             '证券代码': 'ts_code',
             '证券简称': 'name',
             '股票代码': 'ts_code',
             '股票名称': 'name',
+            '最新调研日期': 'surv_date',
             '调研日期': 'surv_date',
             '接待地点': 'rece_place',
             '接待方式': 'rece_mode',
+            '接待机构数': 'fund_visitors',
+            '机构调研次数': 'fund_visitors',
             '接待机构': 'rece_org',
             '调研机构': 'rece_org',
             '机构类型': 'org_type',
