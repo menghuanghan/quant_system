@@ -1,0 +1,74 @@
+services:
+  # TimescaleDB
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: timescaledb
+    environment:
+      POSTGRES_DB: quant_timescale
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    networks:
+      - quant_network
+    restart: unless-stopped
+
+  # MongoDB
+  mongodb:
+    image: mongo:6
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: 1234
+    ports:
+      - "27600:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - quant_network
+    restart: unless-stopped
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - quant_network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # Jupyter Lab
+  jupyterlab:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quant_jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ../:/workspace
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+    networks:
+      - quant_network
+    depends_on:
+      - timescaledb
+      - mongodb
+      - redis
+    restart: unless-stopped
+
+volumes:
+  timescaledb_data:
+  mongodb_data:
+  redis_data:
+
+
+networks:
+  quant_network:
+    driver: bridge
