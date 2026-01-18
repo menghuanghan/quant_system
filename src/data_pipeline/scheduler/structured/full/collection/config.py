@@ -423,13 +423,12 @@ FUNDAMENTAL_TASKS = [
         name="pledge",
         description="股权质押",
         domain="fundamental",
-        category=DataCategory.TIME_DEPENDENT,
+        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
         collector_func="get_pledge",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.DAILY,
         priority=6,
-        output_file="pledge.parquet",
-        date_field="ann_date",
+        output_file="pledge/{ts_code}.parquet",
     ),
     CollectionTask(
         name="share_float",
