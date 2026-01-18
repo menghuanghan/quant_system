@@ -411,13 +411,12 @@ FUNDAMENTAL_TASKS = [
         name="top10_holders",
         description="前十大股东/流通股东",
         domain="fundamental",
-        category=DataCategory.TIME_DEPENDENT,
+        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
         collector_func="get_top10_holders",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.QUARTERLY,
         priority=5,
         output_file="top10_holders/{ts_code}.parquet",
-        date_field="end_date",
         batch_size=50,
     ),
     CollectionTask(
@@ -460,13 +459,12 @@ FUNDAMENTAL_TASKS = [
         name="dividend",
         description="分红送股",
         domain="fundamental",
-        category=DataCategory.TIME_DEPENDENT,
+        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
         collector_func="get_dividend",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.YEARLY,
         priority=5,
         output_file="dividend/{ts_code}.parquet",
-        date_field="ann_date",
         batch_size=100,
     ),
 ]
