@@ -320,13 +320,12 @@ FUNDAMENTAL_TASKS = [
         name="main_business",
         description="主营业务介绍",
         domain="fundamental",
-        category=DataCategory.TIME_DEPENDENT,
+        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
         collector_func="get_main_business",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.QUARTERLY,
         priority=5,
-        output_file="main_business.parquet",
-        date_field="end_date",
+        output_file="main_business/{ts_code}.parquet",  # 按股票分文件存储
     ),
     CollectionTask(
         name="management",
