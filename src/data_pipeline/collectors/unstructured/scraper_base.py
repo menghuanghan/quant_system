@@ -493,7 +493,8 @@ class PlaywrightDriver(BrowserDriver):
         headless: bool = True,
         proxy: Optional[Dict[str, str]] = None,
         fingerprint_index: Optional[int] = None,
-        slow_mo: int = 0
+        slow_mo: int = 0,
+        block_media: bool = True
     ):
         """
         Args:
@@ -501,10 +502,12 @@ class PlaywrightDriver(BrowserDriver):
             proxy: 代理配置 {"server": "http://proxy:port", "username": "...", "password": "..."}
             fingerprint_index: 指定指纹配置索引，None则随机
             slow_mo: 操作延迟（毫秒），用于调试
+            block_media: 是否屏蔽图片/字体/媒体资源
         """
         self.headless = headless
         self.proxy = proxy
         self.slow_mo = slow_mo
+        self.block_media = block_media
         self._browser = None
         self._context = None
         self._page = None
@@ -578,7 +581,15 @@ class PlaywrightDriver(BrowserDriver):
                 """)
                 
                 self._page = self._context.new_page()
-                logger.info(f"Playwright 浏览器已启动 (headless={self.headless})")
+                
+                # 路由拦截：屏蔽图片、字体、媒体文件
+                if self.block_media:
+                    self._page.route(
+                        "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf,mp4,mp3}", 
+                        lambda route: route.abort()
+                    )
+                
+                logger.info(f"Playwright 浏览器已启动 (headless={self.headless}, block_media={self.block_media})")
                 
             except ImportError:
                 raise ImportError(
@@ -588,15 +599,30 @@ class PlaywrightDriver(BrowserDriver):
     def get(self, url: str) -> str:
         """访问 URL"""
         self._ensure_browser()
-        self._page.goto(url, wait_until="networkidle")
+        try:
+            # 优化：使用 domcontentloaded 代替 networkidle，并设置超时
+            self._page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            # 超时通常意味着页面主要内容已加载，但某些资源卡住
+            logger.warning(f"页面加载超时 (继续处理): {e}")
+            
         self._capture_cookies()
         return self._page.content()
     
     def get_with_wait(self, url: str, wait_selector: str, timeout: int = 10) -> str:
         """访问 URL 并等待元素"""
         self._ensure_browser()
-        self._page.goto(url, wait_until="domcontentloaded")
-        self._page.wait_for_selector(wait_selector, timeout=timeout * 1000)
+        try:
+            # 优化：设置 goto 超时
+            self._page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            logger.warning(f"页面导航超时 (继续等待元素): {e}")
+            
+        try:
+            self._page.wait_for_selector(wait_selector, timeout=timeout * 1000)
+        except Exception as e:
+            logger.warning(f"等待元素超时: {wait_selector}, {e}")
+            
         self._capture_cookies()
         return self._page.content()
     

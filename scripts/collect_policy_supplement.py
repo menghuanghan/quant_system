@@ -12,12 +12,23 @@ import sys
 from pathlib import Path
 import pandas as pd
 from datetime import datetime, timedelta
+import logging
+import os
 
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.data_pipeline.collectors.unstructured.policy.csrc import CSRCCollector
 from src.data_pipeline.collectors.unstructured.policy.miit import MIITCollector
+
+# 强制 Python 不缓存 stdout
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 def main():
     # 日期范围：近一年
@@ -44,26 +55,15 @@ def main():
         csrc_df = csrc_collector.collect(
             start_date=start_str,
             end_date=end_str,
-            categories=['order', 'announcement'],  # 主要类别（减少类别以提高成功率）
-            max_pages=5,  # 减少页数，避免超时
-            download_files=True  # 下载附件
+            categories=['order', 'announcement', 'regulation'],
+            max_pages=5,
+            download_files=True
         )
         print(f"证监会: 采集到 {len(csrc_df)} 条记录")
         if len(csrc_df) > 0:
             all_data.append(csrc_df)
-            # 显示样本
-            print("\n样本数据:")
-            for idx, row in csrc_df.head(3).iterrows():
-                print(f"  - {row['title'][:50]}...")
-                if row.get('local_path'):
-                    print(f"    附件: {row['local_path']}")
-    except KeyboardInterrupt:
-        print("用户中断采集")
-        raise
     except Exception as e:
         print(f"证监会采集失败: {e}")
-        import traceback
-        traceback.print_exc()
     
     print()
     
