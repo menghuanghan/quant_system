@@ -4,12 +4,15 @@
 本模块用于采集非结构化数据，当前支持：
 - announcements: 上市公司公告采集
 - news: 财经新闻采集
+- reports: 研报与分析师观点
+- sentiment: 舆情与市场情绪
 
 基础设施：
 - base: 基类定义、元数据结构、工具函数
 - rate_limiter: 请求速率限制
 - proxy_pool: 代理池管理
 - request_utils: 请求伪装与工具
+- scraper_base: 增强型爬虫基类（Cookie管理、指数退避等）
 """
 
 # 基础设施
@@ -48,6 +51,20 @@ from .request_utils import (
     create_session,
     safe_request,
     safe_download_file,
+)
+
+# 增强型爬虫基类
+from .scraper_base import (
+    ScraperBase,
+    UserAgentManager,
+    CookieManager,
+    CookieEntry,
+    exponential_backoff,
+    BrowserDriver,
+    PlaywrightDriver,
+    SeleniumDriver,
+    get_scraper,
+    get_cookie_manager,
 )
 
 # 公告采集
@@ -104,6 +121,27 @@ from .reports import (
     get_eps_forecast,
 )
 
+# 舆情与市场情绪采集
+from .sentiment import (
+    # 市场热度
+    MarketHeatCollector,
+    HotListSource,
+    HeatConfig,
+    get_market_heat,
+    get_realtime_hotlist,
+    get_historical_heat_proxy,
+    # 投资者舆情
+    InvestorSentimentCollector,
+    SentimentSource,
+    SentimentConfig,
+    EventFilter,
+    get_investor_sentiment,
+    get_cninfo_interaction,
+    get_guba_comments,
+    get_xueqiu_comments,
+    get_event_driven_sentiment,
+)
+
 
 __all__ = [
     # 基类和元数据
@@ -138,6 +176,18 @@ __all__ = [
     'create_session',
     'safe_request',
     'safe_download_file',
+    
+    # 增强型爬虫基类
+    'ScraperBase',
+    'UserAgentManager',
+    'CookieManager',
+    'CookieEntry',
+    'exponential_backoff',
+    'BrowserDriver',
+    'PlaywrightDriver',
+    'SeleniumDriver',
+    'get_scraper',
+    'get_cookie_manager',
     
     # 公告采集器
     'AnnouncementCollector',
@@ -186,10 +236,27 @@ __all__ = [
     'get_market_reports',
     'get_analyst_detail',
     'get_eps_forecast',
+    
+    # 舆情与市场情绪采集器
+    'MarketHeatCollector',
+    'HotListSource',
+    'HeatConfig',
+    'get_market_heat',
+    'get_realtime_hotlist',
+    'get_historical_heat_proxy',
+    'InvestorSentimentCollector',
+    'SentimentSource',
+    'SentimentConfig',
+    'EventFilter',
+    'get_investor_sentiment',
+    'get_cninfo_interaction',
+    'get_guba_comments',
+    'get_xueqiu_comments',
+    'get_event_driven_sentiment',
 ]
 
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 __author__ = 'Quant Team'
 
 

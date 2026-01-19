@@ -9,12 +9,14 @@
 """
 
 import os
+import json
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -270,6 +272,261 @@ class UnstructuredCollector(ABC):
             df['list_status'] = 'L'
         
         return df[self.STANDARD_FIELDS]
+    
+    # ============== 存储方法 ==============
+    
+    def _save_to_jsonl(
+        self,
+        df: pd.DataFrame,
+        file_path: Union[str, Path],
+        append: bool = True,
+        include_timestamp: bool = True
+    ) -> bool:
+        """
+        保存数据到 JSONL 格式
+        
+        适用于：
+        - 增量数据追加
+        - 流式写入
+        - 人类可读的文本格式
+        
+        Args:
+            df: 要保存的 DataFrame
+            file_path: 文件路径
+            append: 是否追加模式
+            include_timestamp: 是否包含采集时间戳
+        
+        Returns:
+            是否保存成功
+        """
+        if df.empty:
+            self.logger.warning("DataFrame 为空，跳过保存")
+            return False
+        
+        try:
+            file_path = Path(file_path)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 添加采集时间戳
+            if include_timestamp:
+                df = df.copy()
+                df['_collected_at'] = datetime.now().isoformat()
+            
+            mode = 'a' if append else 'w'
+            with open(file_path, mode, encoding='utf-8') as f:
+                for _, row in df.iterrows():
+                    record = row.to_dict()
+                    # 处理 NaN 值
+                    record = {k: (None if pd.isna(v) else v) for k, v in record.items()}
+                    f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            
+            self.logger.info(f"已保存 {len(df)} 条记录到 {file_path}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"保存 JSONL 失败: {e}")
+            return False
+    
+    def _save_to_parquet(
+        self,
+        df: pd.DataFrame,
+        file_path: Union[str, Path],
+        partition_cols: Optional[List[str]] = None,
+        compression: str = 'snappy',
+        append: bool = False
+    ) -> bool:
+        """
+        保存数据到 Parquet 格式
+        
+        适用于：
+        - 大规模历史数据存储（舆情数据）
+        - 需要高压缩比的场景
+        - 后续 Pandas 大规模读取分析
+        
+        优势：
+        - 列式存储，压缩率高（通常 5-10x）
+        - 读取速度快（支持列裁剪）
+        - 保留数据类型信息
+        
+        Args:
+            df: 要保存的 DataFrame
+            file_path: 文件路径
+            partition_cols: 分区列（如 ['trade_date', 'ts_code']）
+            compression: 压缩算法 ('snappy', 'gzip', 'brotli', 'zstd')
+            append: 是否追加到现有数据集
+        
+        Returns:
+            是否保存成功
+        """
+        if df.empty:
+            self.logger.warning("DataFrame 为空，跳过保存")
+            return False
+        
+        try:
+            file_path = Path(file_path)
+            
+            # 确保目录存在
+            if partition_cols:
+                file_path.mkdir(parents=True, exist_ok=True)
+            else:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 添加采集时间戳
+            df = df.copy()
+            df['_collected_at'] = datetime.now().isoformat()
+            
+            # 标准化日期列为字符串（避免时区问题）
+            for col in df.columns:
+                if 'date' in col.lower():
+                    df[col] = df[col].astype(str)
+            
+            if append and file_path.exists():
+                # 追加模式：读取现有数据并合并
+                if partition_cols:
+                    # 分区数据集使用 pyarrow.parquet.write_to_dataset
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+                    
+                    table = pa.Table.from_pandas(df)
+                    pq.write_to_dataset(
+                        table,
+                        root_path=str(file_path),
+                        partition_cols=partition_cols,
+                        compression=compression,
+                        existing_data_behavior='overwrite_or_ignore'
+                    )
+                else:
+                    # 单文件追加
+                    existing_df = pd.read_parquet(file_path)
+                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                    combined_df.to_parquet(
+                        file_path,
+                        engine='pyarrow',
+                        compression=compression,
+                        index=False
+                    )
+            else:
+                # 新建模式
+                if partition_cols:
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+                    
+                    table = pa.Table.from_pandas(df)
+                    pq.write_to_dataset(
+                        table,
+                        root_path=str(file_path),
+                        partition_cols=partition_cols,
+                        compression=compression
+                    )
+                else:
+                    df.to_parquet(
+                        file_path,
+                        engine='pyarrow',
+                        compression=compression,
+                        index=False
+                    )
+            
+            self.logger.info(
+                f"已保存 {len(df)} 条记录到 {file_path} "
+                f"(Parquet, {compression})"
+            )
+            return True
+            
+        except ImportError:
+            self.logger.error(
+                "Parquet 保存需要 pyarrow 库，请安装: pip install pyarrow"
+            )
+            return False
+        except Exception as e:
+            self.logger.error(f"保存 Parquet 失败: {e}")
+            return False
+    
+    def _read_parquet(
+        self,
+        file_path: Union[str, Path],
+        columns: Optional[List[str]] = None,
+        filters: Optional[List[tuple]] = None
+    ) -> pd.DataFrame:
+        """
+        读取 Parquet 文件
+        
+        Args:
+            file_path: 文件路径
+            columns: 要读取的列（列裁剪优化）
+            filters: 行过滤条件（谓词下推优化）
+                     格式: [('column', 'operator', value), ...]
+                     例如: [('trade_date', '>=', '2024-01-01')]
+        
+        Returns:
+            DataFrame
+        """
+        try:
+            file_path = Path(file_path)
+            
+            if not file_path.exists():
+                self.logger.warning(f"文件不存在: {file_path}")
+                return pd.DataFrame()
+            
+            df = pd.read_parquet(
+                file_path,
+                columns=columns,
+                filters=filters,
+                engine='pyarrow'
+            )
+            
+            self.logger.info(f"已读取 {len(df)} 条记录从 {file_path}")
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"读取 Parquet 失败: {e}")
+            return pd.DataFrame()
+    
+    def _save_auto(
+        self,
+        df: pd.DataFrame,
+        base_path: Union[str, Path],
+        name: str,
+        use_parquet: bool = True,
+        partition_by_date: bool = True
+    ) -> bool:
+        """
+        自动选择存储格式
+        
+        规则：
+        - 小数据量 (<10000行): JSONL
+        - 大数据量 (>=10000行): Parquet
+        - 可通过 use_parquet 强制指定
+        
+        Args:
+            df: 要保存的 DataFrame
+            base_path: 基础路径
+            name: 文件名（不含扩展名）
+            use_parquet: 强制使用 Parquet
+            partition_by_date: 是否按日期分区（仅 Parquet）
+        
+        Returns:
+            是否保存成功
+        """
+        if df.empty:
+            return False
+        
+        base_path = Path(base_path)
+        
+        # 自动选择格式
+        should_use_parquet = use_parquet or len(df) >= 10000
+        
+        if should_use_parquet:
+            partition_cols = ['trade_date'] if partition_by_date and 'trade_date' in df.columns else None
+            return self._save_to_parquet(
+                df,
+                base_path / f"{name}.parquet" if not partition_cols else base_path / name,
+                partition_cols=partition_cols
+            )
+        else:
+            return self._save_to_jsonl(
+                df,
+                base_path / f"{name}.jsonl"
+            )
     
     def _detect_correction(self, title: str) -> bool:
         """

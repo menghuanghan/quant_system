@@ -304,7 +304,7 @@ def safe_request(
         
         # 重试前等待
         if attempt < max_retries - 1:
-            time.sleep((attempt + 1) * 1)
+            time.sleep((attempt + 1) * 0.3)
     
     logger.error(f"请求失败（已重试{max_retries}次）: {url} - {last_error}")
     return None
