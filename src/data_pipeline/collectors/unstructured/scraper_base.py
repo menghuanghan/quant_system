@@ -45,7 +45,7 @@ class UserAgentManager:
     - fake-useragent 动态生成
     """
     
-    # 预置的现代浏览器 User-Agent 列表
+    # 预置的现代浏览器 User-Agent 列表（桌面端）
     DEFAULT_USER_AGENTS = [
         # Chrome on Windows 11
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -59,24 +59,44 @@ class UserAgentManager:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
         # Firefox on Mac
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0",
-        # Edge
+        # Edge (Chromium内核，兼容性好)
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
         # Safari
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    ]
+    
+    # 移动端 User-Agent 列表（反爬通常更宽松）
+    MOBILE_USER_AGENTS = [
+        # Android Chrome
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.101 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.193 Mobile Safari/537.36",
+        # iOS Safari
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPad; CPU OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+        # WeChat WebView
+        "Mozilla/5.0 (Linux; Android 12; M2102J2SC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36 MicroMessenger/8.0.37",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.42",
     ]
     
     def __init__(
         self,
         user_agents: Optional[List[str]] = None,
+        mobile_user_agents: Optional[List[str]] = None,
         use_fake_ua: bool = True
     ):
         """
         Args:
-            user_agents: 自定义 UA 列表
+            user_agents: 自定义桌面端 UA 列表
+            mobile_user_agents: 自定义移动端 UA 列表
             use_fake_ua: 是否尝试使用 fake-useragent 库
         """
         self._user_agents = user_agents or self.DEFAULT_USER_AGENTS.copy()
+        self._mobile_user_agents = mobile_user_agents or self.MOBILE_USER_AGENTS.copy()
         self._index = 0
+        self._mobile_index = 0
         self._lock = threading.Lock()
         self._fake_ua = None
         
@@ -114,13 +134,28 @@ class UserAgentManager:
                 return self._fake_ua.chrome
             except:
                 pass
-        chrome_uas = [ua for ua in self._user_agents if 'Chrome' in ua and 'Edg' not in ua]
+        chrome_uas = [ua for ua in self._user_agents if 'Chrome' in ua]
         return random.choice(chrome_uas) if chrome_uas else self.get_random()
     
-    def add_custom(self, ua: str):
+    def get_mobile(self) -> str:
+        """获取移动端 User-Agent（反爬通常更宽松）"""
+        return random.choice(self._mobile_user_agents)
+    
+    def get_next_mobile(self) -> str:
+        """轮询获取移动端 User-Agent"""
+        with self._lock:
+            ua = self._mobile_user_agents[self._mobile_index % len(self._mobile_user_agents)]
+            self._mobile_index += 1
+            return ua
+    
+    def add_custom(self, ua: str, is_mobile: bool = False):
         """添加自定义 UA"""
-        if ua not in self._user_agents:
-            self._user_agents.append(ua)
+        if is_mobile:
+            if ua not in self._mobile_user_agents:
+                self._mobile_user_agents.append(ua)
+        else:
+            if ua not in self._user_agents:
+                self._user_agents.append(ua)
 
 
 # ============== Cookie 管理 ==============
@@ -861,7 +896,8 @@ class ScraperBase:
         use_proxy: bool = False,
         rate_limit: bool = True,
         timeout: int = 30,
-        max_retries: int = 5
+        max_retries: int = 5,
+        enable_health_check: bool = True
     ):
         """
         Args:
@@ -869,11 +905,13 @@ class ScraperBase:
             rate_limit: 是否启用速率限制
             timeout: 请求超时时间（秒）
             max_retries: 最大重试次数
+            enable_health_check: 是否启用健康检查
         """
         self.use_proxy = use_proxy
         self.rate_limit = rate_limit
         self.timeout = timeout
         self.max_retries = max_retries
+        self.enable_health_check = enable_health_check
         
         # 组件初始化
         self.ua_manager = UserAgentManager()
@@ -882,6 +920,19 @@ class ScraperBase:
         self._rate_limiter: Optional[RateLimiter] = None
         self._browser: Optional[BrowserDriver] = None
         self._session: Optional[requests.Session] = None
+        
+        # 健康检查状态
+        self._health_stats = {
+            'total_requests': 0,
+            'failed_requests': 0,
+            'consecutive_failures': 0,
+            'last_success_time': time.time(),
+            'last_failure_time': None,
+            'error_codes': {},  # {status_code: count}
+            'is_paused': False,
+            'pause_reason': None
+        }
+        self._health_lock = threading.Lock()
         
         # 从环境变量加载 Cookie
         self.cookie_manager.load_from_env()
@@ -1040,6 +1091,12 @@ class ScraperBase:
         if self._rate_limiter:
             self._rate_limiter.wait(url)
         
+        # 健康检查：如果已暂停，抛出异常
+        if self.enable_health_check and self._health_stats['is_paused']:
+            raise RuntimeError(
+                f"Scraper is paused: {self._health_stats['pause_reason']}"
+            )
+        
         # 准备请求头
         request_headers = self._get_headers(headers, referer)
         
@@ -1069,6 +1126,10 @@ class ScraperBase:
             
             response_time = time.time() - start_time
             
+            # 记录成功请求
+            if self.enable_health_check:
+                self._record_success()
+            
             # 报告结果
             if self._rate_limiter:
                 if response.status_code in (429, 502, 503):
@@ -1089,9 +1150,18 @@ class ScraperBase:
                     self.cookie_manager.mark_invalid(domain, cookies)
                     logger.warning(f"Cookie 可能已失效: {domain}")
             
+            # 检查响应状态
+            if response.status_code >= 400:
+                if self.enable_health_check:
+                    self._record_failure(response.status_code)
+            
             return response
             
         except Exception as e:
+            # 记录失败
+            if self.enable_health_check:
+                self._record_failure(0, str(e))
+                
             if self._proxy_pool and proxy:
                 self._proxy_pool.report_failure(proxy)
             raise
@@ -1168,6 +1238,156 @@ class ScraperBase:
         if self._browser:
             self._browser.close()
             self._browser = None
+    
+    def _record_success(self):
+        """记录成功请求"""
+        with self._health_lock:
+            self._health_stats['total_requests'] += 1
+            self._health_stats['consecutive_failures'] = 0
+            self._health_stats['last_success_time'] = time.time()
+    
+    def _record_failure(self, status_code: int = 0, error: str = ""):
+        """记录失败请求"""
+        with self._health_lock:
+            self._health_stats['total_requests'] += 1
+            self._health_stats['failed_requests'] += 1
+            self._health_stats['consecutive_failures'] += 1
+            self._health_stats['last_failure_time'] = time.time()
+            
+            # 记录错误码统计
+            if status_code:
+                self._health_stats['error_codes'][status_code] = \
+                    self._health_stats['error_codes'].get(status_code, 0) + 1
+            
+            # 连续失败检查
+            self._check_health_threshold()
+    
+    def _check_health_threshold(self):
+        """
+        检查健康阈值，触发暂停机制
+        
+        触发条件：
+        - 连续失败 >= 10 次
+        - 403/404 错误占比 > 80%（可能网站改版）
+        - 429 错误（限流）
+        """
+        consecutive = self._health_stats['consecutive_failures']
+        total = self._health_stats['total_requests']
+        
+        # 连续失败检查
+        if consecutive >= 10:
+            self._pause("连续失败10次，可能被封禁或网站异常")
+            return
+        
+        # 403/404 错误率检查（至少5次请求后）
+        if total >= 5:
+            forbidden_count = (
+                self._health_stats['error_codes'].get(403, 0) +
+                self._health_stats['error_codes'].get(404, 0)
+            )
+            if forbidden_count / total > 0.8:
+                self._pause(f"403/404错误率过高 ({forbidden_count}/{total})，可能网站改版或接口失效")
+                return
+        
+        # 429 限流检查
+        if self._health_stats['error_codes'].get(429, 0) >= 5:
+            self._pause("触发429限流，自动暂停避免封禁")
+    
+    def _pause(self, reason: str):
+        """暂停爬虫"""
+        self._health_stats['is_paused'] = True
+        self._health_stats['pause_reason'] = reason
+        
+        logger.error(f"🚨 爬虫已暂停: {reason}")
+        logger.error("请检查问题后调用 resume() 恢复")
+        
+        # TODO: 发送报警通知（可集成 Sentry/邮件/企业微信）
+        self._send_alert(reason)
+    
+    def _send_alert(self, reason: str):
+        """
+        发送报警通知
+        
+        TODO: 集成第三方通知服务
+        - Sentry (错误追踪)
+        - Email (SMTP)
+        - 企业微信/钉钉 (Webhook)
+        - Telegram Bot
+        """
+        # 占位符：后续集成 Sentry
+        # try:
+        #     import sentry_sdk
+        #     sentry_sdk.capture_message(f"Scraper Health Alert: {reason}", level="error")
+        # except:
+        #     pass
+        pass
+    
+    def resume(self):
+        """恢复爬虫（需要人工确认）"""
+        with self._health_lock:
+            self._health_stats['is_paused'] = False
+            self._health_stats['pause_reason'] = None
+            self._health_stats['consecutive_failures'] = 0
+            logger.info("✓ 爬虫已恢复运行")
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """获取健康状态"""
+        with self._health_lock:
+            stats = self._health_stats.copy()
+            
+            # 计算成功率
+            if stats['total_requests'] > 0:
+                stats['success_rate'] = (
+                    (stats['total_requests'] - stats['failed_requests']) / 
+                    stats['total_requests'] * 100
+                )
+            else:
+                stats['success_rate'] = 100.0
+            
+            # 计算距上次成功的时间
+            stats['seconds_since_last_success'] = int(
+                time.time() - stats['last_success_time']
+            )
+            
+            return stats
+    
+    def health_check(self) -> bool:
+        """
+        健康检查（可由外部定时调用）
+        
+        Returns:
+            是否健康
+        """
+        status = self.get_health_status()
+        
+        # 判断标准
+        if status['is_paused']:
+            return False
+        
+        if status['consecutive_failures'] >= 5:
+            logger.warning(f"⚠️ 连续失败 {status['consecutive_failures']} 次")
+            return False
+        
+        if status['total_requests'] > 0 and status['success_rate'] < 50:
+            logger.warning(f"⚠️ 成功率过低: {status['success_rate']:.1f}%")
+            return False
+        
+        return True
+    
+    def reset_health_stats(self):
+        """重置健康统计（用于新任务开始时）"""
+        with self._health_lock:
+            self._health_stats = {
+                'total_requests': 0,
+                'failed_requests': 0,
+                'consecutive_failures': 0,
+                'last_success_time': time.time(),
+                'last_failure_time': None,
+                'error_codes': {},
+                'is_paused': False,
+                'pause_reason': None
+            }
+            logger.info("健康统计已重置")
     
     def close(self):
         """关闭所有资源"""
