@@ -6,6 +6,7 @@
 - AKShareAnnouncementCollector: AKShare公告采集器
 - CninfoAnnouncementCrawler: 巨潮资讯爬虫
 - AnnouncementCollector: 统一采集接口
+- StreamingAnnouncementCollector: 流式公告采集器（推荐）
 """
 
 from .tushare_collector import (
@@ -32,6 +33,13 @@ from .announcement_collector import (
     get_full_market_history,
 )
 
+# 流式采集器（推荐，支持即时清洗与防泄露）
+from .streaming_announcement_collector import (
+    StreamingAnnouncementCollector,
+    collect_announcements_streaming,
+    verify_time_cleaning,
+)
+
 
 __all__ = [
     # Collectors
@@ -39,6 +47,7 @@ __all__ = [
     'AKShareAnnouncementCollector',
     'CninfoAnnouncementCrawler',
     'AnnouncementCollector',
+    'StreamingAnnouncementCollector',  # 流式采集器
     
     # Main functions
     'get_announcements',
@@ -46,6 +55,8 @@ __all__ = [
     'get_announcements_incremental',
     'get_correction_announcements',
     'get_full_market_history',
+    'collect_announcements_streaming',  # 流式采集接口
+    'verify_time_cleaning',  # 防泄露验证
     
     # Source-specific functions
     'get_tushare_announcements',

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from datetime import datetime
+from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -1186,6 +1187,229 @@ class ScraperBase:
             except:
                 logger.error(f"JSON 解析失败: {url}")
         return None
+    
+    # ============== 内存流下载（防止磁盘 IO） ==============
+    
+    @exponential_backoff(
+        max_retries=5,
+        base_delay=2.0,
+        max_delay=120.0
+    )
+    def get_bytes(
+        self,
+        url: str,
+        params: Optional[Dict] = None,
+        headers: Optional[Dict[str, str]] = None,
+        use_cookies: bool = False,
+        referer: Optional[str] = None,
+        timeout: Optional[int] = None,
+        stream: bool = True,
+        chunk_size: int = 8192,
+        max_size_mb: float = 100.0
+    ) -> Optional[bytes]:
+        """
+        下载文件内容到内存（不写入磁盘）
+        
+        用于即时清洗（Extract-on-the-fly）场景，避免磁盘 IO。
+        下载的 PDF/HTML 内容直接返回 bytes，可立即传入 PDFParser 或 HTMLParser。
+        
+        Args:
+            url: 文件 URL
+            params: URL 参数
+            headers: 自定义请求头
+            use_cookies: 是否使用 Cookie
+            referer: Referer 头
+            timeout: 超时时间（秒），默认使用实例配置
+            stream: 是否使用流式下载（大文件推荐）
+            chunk_size: 流式下载的块大小（字节）
+            max_size_mb: 最大允许下载大小（MB），超出则中止
+        
+        Returns:
+            文件的二进制内容（bytes），失败返回 None
+            
+        Raises:
+            ValueError: 文件大小超出限制
+            
+        Examples:
+            >>> scraper = ScraperBase()
+            >>> # 下载 PDF 到内存
+            >>> pdf_bytes = scraper.get_bytes("https://example.com/report.pdf")
+            >>> if pdf_bytes:
+            ...     text = PDFParser().extract_from_bytes(pdf_bytes)
+            >>> 
+            >>> # 下载 HTML 到内存
+            >>> html_bytes = scraper.get_bytes("https://example.com/news.html")
+            >>> if html_bytes:
+            ...     html_text = html_bytes.decode('utf-8')
+        """
+        # 速率限制
+        if self._rate_limiter:
+            self._rate_limiter.wait(url)
+        
+        # 健康检查
+        if self.enable_health_check and self._health_stats['is_paused']:
+            raise RuntimeError(
+                f"Scraper is paused: {self._health_stats['pause_reason']}"
+            )
+        
+        # 准备请求头
+        request_headers = self._get_headers(headers, referer)
+        # 对于文件下载，显式声明 Accept
+        if 'Accept' not in (headers or {}):
+            request_headers['Accept'] = '*/*'
+        
+        # 准备 Cookie
+        cookies = None
+        if use_cookies:
+            domain = self._get_domain(url)
+            cookies = self.cookie_manager.get_cookies_for_requests(domain)
+        
+        # 获取代理
+        proxy = self.get_proxy() if self.use_proxy else None
+        
+        max_bytes = int(max_size_mb * 1024 * 1024)
+        
+        try:
+            start_time = time.time()
+            
+            response = self.session.get(
+                url,
+                params=params,
+                headers=request_headers,
+                cookies=cookies,
+                proxies=proxy,
+                timeout=timeout or self.timeout,
+                stream=stream
+            )
+            
+            # 检查状态码
+            if response.status_code != 200:
+                logger.warning(f"下载失败 HTTP {response.status_code}: {url}")
+                if self.enable_health_check:
+                    self._record_failure(response.status_code)
+                return None
+            
+            # 检查 Content-Length（如果服务器提供）
+            content_length = response.headers.get('Content-Length')
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError(
+                    f"文件大小 {int(content_length)/1024/1024:.1f}MB 超出限制 {max_size_mb}MB"
+                )
+            
+            # 流式下载（控制内存，支持中断）
+            if stream:
+                chunks = []
+                total_bytes = 0
+                
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        total_bytes += len(chunk)
+                        
+                        # 动态检查大小限制
+                        if total_bytes > max_bytes:
+                            logger.warning(
+                                f"下载中止：已达 {total_bytes/1024/1024:.1f}MB，"
+                                f"超出限制 {max_size_mb}MB - {url}"
+                            )
+                            raise ValueError(f"文件大小超出限制 {max_size_mb}MB")
+                        
+                        chunks.append(chunk)
+                
+                content = b''.join(chunks)
+            else:
+                content = response.content
+                if len(content) > max_bytes:
+                    raise ValueError(
+                        f"文件大小 {len(content)/1024/1024:.1f}MB 超出限制 {max_size_mb}MB"
+                    )
+            
+            response_time = time.time() - start_time
+            
+            # 记录成功
+            if self.enable_health_check:
+                self._record_success()
+            
+            # 汇报代理池
+            if self._proxy_pool and proxy:
+                self._proxy_pool.report_success(proxy, response_time)
+            
+            logger.debug(
+                f"下载完成: {len(content)/1024:.1f}KB in {response_time:.2f}s - {url}"
+            )
+            
+            return content
+            
+        except ValueError:
+            # 大小限制错误，直接抛出
+            raise
+        except Exception as e:
+            logger.error(f"下载异常: {url} - {e}")
+            if self.enable_health_check:
+                self._record_failure(0, str(e))
+            if self._proxy_pool and proxy:
+                self._proxy_pool.report_failure(proxy)
+            raise
+    
+    def download_to_file(
+        self,
+        url: str,
+        file_path: Union[str, Path],
+        params: Optional[Dict] = None,
+        headers: Optional[Dict[str, str]] = None,
+        use_cookies: bool = False,
+        referer: Optional[str] = None,
+        timeout: Optional[int] = None,
+        overwrite: bool = False
+    ) -> bool:
+        """
+        下载文件到磁盘（仅用于需要永久保存的场景）
+        
+        注意：对于即时清洗场景，请使用 get_bytes() 避免磁盘 IO。
+        此方法仅用于：扫描件 PDF 落盘、高价值原始文件存档等。
+        
+        Args:
+            url: 文件 URL
+            file_path: 目标文件路径
+            params: URL 参数
+            headers: 自定义请求头
+            use_cookies: 是否使用 Cookie
+            referer: Referer 头
+            timeout: 超时时间
+            overwrite: 是否覆盖已存在文件
+        
+        Returns:
+            是否下载成功
+        """
+        file_path = Path(file_path)
+        
+        # 检查文件是否已存在
+        if file_path.exists() and not overwrite:
+            logger.debug(f"文件已存在，跳过下载: {file_path}")
+            return True
+        
+        # 获取二进制内容
+        content = self.get_bytes(
+            url, params=params, headers=headers,
+            use_cookies=use_cookies, referer=referer, timeout=timeout
+        )
+        
+        if content is None:
+            return False
+        
+        try:
+            # 确保目录存在
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 写入文件
+            with open(file_path, 'wb') as f:
+                f.write(content)
+            
+            logger.info(f"文件已保存: {file_path} ({len(content)/1024:.1f}KB)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"写入文件失败: {file_path} - {e}")
+            return False
     
     # ============== 浏览器模拟 ==============
     

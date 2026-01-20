@@ -25,6 +25,10 @@ from .base import (
     DateRangeIterator,
     generate_task_id,
     parse_date_range,
+    # 流式采集器（管道化）
+    StreamingCollector,
+    BufferedItem,
+    ContentType,
 )
 
 from .rate_limiter import (
