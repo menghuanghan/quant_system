@@ -5,9 +5,15 @@ PDF 内存解析模块 (PDF Parser)
 
 主要功能：
 1. 内存流包装 - 使用 BytesIO 避免磁盘 IO
-2. 文本流提取 - 使用 pdfplumber 还原物理布局
-3. 页眉页脚去除 - 基于垂直坐标自动过滤
+2. 文本流提取 - 优先使用 PyMuPDF (10-20x 速度)，pdfplumber 作为备选
+3. 页眉页脚去除 - 基于垂直坐标自动过滤（默认 8% top/bottom）
 4. 异常处理 - 捕获加密/损坏 PDF 异常
+5. 扫描件检测 - 文本密度检查（文件 > 500KB 但字符 < 50）
+
+解析器选择：
+- 'pymupdf' (默认): PyMuPDF/fitz，速度极快（10-20x），适合纯文本提取
+- 'pdfplumber': 适合复杂表格场景（但速度慢）
+- 'auto': 自动降级（PyMuPDF → pdfplumber）
 
 设计原则：即时提取（Extract-on-the-fly），不依赖磁盘存储
 """
@@ -15,10 +21,23 @@ PDF 内存解析模块 (PDF Parser)
 import io
 import re
 import logging
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Literal
 from pathlib import Path
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+class PDFBackend(str, Enum):
+    """PDF 解析器后端枚举"""
+    PYMUPDF = 'pymupdf'      # PyMuPDF (fitz) - 快速文本提取
+    PDFPLUMBER = 'pdfplumber'  # pdfplumber - 表格场景
+    AUTO = 'auto'            # 自动降级
+
+
+class ScannedPDFError(Exception):
+    """扫描件 PDF 异常（需要 OCR 处理）"""
+    pass
 
 
 class PDFParser:
@@ -48,21 +67,33 @@ class PDFParser:
     
     def __init__(
         self,
+        backend: str = 'pymupdf',
         header_ratio: float = DEFAULT_HEADER_RATIO,
         footer_ratio: float = DEFAULT_FOOTER_RATIO,
-        remove_header_footer: bool = True
+        remove_header_footer: bool = True,
+        check_scanned: bool = True,
+        scanned_threshold_kb: int = 500,
+        scanned_min_chars: int = 50
     ):
         """
         初始化 PDF 解析器
         
         Args:
+            backend: 解析器后端 ('pymupdf', 'pdfplumber', 'auto')
             header_ratio: 页眉区域占页面高度的比例
             footer_ratio: 页脚区域占页面高度的比例
             remove_header_footer: 是否移除页眉页脚
+            check_scanned: 是否检测扫描件 PDF
+            scanned_threshold_kb: 扫描件检测的文件大小阈值（KB）
+            scanned_min_chars: 扫描件检测的最小字符数阈值
         """
+        self.backend = backend
         self.header_ratio = header_ratio
         self.footer_ratio = footer_ratio
         self.remove_header_footer = remove_header_footer
+        self.check_scanned = check_scanned
+        self.scanned_threshold_kb = scanned_threshold_kb
+        self.scanned_min_chars = scanned_min_chars
         
         # 编译正则
         self._header_footer_patterns = [
@@ -86,6 +117,9 @@ class PDFParser:
         Returns:
             提取的纯文本
             
+        Raises:
+            ScannedPDFError: 检测到扫描件 PDF（需 OCR 处理）
+            
         Examples:
             >>> with open('report.pdf', 'rb') as f:
             ...     pdf_bytes = f.read()
@@ -95,22 +129,41 @@ class PDFParser:
             logger.warning("PDF 内容为空")
             return ""
         
-        try:
-            import pdfplumber
-        except ImportError:
-            logger.error("pdfplumber 未安装，请执行: pip install pdfplumber")
+        # 根据 backend 选择解析方法
+        if self.backend == 'pymupdf':
+            text = self._extract_with_pymupdf(pdf_bytes, max_pages)
+        elif self.backend == 'pdfplumber':
+            text = self._extract_with_pdfplumber(pdf_bytes, max_pages)
+        elif self.backend == 'auto':
+            # 自动降级：PyMuPDF → pdfplumber
+            text = self._extract_with_pymupdf(pdf_bytes, max_pages)
+            if not text:
+                logger.info("PyMuPDF 提取失败，降级到 pdfplumber")
+                text = self._extract_with_pdfplumber(pdf_bytes, max_pages)
+        else:
+            logger.error(f"不支持的解析器后端: {self.backend}")
             return ""
         
-        # 使用 BytesIO 包装二进制数据，避免磁盘 IO
-        pdf_stream = io.BytesIO(pdf_bytes)
+        # 扫描件检测（文本密度检查）
+        if self.check_scanned and text is not None:
+            file_size_kb = len(pdf_bytes) / 1024
+            text_length = len(text.strip())
+            
+            # 判断：文件 > 500KB 但提取字符 < 50 → 扫描件
+            if file_size_kb > self.scanned_threshold_kb and text_length < self.scanned_min_chars:
+                error_msg = (
+                    f"检测到扫描件 PDF: 文件大小 {file_size_kb:.1f} KB，"
+                    f"但仅提取 {text_length} 个字符。需要 OCR 处理。"
+                )
+                logger.warning(error_msg)
+                raise ScannedPDFError(error_msg)
         
-        try:
-            with pdfplumber.open(pdf_stream) as pdf:
-                return self._extract_from_pdf_object(pdf, max_pages, normalize)
-                
-        except Exception as e:
-            logger.warning(f"PDF 解析失败: {type(e).__name__}: {e}")
-            return ""
+        # 可选：应用文本标准化
+        if normalize and text:
+            from .text_utils import normalize_for_storage
+            text = normalize_for_storage(text)
+        
+        return text
     
     def extract_from_file(
         self,
@@ -142,51 +195,120 @@ class PDFParser:
             logger.warning(f"读取 PDF 文件失败: {file_path}, {e}")
             return ""
     
-    def _extract_from_pdf_object(
+    def _extract_with_pymupdf(
         self,
-        pdf,  # pdfplumber.PDF object
-        max_pages: Optional[int],
-        normalize: bool
+        pdf_bytes: bytes,
+        max_pages: Optional[int] = None
     ) -> str:
         """
-        从 pdfplumber PDF 对象提取文本
+        使用 PyMuPDF (fitz) 提取文本（速度快 10-20x）
         
         Args:
-            pdf: pdfplumber.PDF 对象
+            pdf_bytes: PDF 二进制数据
             max_pages: 最大提取页数
-            normalize: 是否进行文本标准化
             
         Returns:
             提取的纯文本
         """
-        pages_to_process = pdf.pages
-        if max_pages:
-            pages_to_process = pages_to_process[:max_pages]
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF 未安装，请执行: pip install pymupdf")
+            return ""
         
-        all_text = []
-        
-        for page_num, page in enumerate(pages_to_process, 1):
-            try:
-                page_text = self._extract_page_text(page)
-                if page_text:
+        try:
+            # 从内存流打开 PDF
+            pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            all_text = []
+            total_pages = len(pdf)
+            pages_to_process = min(total_pages, max_pages) if max_pages else total_pages
+            
+            for page_num in range(pages_to_process):
+                page = pdf[page_num]
+                
+                if self.remove_header_footer:
+                    # 获取页面尺寸
+                    rect = page.rect
+                    page_height = rect.height
+                    
+                    # 计算裁剪区域（排除页眉页脚）
+                    header_y = page_height * self.header_ratio
+                    footer_y = page_height * (1 - self.footer_ratio)
+                    
+                    # 裁剪矩形（left, top, right, bottom）
+                    clip_rect = fitz.Rect(0, header_y, rect.width, footer_y)
+                    
+                    # 提取裁剪区域的文本
+                    page_text = page.get_text(clip=clip_rect)
+                else:
+                    # 提取整页文本
+                    page_text = page.get_text()
+                
+                # 额外过滤页眉页脚关键词
+                page_text = self._filter_header_footer_text(page_text)
+                
+                if page_text and page_text.strip():
                     all_text.append(page_text)
-            except Exception as e:
-                logger.debug(f"第 {page_num} 页提取失败: {e}")
-                continue
-        
-        # 合并所有页面文本
-        text = '\n\n'.join(all_text)
-        
-        # 可选：应用文本标准化
-        if normalize and text:
-            from .text_utils import normalize_for_storage
-            text = normalize_for_storage(text)
-        
-        return text
+            
+            pdf.close()
+            
+            return '\n\n'.join(all_text)
+            
+        except Exception as e:
+            logger.warning(f"PyMuPDF 解析失败: {type(e).__name__}: {e}")
+            return ""
     
-    def _extract_page_text(self, page) -> str:
+    def _extract_with_pdfplumber(
+        self,
+        pdf_bytes: bytes,
+        max_pages: Optional[int] = None
+    ) -> str:
         """
-        提取单页文本，支持页眉页脚过滤
+        使用 pdfplumber 提取文本（适合表格场景）
+        
+        Args:
+            pdf_bytes: PDF 二进制数据
+            max_pages: 最大提取页数
+            
+        Returns:
+            提取的纯文本
+        """
+        try:
+            import pdfplumber
+        except ImportError:
+            logger.error("pdfplumber 未安装，请执行: pip install pdfplumber")
+            return ""
+        
+        # 使用 BytesIO 包装二进制数据，避免磁盘 IO
+        pdf_stream = io.BytesIO(pdf_bytes)
+        
+        try:
+            with pdfplumber.open(pdf_stream) as pdf:
+                pages_to_process = pdf.pages
+                if max_pages:
+                    pages_to_process = pages_to_process[:max_pages]
+                
+                all_text = []
+                
+                for page_num, page in enumerate(pages_to_process, 1):
+                    try:
+                        page_text = self._extract_page_text_pdfplumber(page)
+                        if page_text:
+                            all_text.append(page_text)
+                    except Exception as e:
+                        logger.debug(f"第 {page_num} 页提取失败: {e}")
+                        continue
+                
+                return '\n\n'.join(all_text)
+                
+        except Exception as e:
+            logger.warning(f"pdfplumber 解析失败: {type(e).__name__}: {e}")
+            return ""
+    
+    def _extract_page_text_pdfplumber(self, page) -> str:
+        """
+        使用 pdfplumber 提取单页文本，支持页眉页脚过滤
         
         Args:
             page: pdfplumber.Page 对象
@@ -354,15 +476,20 @@ class PDFExtractorFactory:
             return PDFParser(**kwargs)
 
 
-# 全局单例
+# 全局单例（使用 PyMuPDF 作为默认）
 _default_parser: Optional[PDFParser] = None
 
 
-def get_pdf_parser() -> PDFParser:
-    """获取全局 PDF 解析器单例"""
+def get_pdf_parser(backend: str = 'pymupdf') -> PDFParser:
+    """
+    获取全局 PDF 解析器单例
+    
+    Args:
+        backend: 解析器后端 ('pymupdf', 'pdfplumber', 'auto')
+    """
     global _default_parser
-    if _default_parser is None:
-        _default_parser = PDFParser()
+    if _default_parser is None or _default_parser.backend != backend:
+        _default_parser = PDFParser(backend=backend)
     return _default_parser
 
 
@@ -371,7 +498,9 @@ def extract_text_from_pdf_bytes(
     pdf_bytes: bytes,
     max_pages: Optional[int] = None,
     normalize: bool = True,
-    remove_header_footer: bool = True
+    remove_header_footer: bool = True,
+    backend: str = 'pymupdf',
+    check_scanned: bool = True
 ) -> str:
     """
     从 PDF 二进制数据提取文本（便捷函数）
@@ -383,15 +512,24 @@ def extract_text_from_pdf_bytes(
         max_pages: 最大提取页数
         normalize: 是否进行文本标准化
         remove_header_footer: 是否移除页眉页脚
+        backend: 解析器后端 ('pymupdf', 'pdfplumber', 'auto')
+        check_scanned: 是否检测扫描件
         
     Returns:
         提取的纯文本
+        
+    Raises:
+        ScannedPDFError: 检测到扫描件 PDF（需 OCR 处理）
         
     Examples:
         >>> response = requests.get(pdf_url)
         >>> text = extract_text_from_pdf_bytes(response.content)
     """
-    parser = PDFParser(remove_header_footer=remove_header_footer)
+    parser = PDFParser(
+        backend=backend,
+        remove_header_footer=remove_header_footer,
+        check_scanned=check_scanned
+    )
     return parser.extract_from_bytes(pdf_bytes, max_pages, normalize)
 
 
