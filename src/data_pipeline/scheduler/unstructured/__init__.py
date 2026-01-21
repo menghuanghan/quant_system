@@ -6,29 +6,31 @@
 - 资源编排：内存监控、并发控制、存储限制
 - 策略路由：热/冷数据差异化处理
 - 异常熔断：403/封禁时自动暂停
+- 数据类型选择：支持6种非结构化数据（公告/新闻/研报/舆情/政策/事件）
+- 上下文依赖注入：舆情需要异动表，研报需要股票池
 
 核心组件：
 - CheckpointManager: 状态管理与断点续传
-- UnstructuredHistoryScheduler: 主调度器
-- CollectorRegistry: 采集器注册表
+- EnhancedHistoryScheduler: 增强版主调度器
+- DataType: 数据类型枚举
+- CollectorDefinition: 采集器定义
 
 快速使用：
     >>> from src.data_pipeline.scheduler.unstructured import (
-    ...     UnstructuredHistoryScheduler,
-    ...     run_backfill,
-    ...     get_backfill_progress
+    ...     EnhancedHistoryScheduler,
+    ...     run_full_history,
+    ...     DataType
     ... )
     >>> 
-    >>> # 方式1: 使用调度器对象
-    >>> scheduler = UnstructuredHistoryScheduler()
-    >>> scheduler.register_collector('news', NewsCollector)
-    >>> scheduler.run_backfill(2021, 2025)
+    >>> # 方式1: 采集全部数据
+    >>> scheduler = EnhancedHistoryScheduler()
+    >>> scheduler.run('20240101', '20240331')
     >>> 
-    >>> # 方式2: 快速函数
-    >>> run_backfill(2024, 2025, sources=['news_sina'])
+    >>> # 方式2: 选择性采集
+    >>> scheduler.run('20240101', '20240331', data_types=['news', 'announcements'])
     >>> 
-    >>> # 查看进度
-    >>> progress = get_backfill_progress()
+    >>> # 方式3: 快速函数
+    >>> run_full_history('20240101', '20240331', data_types=['news'])
 """
 
 # 状态管理
@@ -98,6 +100,30 @@ from .history_scheduler import (
     reset_failed_tasks
 )
 
+# 增强版调度器
+from .full_history_scheduler import (
+    EnhancedHistoryScheduler,
+    run_full_history,
+    run_q1_2024,
+    run_news_only,
+    run_announcements_only,
+    ContextManager,
+)
+
+# 数据类型定义
+from .data_types import (
+    DataType,
+    CollectorDefinition,
+    ContextRequirement,
+    get_all_collector_definitions,
+    get_collectors_by_type,
+    get_enabled_collectors,
+    get_collectors_by_names,
+    get_default_context,
+    DataTypeGroup,
+    print_collector_summary,
+)
+
 __all__ = [
     # 状态管理
     'TaskState',
@@ -156,5 +182,25 @@ __all__ = [
     # 便捷函数
     'run_backfill',
     'get_backfill_progress',
-    'reset_failed_tasks'
+    'reset_failed_tasks',
+    
+    # 增强版调度器
+    'EnhancedHistoryScheduler',
+    'run_full_history',
+    'run_q1_2024',
+    'run_news_only',
+    'run_announcements_only',
+    'ContextManager',
+    
+    # 数据类型
+    'DataType',
+    'CollectorDefinition',
+    'ContextRequirement',
+    'get_all_collector_definitions',
+    'get_collectors_by_type',
+    'get_enabled_collectors',
+    'get_collectors_by_names',
+    'get_default_context',
+    'DataTypeGroup',
+    'print_collector_summary',
 ]

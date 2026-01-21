@@ -4,26 +4,22 @@
 核心职责：
 1. 格式标准化 - 将各种格式的原始数据转为统一的纯文本
 2. 内容提取 - 从 PDF/HTML 中提取正文，去除噪音
-3. 元数据清洗 - 时间戳标准化，防止"未来函数"泄露
 
 设计原则：
 - 即时提取（Extract-on-the-fly）：输入是二进制流/字符串，输出是清洗后的纯文本
 - 不依赖磁盘 IO：完全内存操作，支持流式处理
-- 防止数据泄露：时间戳采用保守策略填充（默认盘后17:00）
-- 统一接口：采集器不需要知道底层实现细节
+- 统一接口：采集器不需要知道底层是用 pdfplumber 还是 bs4
 
 模块组成：
-- text_utils.py: 通用文本标准化（Unicode、空白、控制字符、模板移除）
-- pdf_parser.py: PDF 内存解析（PyMuPDF/pdfplumber、页眉页脚过滤、扫描件检测）
-- html_parser.py: HTML 网页清洗（BeautifulSoup、正文密度算法）
-- time_utils.py: 时间元数据标准化（防未来函数、精度检测）
+- text_utils.py: 通用文本标准化（Unicode、空白、控制字符）
+- pdf_parser.py: PDF 内存解析（pdfplumber，页眉页脚过滤）
+- html_parser.py: HTML 网页清洗（BeautifulSoup，正文提取）
 
 使用示例：
     >>> from src.data_pipeline.clean.unstructured import (
     ...     extract_text_from_pdf_bytes,
     ...     extract_text_from_html,
-    ...     normalize_text,
-    ...     standardize_publish_time
+    ...     normalize_text
     ... )
     
     >>> # 从 PDF 提取文本
@@ -36,9 +32,6 @@
     
     >>> # 文本标准化
     >>> text = normalize_text(raw_text)
-    
-    >>> # 时间标准化（防止未来函数）
-    >>> publish_time = standardize_publish_time('2024-01-15')  # → '2024-01-15 17:00:00'
 """
 
 # ============================================================
@@ -73,16 +66,6 @@ from .html_parser import (
     HTMLParser,
     HTMLCleanConfig,
     get_html_parser
-)
-
-# 时间元数据标准化（防止未来函数）
-from .time_utils import (
-    standardize_publish_time,
-    extract_time_from_text,
-    is_future_data,
-    TimeNormalizer,
-    TimeMode,
-    TimeAccuracy
 )
 
 
