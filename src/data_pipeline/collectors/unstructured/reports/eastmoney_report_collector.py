@@ -2,6 +2,10 @@
 东方财富研报采集器
 
 基于 AKShare 接口采集券商研报数据
+
+支持：
+- PDF研报文本即时提取
+- 清洗模块集成
 """
 
 import logging
@@ -12,6 +16,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from ..base import UnstructuredCollector
+from ..cleaning_adapter import CleaningMixin
+from ..request_utils import safe_download_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +43,14 @@ class RatingChange:
     UNKNOWN = "未知"
 
 
-class EastMoneyReportCollector(UnstructuredCollector):
+class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
     """
     东方财富研报采集器
     
     使用AKShare stock_research_report_em接口
+    
+    支持即时PDF文本提取：
+    - collect_with_text(): 采集并即时提取PDF文本
     """
     
     REPORT_FIELDS = [
@@ -58,6 +67,7 @@ class EastMoneyReportCollector(UnstructuredCollector):
         'target_price_high',
         'pub_date',
         'pdf_url',
+        'content',  # 新增：PDF文本内容
         'source',
     ]
     
@@ -291,6 +301,76 @@ class EastMoneyReportCollector(UnstructuredCollector):
                 df[col] = ''
         
         return df[self.REPORT_FIELDS]
+    
+    def collect_with_text(
+        self,
+        start_date: str,
+        end_date: str,
+        stock_codes: Optional[List[str]] = None,
+        max_concurrent: int = 5,
+        **kwargs
+    ) -> pd.DataFrame:
+        """
+        采集研报并即时提取PDF文本
+        
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+            stock_codes: 股票代码列表
+            max_concurrent: 最大并发数
+            
+        Returns:
+            带文本内容的研报DataFrame
+        """
+        # 先采集元数据
+        df = self.collect(start_date, end_date, stock_codes, **kwargs)
+        
+        if df.empty:
+            return df
+        
+        # 提取PDF文本
+        logger.info(f"开始即时提取 {len(df)} 份研报文本...")
+        
+        contents = []
+        success_count = 0
+        fail_count = 0
+        
+        for idx, row in df.iterrows():
+            pdf_url = row.get('pdf_url', '')
+            
+            if not pdf_url or pd.isna(pdf_url):
+                contents.append('')
+                continue
+            
+            try:
+                # 下载PDF
+                pdf_bytes = safe_download_bytes(pdf_url, timeout=30)
+                
+                if pdf_bytes:
+                    # 提取文本
+                    text = self.extract_pdf_text(pdf_bytes)
+                    contents.append(text if text else '')
+                    if text:
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                else:
+                    contents.append('')
+                    fail_count += 1
+                    
+            except Exception as e:
+                logger.debug(f"研报PDF提取失败 {pdf_url}: {e}")
+                contents.append('')
+                fail_count += 1
+            
+            # 进度提示
+            if (idx + 1) % 10 == 0:
+                logger.info(f"已处理 {idx + 1}/{len(df)} 份研报")
+        
+        df['content'] = contents
+        logger.info(f"研报文本提取完成: 成功 {success_count}, 失败 {fail_count}")
+        
+        return df
     
     def collect_market_reports(
         self,

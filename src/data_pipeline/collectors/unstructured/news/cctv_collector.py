@@ -12,6 +12,7 @@ import hashlib
 import pandas as pd
 
 from ..base import UnstructuredCollector, DataSourceType, DateRangeIterator
+from ..cleaning_adapter import CleaningMixin
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class NewsCategory:
     OTHER = "其他"
 
 
-class CCTVNewsCollector(UnstructuredCollector):
+class CCTVNewsCollector(UnstructuredCollector, CleaningMixin):
     """
     央视新闻联播文字稿采集器
     

@@ -16,8 +16,6 @@ from enum import Enum
 
 import pandas as pd
 
-from src.utils.paths import get_event_meta_path, get_event_pdf_path, UnstructuredDataPaths
-
 logger = logging.getLogger(__name__)
 
 
@@ -89,17 +87,31 @@ class BaseEventCollector:
     
     SOURCE = EventSource.CNINFO
     
-    # 使用统一路径管理（保留EVENT_DIRS用于向后兼容）
-    EVENT_DIRS = UnstructuredDataPaths.EVENT_TYPE_DIRS
+    # 数据存储路径
+    DATA_DIR = Path("data/raw/unstructured/events")
+    
+    # 事件类型对应的存储目录
+    EVENT_DIRS = {
+        EventType.MERGER.value: 'merger_acquisition',
+        EventType.PENALTY.value: 'penalty',
+        EventType.CONTROL_CHANGE.value: 'control_change',
+        EventType.MAJOR_CONTRACT.value: 'contract',
+        EventType.EQUITY_CHANGE.value: 'equity_change',
+        EventType.LITIGATION.value: 'litigation',
+        EventType.BANKRUPTCY.value: 'bankruptcy',
+        EventType.SUSPENSION.value: 'suspension',
+        EventType.OTHER.value: 'other',
+    }
     
     def __init__(self):
         self._ensure_dirs()
         self._existing_ids = set()
     
     def _ensure_dirs(self):
-        """确保存储目录存在（路径管理器会自动创建目录）"""
-        # 路径管理器在调用时会自动创建目录，这里只需创建meta基础目录
-        get_event_meta_path()
+        """确保存储目录存在"""
+        for event_dir in self.EVENT_DIRS.values():
+            (self.DATA_DIR / event_dir).mkdir(parents=True, exist_ok=True)
+        (self.DATA_DIR / 'meta').mkdir(parents=True, exist_ok=True)
     
     def collect(
         self,
@@ -138,21 +150,21 @@ class BaseEventCollector:
         ann_date: str
     ) -> Path:
         """
-        生成PDF存储路径（使用统一路径管理器）
+        生成PDF存储路径
         
-        路径格式: data/raw/unstructured/events/{event_dir}/{year}/{filename}
+        路径格式: data/raw/events/{event_type}/{year}/{ts_code}_{safe_title}.pdf
         """
+        # 获取事件目录
+        event_dir = self.EVENT_DIRS.get(event_type, 'other')
+        
+        # 提取年份
+        year = ann_date[:4] if ann_date else datetime.now().strftime('%Y')
+        
         # 安全文件名
         safe_title = re.sub(r'[\\/:*?"<>|]', '', title)[:50]
         filename = f"{ts_code.replace('.', '_')}_{safe_title}.pdf"
         
-        # 使用统一路径管理器
-        return get_event_pdf_path(
-            event_type=event_type,
-            ts_code=ts_code,
-            ann_date=ann_date,
-            filename=filename
-        )
+        return self.DATA_DIR / event_dir / year / filename
     
     def _download_pdf(self, url: str, save_path: Path, timeout: int = 60) -> bool:
         """下载PDF文件"""
@@ -185,13 +197,11 @@ class BaseEventCollector:
         return False
     
     def _load_existing_ids(self, event_type: Optional[str] = None) -> set:
-        """加载已有事件ID用于去重（使用统一路径管理）"""
+        """加载已有事件ID用于去重"""
         existing_ids = set()
         
-        # 使用统一路径管理器获取meta目录
-        meta_base_path = get_event_meta_path(event_type=event_type)
-        meta_dir = meta_base_path.parent
-        
+        # 从元数据文件加载
+        meta_dir = self.DATA_DIR / 'meta'
         if meta_dir.exists():
             for meta_file in meta_dir.glob('*.jsonl'):
                 try:
@@ -208,16 +218,14 @@ class BaseEventCollector:
         return existing_ids
     
     def _save_metadata(self, events: List[EventDocument], filename: Optional[str] = None):
-        """保存事件元数据（使用统一路径管理）"""
+        """保存事件元数据"""
         if not events:
             return
         
         if not filename:
             filename = f"{self.SOURCE.value}_{datetime.now().strftime('%Y%m%d')}.jsonl"
         
-        # 使用统一路径管理器
-        meta_path = get_event_meta_path().parent / filename
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta_path = self.DATA_DIR / 'meta' / filename
         
         import json
         with open(meta_path, 'a', encoding='utf-8') as f:

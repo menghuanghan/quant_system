@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RateLimitConfig:
     """速率限制配置"""
-    requests_per_second: float = 1.0    # 每秒请求数
+    requests_per_second: float = 2.0    # 每秒请求数（提高到2）
     burst_size: int = 5                  # 突发请求数
-    min_interval: float = 0.5            # 最小请求间隔（秒）
+    min_interval: float = 0.3            # 最小请求间隔（秒，降低到0.3）
     max_interval: float = 60.0           # 最大请求间隔（秒）
     backoff_factor: float = 2.0          # 退避因子
     recovery_factor: float = 0.9         # 恢复因子
@@ -37,7 +37,7 @@ class RateLimitConfig:
     error_rate_threshold: float = 0.1    # 错误率阈值（超过则退避）
     success_rate_threshold: float = 0.95 # 成功率阈值（超过则恢复）
     window_size: int = 100               # 滑动窗口大小
-    warmup_requests: int = 10            # 预热请求数
+    warmup_requests: int = 5             # 预热请求数（降低到5）
     jitter_factor: float = 0.2           # 抖动因子（防止惊群效应）
 
 
@@ -494,9 +494,9 @@ class SmartRateLimiter(RateLimiter):
         # 预热进度 (0.0 ~ 1.0)
         progress = min(stats.total_requests / config.warmup_requests, 1.0)
         
-        # 从 3x 目标间隔 逐渐降到 1x 目标间隔
+        # 从 1.5x 目标间隔 逐渐降到 1x 目标间隔（优化：降低预热倍数）
         target_interval = 1.0 / config.requests_per_second
-        warmup_interval = target_interval * (3 - 2 * progress)
+        warmup_interval = target_interval * (1.5 - 0.5 * progress)
         
         if progress >= 1.0:
             stats.warmup_completed = True

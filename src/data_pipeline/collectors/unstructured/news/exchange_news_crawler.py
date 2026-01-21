@@ -12,12 +12,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from ..base import UnstructuredCollector
+from ..cleaning_adapter import CleaningMixin
 from .cctv_collector import NewsCategory
 
 logger = logging.getLogger(__name__)
 
 
-class ExchangeNewsCrawler(UnstructuredCollector):
+class ExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
     """
     交易所公告采集器
     
@@ -95,7 +96,7 @@ class ExchangeNewsCrawler(UnstructuredCollector):
     
     def _collect_by_date(self, date_str: str) -> pd.DataFrame:
         """
-        采集单日公告
+        采集单日公告（带重试机制）
         
         Args:
             date_str: 日期（YYYYMMDD格式）
@@ -103,22 +104,34 @@ class ExchangeNewsCrawler(UnstructuredCollector):
         Returns:
             公告DataFrame
         """
-        try:
-            df = self.ak.stock_notice_report(symbol='全部', date=date_str)
-            
-            if df is None or df.empty:
+        max_retries = 3
+        retry_delay = 2  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                df = self.ak.stock_notice_report(symbol='全部', date=date_str)
+                
+                if df is None or df.empty:
+                    return pd.DataFrame()
+                
+                # 映射字段
+                result = self._map_fields(df, date_str)
+                
+                return result
+                
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                # 周末或节假日可能没有公告
+                if "无数据" not in str(e) and "empty" not in str(e).lower():
+                    logger.debug(f"采集 {date_str} 公告失败 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(retry_delay)
+                        continue
                 return pd.DataFrame()
-            
-            # 映射字段
-            result = self._map_fields(df, date_str)
-            
-            return result
-            
-        except Exception as e:
-            # 周末或节假日可能没有公告
-            if "无数据" not in str(e) and "empty" not in str(e).lower():
-                logger.debug(f"采集 {date_str} 公告: {e}")
-            return pd.DataFrame()
+        
+        return pd.DataFrame()
     
     def _map_fields(self, df: pd.DataFrame, date_str: str) -> pd.DataFrame:
         """映射字段到标准格式"""

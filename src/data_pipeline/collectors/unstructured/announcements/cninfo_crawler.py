@@ -5,6 +5,7 @@
 - 支持按股票代码采集
 - 支持按日期范围采集
 - 支持公告PDF下载
+- 支持即时文本提取（Extract-on-the-fly）
 - 内置反爬策略
 """
 
@@ -30,19 +31,22 @@ from ..base import (
 from ..request_utils import (
     safe_request,
     safe_download_file,
+    safe_download_bytes,
     RequestSession,
     RequestDisguiser
 )
 from ..rate_limiter import get_rate_limiter
+from ..cleaning_adapter import CleaningMixin
 
 logger = logging.getLogger(__name__)
 
 
-class CninfoAnnouncementCrawler(UnstructuredCollector):
+class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
     """
     巨潮资讯公告爬虫
     
     作为核心数据源，从巨潮资讯网采集公告
+    支持即时文本提取，无需存储PDF原文件
     """
     
     # API 端点
@@ -326,7 +330,7 @@ class CninfoAnnouncementCrawler(UnstructuredCollector):
                     'Origin': 'http://www.cninfo.com.cn',
                 }),
                 use_proxy=self._use_proxy,
-                rate_limit=True
+                rate_limit=False  # 临时禁用以加快测试
             )
             
             if response is None:
@@ -611,6 +615,139 @@ class CninfoAnnouncementCrawler(UnstructuredCollector):
         except Exception as e:
             logger.error(f"解析股票列表失败: {e}")
             return pd.DataFrame()
+    
+    # ==================== 即时提取方法 ====================
+    
+    def extract_announcement_text(
+        self,
+        url: str,
+        max_pages: int = 200
+    ) -> str:
+        """
+        即时提取单个公告的文本内容
+        
+        Args:
+            url: 公告PDF的URL
+            max_pages: 最大解析页数
+            
+        Returns:
+            提取的文本内容
+        """
+        if not url:
+            return ""
+        
+        # 下载PDF到内存
+        pdf_bytes = safe_download_bytes(url, use_proxy=self._use_proxy, rate_limit=False)
+        
+        if not pdf_bytes:
+            logger.warning(f"PDF下载失败: {url}")
+            return ""
+        
+        # 检测是否为扫描件
+        if self.is_pdf_scanned(pdf_bytes):
+            logger.info(f"检测到扫描件，跳过文本提取: {url}")
+            return "[SCANNED_PDF]"
+        
+        # 即时提取文本
+        text = self.extract_pdf_text(pdf_bytes, max_pages=max_pages)
+        return text
+    
+    def collect_with_text(
+        self,
+        start_date: str,
+        end_date: str,
+        stock_codes: Optional[List[str]] = None,
+        categories: Optional[List[str]] = None,
+        exchanges: Optional[List[str]] = None,
+        extract_text: bool = True,
+        max_pdf_pages: int = 200,
+        **kwargs
+    ) -> pd.DataFrame:
+        """
+        采集公告并即时提取文本（推荐方法）
+        
+        Args:
+            start_date: 开始日期（YYYY-MM-DD）
+            end_date: 结束日期（YYYY-MM-DD）
+            stock_codes: 股票代码列表
+            categories: 公告类型列表
+            exchanges: 交易所列表
+            extract_text: 是否提取文本
+            max_pdf_pages: PDF最大解析页数
+        
+        Returns:
+            包含 content 字段的公告DataFrame
+        """
+        # 先采集元数据
+        df = self.collect(
+            start_date=start_date,
+            end_date=end_date,
+            stock_codes=stock_codes,
+            categories=categories,
+            exchanges=exchanges,
+            **kwargs
+        )
+        
+        if df.empty:
+            return df
+        
+        if not extract_text:
+            df['content'] = ''
+            df['is_scanned'] = False
+            return df
+        
+        # 即时提取文本
+        logger.info(f"开始即时提取 {len(df)} 份公告文本...")
+        
+        contents = []
+        is_scanned_list = []
+        
+        for idx, row in df.iterrows():
+            url = row.get('url', '')
+            
+            if not url:
+                contents.append('')
+                is_scanned_list.append(False)
+                continue
+            
+            try:
+                # 下载PDF
+                pdf_bytes = safe_download_bytes(url, use_proxy=self._use_proxy, rate_limit=False)
+                
+                if not pdf_bytes:
+                    contents.append('')
+                    is_scanned_list.append(False)
+                    continue
+                
+                # 检测扫描件
+                scanned = self.is_pdf_scanned(pdf_bytes)
+                is_scanned_list.append(scanned)
+                
+                if scanned:
+                    contents.append('[SCANNED_PDF]')
+                    continue
+                
+                # 提取文本
+                text = self.extract_pdf_text(pdf_bytes, max_pages=max_pdf_pages)
+                contents.append(text)
+                
+                if (idx + 1) % 10 == 0:
+                    logger.info(f"已处理 {idx + 1}/{len(df)} 份公告")
+                    
+            except Exception as e:
+                logger.warning(f"处理公告失败 {row.get('title', '')}: {e}")
+                contents.append('')
+                is_scanned_list.append(False)
+        
+        df['content'] = contents
+        df['is_scanned'] = is_scanned_list
+        
+        # 统计
+        text_count = sum(1 for c in contents if c and c != '[SCANNED_PDF]')
+        scanned_count = sum(is_scanned_list)
+        logger.info(f"文本提取完成: 成功 {text_count}, 扫描件 {scanned_count}, 失败 {len(df) - text_count - scanned_count}")
+        
+        return df
 
 
 # 便捷函数
@@ -652,4 +789,44 @@ def get_cninfo_announcements(
         stock_codes=stock_codes,
         categories=categories,
         exchanges=exchanges
+    )
+
+
+def get_cninfo_announcements_with_text(
+    start_date: str,
+    end_date: str,
+    stock_codes: Optional[List[str]] = None,
+    categories: Optional[List[str]] = None,
+    exchanges: Optional[List[str]] = None,
+    use_proxy: bool = False,
+    max_pdf_pages: int = 200
+) -> pd.DataFrame:
+    """
+    从巨潮资讯获取公告数据并提取文本（推荐用于 ETL 管道）
+    
+    Args:
+        start_date: 开始日期（YYYY-MM-DD）
+        end_date: 结束日期（YYYY-MM-DD）
+        stock_codes: 股票代码列表
+        categories: 公告类型列表
+        exchanges: 交易所列表
+        use_proxy: 是否使用代理
+        max_pdf_pages: PDF 最大解析页数
+    
+    Returns:
+        包含 content 字段的公告数据DataFrame
+    
+    Example:
+        >>> df = get_cninfo_announcements_with_text('2024-01-01', '2024-01-31')
+        >>> df[['ts_code', 'title', 'content']].head()
+    """
+    crawler = CninfoAnnouncementCrawler(use_proxy=use_proxy)
+    return crawler.collect_with_text(
+        start_date=start_date,
+        end_date=end_date,
+        stock_codes=stock_codes,
+        categories=categories,
+        exchanges=exchanges,
+        extract_text=True,
+        max_pdf_pages=max_pdf_pages
     )
