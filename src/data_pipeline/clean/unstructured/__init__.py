@@ -43,7 +43,6 @@ from .text_utils import (
     normalize_text,
     normalize_for_nlp,
     normalize_for_storage,
-    normalize_for_announcement,  # 新增：公告专用
     TextNormalizer
 )
 
@@ -53,8 +52,6 @@ from .pdf_parser import (
     extract_text_from_pdf_file,
     is_scanned_pdf,
     PDFParser,
-    ScannedPDFError,  # 新增：扫描件异常
-    PDFBackend,  # 新增：解析器枚举
     get_pdf_parser
 )
 

@@ -224,92 +224,6 @@ class TextNormalizer:
         return text
     
     @staticmethod
-    def normalize_amounts(text: str) -> str:
-        """
-        标准化金额表达
-        
-        处理规则：
-        1. 移除金额中的空格：10 亿 -> 10亿
-        2. 统一单位格式：100000万元 -> 10亿元
-        
-        Args:
-            text: 原始文本
-            
-        Returns:
-            处理后的文本
-        """
-        if not text:
-            return ""
-        
-        # 移除数字和单位之间的空格
-        # 10 亿元 -> 10亿元
-        text = re.sub(
-            r'(\d+(?:[,，]\d{3})*(?:\.\d+)?)\s+([\u4ebf万千百元])',
-            r'\1\2',
-            text
-        )
-        
-        # 移除数字内部的空格
-        # 1 000 000 -> 1000000
-        text = re.sub(
-            r'(\d)\s+(\d)',
-            r'\1\2',
-            text
-        )
-        
-        # 可选：单位转换（100000万 -> 10亿）
-        # 注：这个较复杂，可能影响原始数据，默认关闭
-        # 如果需要，可以在这里添加逻辑
-        
-        return text
-    
-    # 常见公告模板文本（法定废话）
-    TEMPLATE_PATTERNS = [
-        # 董事会声明
-        r'本公司（及）?董事会(全体)?成员保证.{0,200}信息披露.{0,50}不存在.{0,50}虚假记载.{0,50}误导性陈述.{0,50}重大遮漏',
-        # 监事会声明
-        r'本公司监事会及全体监事保证.{0,100}真实.{0,20}准确.{0,20}完整',
-        # 特别提示
-        r'特别提示：?本报告.{0,100}投资者阅读',
-        # 项目编号、备案号
-        r'[（(]项目编号[::：].{0,50}[）)]',
-        r'[（(]备案号[::：].{0,50}[）)]',
-        # 公司地址/电话模板
-        r'公司地址[::：].{0,100}(?:邮编|电话|网址)',
-        r'联系电话[::：].{0,50}(?:传真|邮编)',
-        # 版权声明
-        r'版权所有.{0,50}保留一切权利',
-    ]
-    
-    @classmethod
-    def remove_template_text(cls, text: str) -> str:
-        """
-        移除公告模板文本（法定废话）
-        
-        移除常见的：
-        - 董事会声明："本公司及董事会全体成员保证..."
-        - 监事会声明
-        - 版权信息
-        - 项目编号
-        
-        Args:
-            text: 原始文本
-            
-        Returns:
-            移除模板后的文本
-        """
-        if not text:
-            return ""
-        
-        for pattern in cls.TEMPLATE_PATTERNS:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-        
-        # 移除空行
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        return text.strip()
-    
-    @staticmethod
     def remove_special_markers(text: str) -> str:
         """
         移除特殊标记
@@ -349,8 +263,6 @@ class TextNormalizer:
         normalize_punct: bool = False,
         normalize_nums: bool = False,
         normalize_date: bool = False,
-        normalize_amount: bool = False,
-        remove_template: bool = False,
         remove_markers: bool = False
     ) -> str:
         """
@@ -367,8 +279,6 @@ class TextNormalizer:
             normalize_punct: 是否标准化标点（中转英）
             normalize_nums: 是否标准化数字
             normalize_date: 是否标准化日期
-            normalize_amount: 是否标准化金额
-            remove_template: 是否移除模板文本
             remove_markers: 是否移除特殊标记
             
         Returns:
@@ -385,35 +295,27 @@ class TextNormalizer:
         if remove_control:
             text = cls.remove_control_chars(text)
         
-        # 3. 移除模板文本（在标点化之前）
-        if remove_template:
-            text = cls.remove_template_text(text)
-        
-        # 4. 标点标准化
+        # 3. 标点标准化
         if normalize_punct:
             text = cls.normalize_punctuation(text, to_english=True)
         
-        # 5. 数字标准化
+        # 4. 数字标准化
         if normalize_nums:
             text = cls.normalize_numbers(text)
         
-        # 6. 日期标准化
+        # 5. 日期标准化
         if normalize_date:
             text = cls.normalize_dates(text)
         
-        # 7. 金额标准化
-        if normalize_amount:
-            text = cls.normalize_amounts(text)
-        
-        # 8. 移除特殊标记
+        # 6. 移除特殊标记
         if remove_markers:
             text = cls.remove_special_markers(text)
         
-        # 9. 空白折叠（最后执行）
+        # 7. 空白折叠（最后执行）
         if collapse_space:
             text = cls.collapse_whitespace(text, preserve_newlines)
         
-        return text.strip()
+        return text
 
 
 # 便捷函数
@@ -449,36 +351,7 @@ def normalize_text(
         normalize_punct=False,  # 保留原始标点风格
         normalize_nums=aggressive,
         normalize_date=aggressive,
-        normalize_amount=aggressive,
-        remove_template=False,  # 模板移除默认关闭
         remove_markers=aggressive
-    )
-
-
-def normalize_for_announcement(text: str) -> str:
-    """
-    为公告文本准备的标准化
-    
-    启用模板文本移除，去除董事会声明等法定废话
-    
-    Args:
-        text: 原始公告文本
-        
-    Returns:
-        标准化后的文本
-    """
-    return TextNormalizer.normalize(
-        text,
-        unicode_normalize=True,
-        remove_control=True,
-        collapse_space=True,
-        preserve_newlines=True,
-        normalize_punct=False,
-        normalize_nums=False,
-        normalize_date=False,
-        normalize_amount=True,  # 处理金额
-        remove_template=True,   # 移除模板
-        remove_markers=True
     )
 
 

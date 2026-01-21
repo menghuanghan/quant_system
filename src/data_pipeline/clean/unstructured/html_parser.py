@@ -111,9 +111,6 @@ class HTMLParser:
         'remove': ['.related-post', '.ad-wrapper']
     }
     
-    # 中文标点符号（用于密度计算）
-    CHINESE_PUNCTUATION = '。，；：“”‘’【】、？！'
-    
     def __init__(self, config: Optional[HTMLCleanConfig] = None):
         """
         初始化 HTML 清洗器
@@ -128,54 +125,6 @@ class HTMLParser:
             re.compile(pattern, re.IGNORECASE | re.DOTALL)
             for pattern in self.NOISE_PATTERNS
         ]
-    
-    def _calculate_text_density(self, element) -> float:
-        """
-        计算元素的中文文本密度
-        
-        密度定义：中文标点数 / (标签数 + 1)
-        原理：正文区域通常有更多的句子（标点）而更少的 HTML 标签
-        
-        Args:
-            element: BeautifulSoup 元素
-            
-        Returns:
-            文本密度值
-        """
-        if element is None:
-            return 0.0
-        
-        # 统计中文标点数
-        text = element.get_text()
-        punctuation_count = sum(1 for char in text if char in self.CHINESE_PUNCTUATION)
-        
-        # 统计嵌套标签数
-        tag_count = len(element.find_all(True)) + 1
-        
-        # 计算密度
-        density = punctuation_count / tag_count if tag_count > 0 else 0.0
-        
-        return density
-    
-    def _calculate_paragraph_density(self, element) -> float:
-        """
-        计算元素的<p>标签密度
-        
-        密度定义：<p>标签数 / (所有标签数 + 1)
-        
-        Args:
-            element: BeautifulSoup 元素
-            
-        Returns:
-            <p>标签密度
-        """
-        if element is None:
-            return 0.0
-        
-        p_count = len(element.find_all('p'))
-        total_count = len(element.find_all(True)) + 1
-        
-        return p_count / total_count if total_count > 0 else 0.0
     
     def extract_text(
         self,
@@ -349,13 +298,7 @@ class HTMLParser:
     
     def _find_content_container(self, soup):
         """
-        查找正文容器元素（使用文本密度算法）
-        
-        策略：
-        1. 优先查找 article/main 标签
-        2. 通过 class 关键词查找候选元素
-        3. 使用中文标点密度识别正文区域
-        4. 降级：<p>标签密度
+        查找正文容器元素
         
         Args:
             soup: BeautifulSoup 对象
@@ -372,75 +315,47 @@ class HTMLParser:
                 return [classes]
             return classes
         
-        # 方法1：查找 article 标签
-        article = soup.find('article')
-        if article:
-            text_len = len(article.get_text(strip=True))
-            if text_len >= self.config.min_content_length:
-                return article
-        
-        # 方法2：查找 main 标签
-        main = soup.find('main')
-        if main:
-            text_len = len(main.get_text(strip=True))
-            if text_len >= self.config.min_content_length:
-                return main
-        
-        # 方法3：通过 class 关键词查找候选元素
-        candidates = []
-        
+        # 方法1：通过 class 关键词查找
         for keyword in self.config.content_class_keywords:
+            # class 包含关键词
             elems = soup.find_all(
-                lambda tag: tag.name in ['div', 'section'] and
+                lambda tag: tag.name in ['div', 'article', 'section', 'main'] and
                 any(keyword in c.lower() for c in get_classes(tag))
             )
-            candidates.extend(elems)
+            if elems:
+                # 选择文本最长的那个
+                return max(elems, key=lambda e: len(e.get_text()))
         
-        # 方法4：添加所有 div 作为候选
-        all_divs = soup.find_all('div')
-        candidates.extend(all_divs)
+        # 方法2：查找 article 标签
+        article = soup.find('article')
+        if article:
+            return article
         
-        # 去重
-        candidates = list(set(candidates))
+        # 方法3：查找 main 标签
+        main = soup.find('main')
+        if main:
+            return main
         
-        if not candidates:
-            return None
+        # 方法4：查找文本最密集的 div
+        divs = soup.find_all('div')
+        if divs:
+            # 计算文本密度（文本长度 / 标签数量）
+            best_div = None
+            best_density = 0
+            
+            for div in divs:
+                text_len = len(div.get_text(strip=True))
+                tag_count = len(div.find_all(True)) + 1
+                density = text_len / tag_count if tag_count > 0 else 0
+                
+                # 排除太短的文本
+                if text_len >= self.config.min_content_length and density > best_density:
+                    best_density = density
+                    best_div = div
+            
+            return best_div
         
-        # 使用综合评分选择最佳候选
-        best_element = None
-        best_score = 0
-        
-        for elem in candidates:
-            text = elem.get_text(strip=True)
-            text_len = len(text)
-            
-            # 过滤太短的元素
-            if text_len < self.config.min_content_length:
-                continue
-            
-            # 计算综合评分
-            # 1. 中文标点密度（权重 0.5）
-            text_density = self._calculate_text_density(elem)
-            
-            # 2. <p>标签密度（权重 0.3）
-            p_density = self._calculate_paragraph_density(elem)
-            
-            # 3. 文本长度加分（权重 0.2）
-            # 正规化到 [0, 1]，假设 5000 字为满分
-            length_score = min(text_len / 5000, 1.0)
-            
-            # 综合评分
-            score = (
-                text_density * 0.5 +
-                p_density * 0.3 +
-                length_score * 0.2
-            )
-            
-            if score > best_score:
-                best_score = score
-                best_element = elem
-        
-        return best_element
+        return None
     
     def _extract_text_from_element(self, elem) -> str:
         """
