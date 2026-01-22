@@ -34,12 +34,6 @@ class PolicySource(Enum):
     CSRC = "csrc"              # 证监会
     GOV = "gov"                # 国务院
     NDRC = "ndrc"              # 发改委
-    SSE = "sse"                # 上交所
-    SZSE = "szse"              # 深交所
-    MIIT = "miit"              # 工信部
-    MOF = "mof"                # 财政部
-    PBOC = "pboc"              # 央行
-    EASTMONEY = "eastmoney"    # 东方财富聚合
     OTHER = "other"            # 其他
 
 
@@ -201,7 +195,7 @@ class BasePolicyCollector(UnstructuredCollector):
         
         # 常见日期格式
         patterns = [
-            r'(\d{4})\s*[-年.]\s*(\d{1,2})\s*[-月.]\s*(\d{1,2})\s*日?',
+            r'(\d{4})\s*[-年./]\s*(\d{1,2})\s*[-月./]\s*(\d{1,2})\s*日?',
             r'(\d{4})(\d{2})(\d{2})',
         ]
         
@@ -427,8 +421,5 @@ def get_policy_collector(source: Union[str, PolicySource]) -> BasePolicyCollecto
     elif source == PolicySource.NDRC:
         from .gov_council import NDRCCollector
         return NDRCCollector()
-    elif source == PolicySource.EASTMONEY:
-        from .eastmoney_center import EastMoneyPolicyCollector
-        return EastMoneyPolicyCollector()
     else:
         raise ValueError(f"不支持的政策来源: {source}")

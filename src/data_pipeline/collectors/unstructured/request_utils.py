@@ -379,6 +379,82 @@ def safe_download_file(
         return False
 
 
+def safe_download_bytes(
+    url: str,
+    headers: Optional[Dict] = None,
+    timeout: int = 30,
+    max_retries: int = 3,
+    use_proxy: bool = False,
+    rate_limit: bool = True
+) -> Optional[bytes]:
+    """
+    更安全的下载函数，返回字节数据
+    
+    特别针对PDF进行优化：
+    - 添加浏览器User-Agent
+    - 添加Referer头
+    - 处理Content-Range请求
+    
+    Args:
+        url: 下载链接
+        headers: 额外的请求头
+        timeout: 超时时间
+        max_retries: 最大重试次数
+        use_proxy: 是否使用代理
+        rate_limit: 是否限速
+        
+    Returns:
+        文件内容的字节数据，失败返回None
+    """
+    try:
+        # 为PDF添加特殊请求头
+        disguiser = RequestDisguiser()
+        custom_headers = disguiser.get_headers()
+        
+        # 添加PDF特定的请求头
+        custom_headers.update({
+            'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Range': 'bytes=0-'  # 支持断点续传
+        })
+        
+        # 合并用户提供的请求头
+        if headers:
+            custom_headers.update(headers)
+        
+        response = safe_request(
+            url,
+            headers=custom_headers,
+            timeout=timeout,
+            max_retries=max_retries,
+            use_proxy=use_proxy,
+            rate_limit=rate_limit
+        )
+        
+        if response and response.status_code in [200, 206]:  # 206是Range请求成功
+            content = response.content
+            
+            # 基本验证：检查是否是PDF
+            if content.startswith(b'%PDF'):
+                return content
+            # 如果不是PDF但返回了数据，也返回（可能被gzip压缩）
+            elif len(content) > 100:
+                return content
+            else:
+                logger.warning(f"下载内容过短或非PDF格式: {url}")
+                return None
+        
+        logger.error(f"HTTP {response.status_code}: {url}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"下载字节失败: {url} - {e}")
+        return None
+
+
 def generate_file_hash(content: bytes) -> str:
     """生成内容的MD5哈希"""
     return hashlib.md5(content).hexdigest()

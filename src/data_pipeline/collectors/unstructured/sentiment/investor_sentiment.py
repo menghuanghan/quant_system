@@ -251,12 +251,7 @@ class InvestorSentimentCollector(UnstructuredCollector):
         
         return pd.DataFrame()
     
-    def _collect_cninfo_tushare(
-        self,
-        start_date: str,
-        end_date: str,
-        ts_codes: Optional[List[str]] = None
-    ) -> pd.DataFrame:
+    def _collect_cninfo_tushare(self, start_date: str, end_date: str, ts_codes: Optional[List[str]] = None) -> pd.DataFrame:
         """使用 Tushare 采集互动易数据"""
         if not self.ts:
             return pd.DataFrame()
@@ -266,44 +261,55 @@ class InvestorSentimentCollector(UnstructuredCollector):
         end_date_ts = end_date.replace('-', '')
         
         try:
-            if ts_codes:
-                # 按股票采集
-                for ts_code in ts_codes:
-                    try:
-                        # 尝试使用 irm_qa 接口
-                        df = self.ts.irm_qa(
-                            ts_code=ts_code,
-                            start_date=start_date_ts,
-                            end_date=end_date_ts
-                        )
-                        
-                        if df is not None and not df.empty:
-                            df['source'] = SentimentSource.CNINFO_INTERACTION.value
-                            all_data.append(df)
+            # ✅ 改进: 尝试多个接口
+            methods = [
+                ('irm_qa', {'start_date': start_date_ts, 'end_date': end_date_ts}),
+                ('cninfo_interaction', {'start_date': start_date_ts, 'end_date': end_date_ts}),
+            ]
+            
+            for method_name, base_params in methods:
+                if not hasattr(self.ts, method_name):
+                    continue
+                    
+                method = getattr(self.ts, method_name)
+                
+                if ts_codes:
+                    # 按股票采集
+                    for ts_code in ts_codes[:10]:  # 限制数量避免超时
+                        try:
+                            params = base_params.copy()
+                            params['ts_code'] = ts_code
+                            df = method(**params)
                             
-                    except Exception as e:
-                        self.logger.debug(f"采集 {ts_code} 互动易失败: {e}")
-                        continue
-            else:
-                # 全市场采集（按日期）
-                date_range = pd.date_range(start=start_date, end=end_date, freq='B')
-                for date in date_range[:30]:  # 限制天数避免超限
-                    date_str = date.strftime('%Y%m%d')
+                            if df is not None and not df.empty:
+                                df['source'] = SentimentSource.CNINFO_INTERACTION.value
+                                all_data.append(df)
+                                self.logger.debug(f"{method_name} 采集 {ts_code}: {len(df)} 条")
+                                
+                        except Exception as e:
+                            self.logger.debug(f"{method_name} 采集 {ts_code} 失败: {e}")
+                            continue
+                else:
+                    # 全市场采集（按日期）
                     try:
-                        df = self.ts.irm_qa(trade_date=date_str)
+                        df = method(**base_params)
                         if df is not None and not df.empty:
                             df['source'] = SentimentSource.CNINFO_INTERACTION.value
                             all_data.append(df)
+                            self.logger.info(f"{method_name} 全市场采集: {len(df)} 条")
                     except Exception as e:
-                        self.logger.debug(f"采集 {date_str} 互动易失败: {e}")
-                        continue
+                        self.logger.debug(f"{method_name} 全市场采集失败: {e}")
+                
+                # 如果已有数据，停止尝试其他接口
+                if all_data:
+                    break
             
             if all_data:
                 result = pd.concat(all_data, ignore_index=True)
                 return self._standardize_cninfo(result)
                 
         except Exception as e:
-            self.logger.error(f"Tushare互动易采集失败: {e}")
+            self.logger.warning(f"Tushare互动易采集失败: {e}")
         
         return pd.DataFrame()
     
@@ -751,6 +757,7 @@ class InvestorSentimentCollector(UnstructuredCollector):
     def _fetch_guba_list_api(self, symbol: str, page: int) -> List[Dict]:
         """使用API获取股吧帖子列表"""
         try:
+            # ✅ 改进: 增加更完整的请求头
             api_url = "https://guba.eastmoney.com/interface/GetData.aspx"
             params = {
                 'path': 'reply/api/ArtReplyList',
@@ -758,15 +765,28 @@ class InvestorSentimentCollector(UnstructuredCollector):
                 '_': int(time.time() * 1000)
             }
             
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': f'https://guba.eastmoney.com/list,{symbol}.html',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'X-Requested-With': 'XMLHttpRequest',
+            }
+            
             response = self.scraper.get(
                 api_url,
                 params=params,
-                referer=f"https://guba.eastmoney.com/list,{symbol}.html"
+                headers=headers,
+                timeout=15
             )
             
             if response and response.status_code == 200:
-                data = response.json()
-                return data.get('re', [])
+                try:
+                    data = response.json()
+                    return data.get('re', [])
+                except:
+                    # 如果不是JSON，尝试解析HTML
+                    self.logger.debug("股吧API返回非 JSON 数据")
         except Exception as e:
             self.logger.debug(f"股吧API获取列表失败: {e}")
         

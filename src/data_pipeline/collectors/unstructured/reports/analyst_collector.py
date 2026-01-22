@@ -71,7 +71,9 @@ class AnalystCollector(UnstructuredCollector):
                 return pd.DataFrame(columns=self.ANALYST_FIELDS)
             
             # 映射字段
-            result = self._map_analyst_fields(df)
+            if year:
+                kwargs['year'] = year
+            result = self._map_analyst_fields(df, **kwargs)
             
             logger.info(f"采集分析师排名: {len(result)} 条")
             
@@ -81,7 +83,7 @@ class AnalystCollector(UnstructuredCollector):
             logger.warning(f"采集分析师排名失败: {e}")
             return pd.DataFrame(columns=self.ANALYST_FIELDS)
     
-    def _map_analyst_fields(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _map_analyst_fields(self, df: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """映射分析师字段"""
         result = pd.DataFrame()
         
@@ -101,7 +103,11 @@ class AnalystCollector(UnstructuredCollector):
         result['broker'] = df.get('研究机构', df.get('broker', ''))
         result['industry'] = df.get('行业', df.get('industry', ''))
         result['rank'] = df.get('排名', df.get('rank', ''))
-        result['year'] = df.get('年份', datetime.now().year)
+        result['year'] = df.get('年份', kwargs.get('year', datetime.now().year))
+        # 如果 year 已经被显式传给 collect_analyst_rank，它在 kwargs 中可能不存在，
+        # 在这种情况下我们应该确保它被正确赋值。
+        if 'year' in kwargs:
+            result['year'] = kwargs['year']
         
         # 收益率
         result['return_1m'] = df.get('1个月收益率', df.get('return_1m', None))

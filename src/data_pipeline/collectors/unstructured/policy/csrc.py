@@ -13,6 +13,7 @@
 import re
 import time
 import logging
+import hashlib
 from typing import Optional, List
 from datetime import datetime
 from urllib.parse import urljoin
@@ -44,12 +45,11 @@ class CSRCCollector(BasePolicyCollector):
     SOURCE = PolicySource.CSRC
     BASE_URL = "http://www.csrc.gov.cn"
     
-    # 政策列表页 - 更新为实际可用的URL
+    # 政策列表页 - 使用新闻发布会作为替代数据源
     LIST_URLS = {
-        'order': '/csrc/c101953/zfxxgk_zdgk.shtml',          # 证监会令
-        'announcement': '/csrc/c101954/zfxxgk_zdgk.shtml',   # 证监会公告
-        'news': '/csrc/c100028/common_xq_list.shtml',        # 证监会要闻
-        'consultation': '/csrc/c101981/zfxxgk_zdgk.shtml',   # 征求意见
+        'news_conference': '/csrc/c100029/common_list.shtml',  # 新闻发布会（有实际内容）
+        'news': '/csrc/c100028/common_xq_list.shtml',          # 证监会要闻
+        'policy': '/csrc/c100039/common_list.shtml',           # 政策解读
     }
     
     def collect(
@@ -147,17 +147,21 @@ class CSRCCollector(BasePolicyCollector):
             for item in items:
                 pub_date = item.get('publish_date', '')
                 
-                # 日期过滤
-                if pub_date:
-                    try:
-                        item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
-                        if item_dt < start_dt:
-                            reach_start_date = True
-                            continue
-                        if item_dt > end_dt:
-                            continue
-                    except:
-                        pass
+                # 严格日期过滤
+                if not pub_date:
+                    logger.debug(f"跳过无日期条目: {item.get('title')}")
+                    continue
+                    
+                try:
+                    item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
+                    if item_dt < start_dt:
+                        reach_start_date = True
+                        continue
+                    if item_dt > end_dt:
+                        continue
+                except Exception as e:
+                    logger.debug(f"日期解析失败: {pub_date}, 错误: {e}")
+                    continue
                 
                 # 去重检查
                 doc_id = self._generate_id(
@@ -218,9 +222,21 @@ class CSRCCollector(BasePolicyCollector):
         
         # 解析列表项 - 适配证监会网站实际结构
         # 过滤掉明显无关的内容
-        exclude_keywords = ['年度报表', '公开指南', '依申请公开', '网站地图', '联系方式']
+        exclude_keywords = ['年度报表', '公开指南', '依申请公开', '网站地图', '联系方式', '网站工作', '信息公开']
         
-        for a_tag in soup.select('a[href*="/content.shtml"]'):
+        # 尝试多种选择器适配不同页面结构
+        list_items = []
+        
+        # 方式1: 列表结构 li > a
+        list_items.extend(soup.select('ul li a[href*=".shtml"], ul li a[href*=".html"]'))
+        
+        # 方式2: div列表
+        list_items.extend(soup.select('div.list a[href*=".shtml"], div.list a[href*=".html"]'))
+        
+        # 方式3: 表格结构
+        list_items.extend(soup.select('table tr td a[href*=".shtml"], table tr td a[href*=".html"]'))
+        
+        for a_tag in list_items:
             try:
                 title = a_tag.get_text(strip=True)
                 href = a_tag.get('href', '')
@@ -228,27 +244,45 @@ class CSRCCollector(BasePolicyCollector):
                 if not title or not href:
                     continue
                 
+                logger.debug(f"分析列表项: '{title}' (Len: {len(title)})")
+
                 # 跳过太短的标题
                 if len(title) < 10:
                     continue
                 
                 # 过滤无关内容
                 if any(kw in title for kw in exclude_keywords):
+                    print(f"DEBUG_SKIP: {title}")
                     continue
                 
-                # 提取日期 - 在链接后面或父元素中
+                # 提取日期 - 在链接后面、父元素或兄弟元素中
                 pub_date = ''
+                
+                # 优先从父元素查找
                 parent = a_tag.parent
                 if parent:
-                    parent_text = parent.get_text()
-                    # 查找日期格式
-                    date_match = re.search(r'(\d{2}-\d{2}|\d{4}-\d{2}-\d{2})', parent_text)
-                    if date_match:
-                        date_str = date_match.group(1)
-                        if len(date_str) == 5:  # MM-DD 格式
-                            pub_date = f"2026-{date_str}"  # 添加当前年份
+                    # 查找兄弟span/em元素（常见的日期位置）
+                    date_elem = parent.find('span', class_=re.compile('date|time')) or \
+                               parent.find('em', class_=re.compile('date|time')) or \
+                               parent.find('span') or parent.find('em')
+                    
+                    if date_elem:
+                        date_text = date_elem.get_text(strip=True)
+                        pub_date = self._extract_publish_date(date_text)
+                    
+                    # 如果没找到，从父元素整体文本提取
+                    if not pub_date:
+                        parent_text = parent.get_text()
+                        # 查找日期格式: YYYY-MM-DD 或 YYYY/MM/DD
+                        date_match = re.search(r'(\d{4}[-/]\d{2}[-/]\d{2})', parent_text)
+                        if date_match:
+                            pub_date = date_match.group(1).replace('/', '-')
                         else:
-                            pub_date = date_str
+                            # 查找 MM-DD 格式
+                            date_match = re.search(r'(\d{2}-\d{2})', parent_text)
+                            if date_match:
+                                current_year = datetime.now().year
+                                pub_date = f"{current_year}-{date_match.group(1)}"
                 
                 # 构建完整URL
                 if href.startswith('/'):
@@ -370,8 +404,10 @@ class CSRCCollector(BasePolicyCollector):
                 local_path = str(self._get_file_path(doc_no, title, pub_date, file_type))
                 self._download_file(attach_url, local_path)
             
-            # 生成唯一ID
-            doc_id = self._generate_id(doc_no, title, self.SOURCE.value)
+            # 生成唯一ID - 使用多个字段确保唯一性
+            # 优先使用发文字号，其次使用URL hash
+            unique_key = f"{self.SOURCE.value}_{doc_no}_{title}_{pub_date}_{url}"
+            doc_id = hashlib.md5(unique_key.encode('utf-8')).hexdigest()
             
             # 分类和标签
             policy_category = self._classify_policy(title, content)

@@ -7,14 +7,12 @@
 import logging
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
-
+import os
+import json
 import pandas as pd
 
 from ..base import UnstructuredCollector, DateRangeIterator
 from .cctv_collector import CCTVNewsCollector, NewsCategory
-from .eastmoney_collector import EastMoneyNewsCollector
-from .sina_crawler import SinaFinanceCrawler
-from .stcn_crawler import STCNCrawler
 from .exchange_news_crawler import ExchangeNewsCrawler
 
 logger = logging.getLogger(__name__)
@@ -60,21 +58,6 @@ class NewsCollector:
         'cctv': {
             'name': '央视新闻联播',
             'collector': CCTVNewsCollector,
-            'enabled': True,
-        },
-        'eastmoney': {
-            'name': '东方财富',
-            'collector': EastMoneyNewsCollector,
-            'enabled': True,
-        },
-        'sina': {
-            'name': '新浪财经',
-            'collector': SinaFinanceCrawler,
-            'enabled': True,
-        },
-        'stcn': {
-            'name': '证券时报',
-            'collector': STCNCrawler,
             'enabled': True,
         },
         'exchange': {
@@ -193,6 +176,67 @@ class NewsCollector:
         
         return self._ensure_columns(result)
     
+    def collect_and_save(
+        self,
+        start_date: str,
+        end_date: str,
+        save_dir: str,
+        sources: Optional[List[str]] = None,
+        **kwargs
+    ) -> Dict[str, int]:
+        """
+        采集新闻并按层次结构保存
+        
+        结构: save_dir/YYYY/MM/source_YYYY-MM-DD.jsonl
+        """
+        all_stats = {}
+        sources = sources or self.sources
+        
+        for source in sources:
+            self.logger.info(f"开始采集并保存数据源: {source}")
+            try:
+                df = self.collect_news(start_date, end_date, sources=[source], **kwargs)
+                if df is None or df.empty:
+                    self.logger.info(f"数据源 {source} 无数据")
+                    all_stats[source] = 0
+                    continue
+                    
+                # 统一日期格式为 YYYY-MM-DD
+                def standardize_date(d):
+                    d = str(d).strip().replace('.', '-').replace('/', '-')
+                    if len(d) == 8 and d.isdigit():
+                        return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                    return d[:10]
+                
+                df['pub_date'] = df['pub_date'].apply(standardize_date)
+                
+                # 按日期分组存储
+                count = 0
+                for pub_date, group in df.groupby('pub_date'):
+                    if not pub_date or len(pub_date) < 10 or '-' not in pub_date:
+                        continue
+                        
+                    try:
+                        dt = datetime.strptime(pub_date, '%Y-%m-%d')
+                        target_dir = os.path.join(save_dir, str(dt.year), f"{dt.month:02d}")
+                        os.makedirs(target_dir, exist_ok=True)
+                        
+                        file_path = os.path.join(target_dir, f"{source}_{pub_date}.jsonl")
+                        
+                        # 写入 JSONL
+                        group.to_json(file_path, orient='records', lines=True, force_ascii=False)
+                        count += len(group)
+                    except Exception as e:
+                        self.logger.warning(f"保存 {source} {pub_date} 数据失败: {e}")
+                
+                all_stats[source] = count
+                self.logger.info(f"数据源 {source} 保存完成: {count} 条记录")
+            except Exception as e:
+                self.logger.error(f"采集数据源 {source} 发生错误: {e}")
+                all_stats[source] = 0
+            
+        return all_stats
+
     def collect_cctv(
         self,
         start_date: str,

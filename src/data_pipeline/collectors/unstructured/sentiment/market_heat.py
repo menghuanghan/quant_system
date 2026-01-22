@@ -169,11 +169,11 @@ class MarketHeatCollector(UnstructuredCollector):
             if 'rank' not in df.columns:
                 df['rank'] = range(1, len(df) + 1)
             
-            # 转换股票代码格式
             if 'ts_code' in df.columns:
                 df['ts_code'] = df['ts_code'].apply(self._to_ts_code)
             
-            df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
+            if 'trade_date' not in df.columns:
+                df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
             df['source'] = HotListSource.EASTMONEY.value
             
             # 热度代理指标：使用排名反向映射 (排名越高，指标越大)
@@ -242,11 +242,11 @@ class MarketHeatCollector(UnstructuredCollector):
             # 生成排名
             df['rank'] = range(1, len(df) + 1)
             
-            # 转换股票代码格式
             if 'ts_code' in df.columns:
                 df['ts_code'] = df['ts_code'].apply(self._to_ts_code)
             
-            df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
+            if 'trade_date' not in df.columns:
+                df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
             df['source'] = HotListSource.XUEQIU.value
             
             # 热度代理指标
@@ -312,6 +312,17 @@ class MarketHeatCollector(UnstructuredCollector):
                 how='left'
             )
             merged['news_count'] = merged['news_count'].fillna(0)
+        
+        # ✅ 修复: 标准化数值字段类型，避免类型转换失败
+        merged['turnover_rate'] = pd.to_numeric(
+            merged['turnover_rate'], 
+            errors='coerce'
+        ).fillna(0)
+        
+        merged['news_count'] = pd.to_numeric(
+            merged['news_count'], 
+            errors='coerce'
+        ).fillna(0)
         
         # 4. 计算合成热度指标
         merged['norm_turnover'] = np.minimum(

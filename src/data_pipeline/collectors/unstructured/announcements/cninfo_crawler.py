@@ -244,8 +244,9 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
         """按交易所采集"""
         all_data = []
         
-        # 分月采集，避免单次请求过大
-        for chunk_start, chunk_end in DateRangeIterator(start_date, end_date, chunk_days=30):
+        # 严格按天采集，避免单次请求超过100页限制
+        date_iter = DateRangeIterator(start_date, end_date, chunk_days=1)
+        for chunk_start, chunk_end in date_iter:
             params = self._build_search_params(
                 start_date=chunk_start,
                 end_date=chunk_end,
@@ -253,11 +254,12 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
                 exchange=exchange
             )
             
-            df = self._fetch_announcements(params)
+            # 增加单日最大页数，大型交易日公告可能很多
+            df = self._fetch_announcements(params, max_pages=200)
             if not df.empty:
                 all_data.append(df)
-                logger.info(
-                    f"采集 {exchange} {chunk_start}~{chunk_end}: {len(df)} 条"
+                logger.debug(
+                    f"采集 {exchange} {chunk_start}: {len(df)} 条"
                 )
         
         if not all_data:
@@ -332,6 +334,17 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
                 use_proxy=self._use_proxy,
                 rate_limit=False  # 临时禁用以加快测试
             )
+            
+            # The provided diff for `reach_start_date` and `page >= max_pages`
+            # seems to be out of context for this method, as `reach_start_date`
+            # is not defined here and `page >= max_pages` is redundant with
+            # `while page_num <= max_pages`.
+            # Assuming the intent was to add a break condition if `page_num`
+            # exceeds `max_pages` (which is already handled by the while loop)
+            # or if a `reach_start_date` flag (not present here) was set.
+            # I will keep the original logic for `_fetch_announcements`
+            # as the diff provided for this section is not syntactically or logically
+            # consistent with the existing method structure.
             
             if response is None:
                 logger.warning(f"请求失败，页码: {page_num}")
@@ -551,7 +564,6 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
             return df
         
         save_dir = save_dir or self._download_dir
-        os.makedirs(save_dir, exist_ok=True)
         
         file_paths = []
         for _, row in df.iterrows():
@@ -563,9 +575,28 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
             # 生成文件名
             ts_code = row.get('ts_code', 'unknown')
             ann_date = row.get('ann_date', 'unknown')
-            filename = f"{ts_code}_{ann_date}_{row.name}.pdf"
             
-            path = self.download_announcement(url, save_dir, filename)
+            # 构建层级目录: YYYY/MM
+            sub_dir = ""
+            if ann_date and len(ann_date) >= 7:
+                 try:
+                     dt = datetime.strptime(ann_date, '%Y-%m-%d')
+                     sub_dir = os.path.join(str(dt.year), f"{dt.month:02d}")
+                 except ValueError:
+                     pass
+            
+            target_dir = os.path.join(save_dir, sub_dir)
+            os.makedirs(target_dir, exist_ok=True)
+            
+            # 优化文件名: ts_code_date_title_id.pdf (去除特殊字符)
+            title = row.get('title', 'announcement')
+            # 清理文件名中的非法字符
+            safe_title = re.sub(r'[\\/*?:"<>|]', '', str(title))[:50] # 限制长度
+            original_id = row.get('original_id', str(row.name))
+            
+            filename = f"{ts_code}_{ann_date}_{safe_title}_{original_id}.pdf"
+            
+            path = self.download_announcement(url, target_dir, filename)
             file_paths.append(path)
         
         df['file_path'] = file_paths

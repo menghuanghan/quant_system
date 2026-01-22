@@ -4,7 +4,9 @@
 基于 AKShare 接口采集券商研报数据
 
 支持：
-- PDF研报文本即时提取
+- PDF研报文本即时提取（多引擎支持）
+- 同花顺数据补充（目标价、分析师）
+- 评级变化追踪
 - 清洗模块集成
 """
 
@@ -18,6 +20,8 @@ import pandas as pd
 from ..base import UnstructuredCollector
 from ..cleaning_adapter import CleaningMixin
 from ..request_utils import safe_download_bytes
+from .ths_rating_collector import enrich_reports_with_ths_data
+from .rating_change_tracker import RatingChangeTracker
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,11 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
     
     使用AKShare stock_research_report_em接口
     
+    数据源限制（2025-01版）：
+    - analyst字段：AKShare接口不返回分析师姓名，需从PDF或其他渠道补充
+    - target_price字段：接口不返回目标价，建议使用同花顺等数据源
+    - rating_change字段：接口不返回评级变化，需对比历史数据计算
+    
     支持即时PDF文本提取：
     - collect_with_text(): 采集并即时提取PDF文本
     """
@@ -59,10 +68,10 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         'stock_code',
         'stock_name',
         'broker',
-        'analyst',
+        'analyst',  # 注意：接口不返回，留空
         'rating',
-        'rating_change',
-        'target_price',
+        'rating_change',  # 注意：接口不返回，默认为"未知"
+        'target_price',  # 注意：接口不返回，留空
         'target_price_low',
         'target_price_high',
         'pub_date',
@@ -123,6 +132,15 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         result = pd.concat(all_data, ignore_index=True)
         result = result.drop_duplicates(subset=['report_id'], keep='first')
         
+        # 使用同花顺数据补充缺失的目标价和分析师
+        logger.info("正在补充同花顺数据（目标价、分析师）...")
+        result = enrich_reports_with_ths_data(result, start_date, end_date)
+        
+        # 检测评级变化
+        logger.info("正在检测评级变化...")
+        rating_tracker = RatingChangeTracker()
+        result = rating_tracker.detect_changes_batch(result)
+        
         return self._standardize_output(result)
     
     def _collect_by_stock(self, stock_code: str) -> pd.DataFrame:
@@ -176,19 +194,21 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         result['stock_code'] = safe_get(['股票代码'], stock_code)
         result['stock_name'] = safe_get('股票简称')
         result['broker'] = safe_get(['机构', '研报机构'])
-        result['analyst'] = safe_get(['研报作者', '作者'])
+        
+        # 分析师字段 - AKShare接口不直接提供，从机构名提取或留空
+        result['analyst'] = safe_get(['研报作者', '作者', '分析师'], '')
         
         # 评级相关
         rating_col = safe_get(['东财评级', '最新评级', '评级'])
         result['rating'] = rating_col.apply(self._normalize_rating)
         
-        rating_change_col = safe_get(['评级变化'])
+        rating_change_col = safe_get(['评级变化', '评级调整'])
         result['rating_change'] = rating_change_col.apply(self._normalize_rating_change)
         
-        # 目标价
-        result['target_price'] = safe_get(['目标价'], None)
-        result['target_price_low'] = safe_get(['目标价格-首-下限', '目标价-下限'], None)
-        result['target_price_high'] = safe_get(['目标价格-上限', '目标价-上限'], None)
+        # 目标价 - 尝试从多个可能的字段提取
+        result['target_price'] = safe_get(['目标价', '目标价格', '最新目标价'], None)
+        result['target_price_low'] = safe_get(['目标价格-下限', '目标价-下限', '目标价区间-下限'], None)
+        result['target_price_high'] = safe_get(['目标价格-上限', '目标价-上限', '目标价区间-上限'], None)
         
         # 日期 - 特殊处理datetime类型
         date_col = None

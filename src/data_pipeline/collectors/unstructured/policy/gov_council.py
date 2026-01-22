@@ -45,11 +45,11 @@ class GovCouncilCollector(BasePolicyCollector):
     SOURCE = PolicySource.GOV
     BASE_URL = "https://www.gov.cn"
     
-    # 政策列表页
+    # 政策列表页 - 使用实际可访问的页面（已处理重定向）
     LIST_URLS = {
-        'latest': '/zhengce/xxgk/index.htm',        # 政策公开
-        'gazette': '/gongbao/guowuyuan/index.htm',  # 国务院公报
-        'interpretation': '/zhengce/jiedu.htm',     # 政策解读
+        'latest': '/zhengce/zuixin/home.htm',          # 最新政策（跳转后的正确URL）
+        'documents': '/gongbao/2024/issue_9601.htm',  # 国务院公报2024年第1期
+        'news': '/xinwen/yaowen.htm',                 # 新闻要闻
     }
     
     def collect(
@@ -141,16 +141,21 @@ class GovCouncilCollector(BasePolicyCollector):
             for item in items:
                 pub_date = item.get('publish_date', '')
                 
-                if pub_date:
-                    try:
-                        item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
-                        if item_dt < start_dt:
-                            reach_start_date = True
-                            continue
-                        if item_dt > end_dt:
-                            continue
-                    except:
-                        pass
+                # 严格日期过滤
+                if not pub_date:
+                    logger.debug(f"跳过无日期条目: {item.get('title')}")
+                    continue
+                    
+                try:
+                    item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
+                    if item_dt < start_dt:
+                        reach_start_date = True
+                        continue
+                    if item_dt > end_dt:
+                        continue
+                except Exception as e:
+                    logger.debug(f"日期解析失败: {pub_date}, 错误: {e}")
+                    continue
                 
                 doc_id = self._generate_id(
                     item.get('doc_no', ''),
@@ -190,53 +195,55 @@ class GovCouncilCollector(BasePolicyCollector):
             response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 不同类别的列表格式略有不同
-            if category == 'latest':
-                # 最新政策列表
-                for li in soup.select('.news_box li, .list li'):
-                    a_tag = li.find('a')
-                    if not a_tag:
-                        continue
+            # 更通用的选择器 - 国务院网站的多种列表格式
+            selectors = [
+                'div.list-date h4 a',          # 新版列表格式
+                'div.list_title a',            # 标准列表格式
+                'ul.list-docs li h4 a',        # 文档列表
+                'div.news-box li a',           # 新闻列表
+                'div.art-list li h3 a',        # 文章列表
+                'ul li h4 a',                  # 通用h4标题
+                'ul li a',                     # 最通用格式
+            ]
+            
+            for selector in selectors:
+                links = soup.select(selector)
+                if links:
+                    logger.debug(f"使用选择器 '{selector}' 找到 {len(links)} 条记录")
                     
-                    title = a_tag.get_text(strip=True)
-                    href = a_tag.get('href', '')
+                    for link in links:
+                        title = link.get_text(strip=True)
+                        href = link.get('href', '')
+                        
+                        # 过滤太短的标题和导航链接
+                        if not title or len(title) < 8:
+                            continue
+                        if href in ['#', 'javascript:void(0)', '']:
+                            continue
+                        
+                        # 提取日期 - 查找父级或兄弟元素
+                        pub_date = ''
+                        parent = link.parent
+                        if parent:
+                            # 尝试多种日期元素
+                            date_elem = parent.find('span', class_='date') or \
+                                       parent.find('span', class_='time') or \
+                                       parent.find('em') or \
+                                       parent.find('span')
+                            if date_elem:
+                                pub_date = self._extract_publish_date(date_elem.get_text())
+                        
+                        if title and href:
+                            full_url = urljoin(url, href)
+                            items.append({
+                                'title': title,
+                                'url': full_url,
+                                'publish_date': pub_date
+                            })
                     
-                    # 提取日期
-                    date_span = li.find('span')
-                    pub_date = ''
-                    if date_span:
-                        pub_date = self._extract_publish_date(date_span.get_text())
-                    
-                    if title and href:
-                        full_url = urljoin(url, href)
-                        items.append({
-                            'title': title,
-                            'url': full_url,
-                            'publish_date': pub_date
-                        })
-            else:
-                # 通用列表格式
-                for li in soup.select('ul.list li, .news_list li, .listCont li'):
-                    a_tag = li.find('a')
-                    if not a_tag:
-                        continue
-                    
-                    title = a_tag.get_text(strip=True)
-                    href = a_tag.get('href', '')
-                    
-                    # 提取日期
-                    pub_date = ''
-                    date_elem = li.find('span') or li.find('em')
-                    if date_elem:
-                        pub_date = self._extract_publish_date(date_elem.get_text())
-                    
-                    if title and href:
-                        full_url = urljoin(url, href)
-                        items.append({
-                            'title': title,
-                            'url': full_url,
-                            'publish_date': pub_date
-                        })
+                    # 找到有效数据就退出
+                    if items:
+                        break
             
         except Exception as e:
             logger.warning(f"解析列表页失败: {url}, {e}")
@@ -433,16 +440,21 @@ class NDRCCollector(BasePolicyCollector):
             for item in items:
                 pub_date = item.get('publish_date', '')
                 
-                if pub_date:
-                    try:
-                        item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
-                        if item_dt < start_dt:
-                            reach_start_date = True
-                            continue
-                        if item_dt > end_dt:
-                            continue
-                    except:
-                        pass
+                # 严格日期过滤
+                if not pub_date:
+                    logger.debug(f"跳过无日期条目: {item.get('title')}")
+                    continue
+                    
+                try:
+                    item_dt = datetime.strptime(pub_date, '%Y-%m-%d')
+                    if item_dt < start_dt:
+                        reach_start_date = True
+                        continue
+                    if item_dt > end_dt:
+                        continue
+                except Exception as e:
+                    logger.debug(f"日期解析失败: {pub_date}, 错误: {e}")
+                    continue
                 
                 doc_id = self._generate_id(
                     item.get('doc_no', ''),

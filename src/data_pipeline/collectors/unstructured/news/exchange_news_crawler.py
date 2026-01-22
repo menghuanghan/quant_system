@@ -72,8 +72,16 @@ class ExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
         all_data = []
         
         # 按日期逐天采集
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        # 支持YYYYMMDD和YYYY-MM-DD格式
+        if len(start_date) == 8 and '-' not in start_date:
+            start_dt = datetime.strptime(start_date, '%Y%m%d')
+        else:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        
+        if len(end_date) == 8 and '-' not in end_date:
+            end_dt = datetime.strptime(end_date, '%Y%m%d')
+        else:
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         
         current = start_dt
         while current <= end_dt:

@@ -88,9 +88,6 @@ from .news import (
     NewsCategory,
     NewsCollector,
     CCTVNewsCollector,
-    EastMoneyNewsCollector,
-    SinaFinanceCrawler,
-    STCNCrawler,
     ExchangeNewsCrawler,
     get_news,
     get_news_by_date,
@@ -98,10 +95,6 @@ from .news import (
     get_stock_related_news,
     get_cctv_news,
     get_cctv_news_recent,
-    get_eastmoney_news,
-    get_stock_news,
-    get_sina_news,
-    get_stcn_news,
     get_exchange_news,
 )
 
@@ -207,9 +200,6 @@ __all__ = [
     'NewsCategory',
     'NewsCollector',
     'CCTVNewsCollector',
-    'EastMoneyNewsCollector',
-    'SinaFinanceCrawler',
-    'STCNCrawler',
     'ExchangeNewsCrawler',
     'get_news',
     'get_news_by_date',
@@ -217,10 +207,6 @@ __all__ = [
     'get_stock_related_news',
     'get_cctv_news',
     'get_cctv_news_recent',
-    'get_eastmoney_news',
-    'get_stock_news',
-    'get_sina_news',
-    'get_stcn_news',
     'get_exchange_news',
     
     # 研报采集器
