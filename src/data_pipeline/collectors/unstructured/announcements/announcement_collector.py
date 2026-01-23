@@ -53,8 +53,8 @@ class AnnouncementCollector:
         'ts_code',          # 股票代码
         'name',             # 股票名称
         'title',            # 公告标题
-        'ann_date',         # 公告日期
-        'ann_time',         # 公告时间
+        'date',             # 公告日期
+        'content',          # 主要内容
         'category',         # 公告类型
         'url',              # 公告链接
         'source',           # 数据源
@@ -128,7 +128,8 @@ class AnnouncementCollector:
             - ts_code: 股票代码
             - name: 股票名称
             - title: 公告标题
-            - ann_date: 公告日期
+            - date: 公告日期
+            - content: 主要内容
             - category: 公告类型
             - url: 公告链接
             - source: 数据源
@@ -306,7 +307,7 @@ class AnnouncementCollector:
         
         result = pd.concat(all_data, ignore_index=True)
         result = result.drop_duplicates(
-            subset=['ts_code', 'title', 'ann_date'],
+            subset=['ts_code', 'title', 'date'],
             keep='first'
         )
         
@@ -397,12 +398,12 @@ def get_announcements(
     )
 
 
-def get_announcement_by_date(ann_date: str) -> pd.DataFrame:
+def get_announcement_by_date(date: str) -> pd.DataFrame:
     """
     获取指定日期的全市场公告
     
     Args:
-        ann_date: 公告日期（YYYY-MM-DD）
+        date: 公告日期（YYYY-MM-DD）
     
     Returns:
         公告数据DataFrame
@@ -412,8 +413,8 @@ def get_announcement_by_date(ann_date: str) -> pd.DataFrame:
     """
     collector = AnnouncementCollector()
     return collector.collect_announcements(
-        start_date=ann_date,
-        end_date=ann_date
+        start_date=date,
+        end_date=date
     )
 
 

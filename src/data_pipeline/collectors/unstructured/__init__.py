@@ -88,14 +88,14 @@ from .news import (
     NewsCategory,
     NewsCollector,
     CCTVNewsCollector,
-    ExchangeNewsCrawler,
+    OfficialExchangeNewsCrawler,
     get_news,
     get_news_by_date,
     get_news_incremental,
     get_stock_related_news,
     get_cctv_news,
     get_cctv_news_recent,
-    get_exchange_news,
+    get_official_exchange_news,
 )
 
 # 研报采集
@@ -177,14 +177,14 @@ __all__ = [
     'NewsCategory',
     'NewsCollector',
     'CCTVNewsCollector',
-    'ExchangeNewsCrawler',
+    'OfficialExchangeNewsCrawler',
     'get_news',
     'get_news_by_date',
     'get_news_incremental',
     'get_stock_related_news',
     'get_cctv_news',
     'get_cctv_news_recent',
-    'get_exchange_news',
+    'get_official_exchange_news',
     
     # 研报采集器
     'ReportRating',

@@ -329,8 +329,8 @@ class CninfoEventCollector(BaseEventCollector):
                 event_type=event_type,
                 event_subtype=event_subtype,
                 title=title,
-                summary='',  # 摘要可后续从PDF提取
-                ann_date=ann_date,
+                content='',  # 摘要可后续从PDF提取
+                date=ann_date,
                 effective_date='',
                 source=self.SOURCE.value,
                 url=f"{self.BASE_URL}/new/disclosure/detail?announcementId={ann_id}",

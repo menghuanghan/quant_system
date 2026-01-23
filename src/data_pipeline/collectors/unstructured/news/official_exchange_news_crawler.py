@@ -36,9 +36,7 @@ class OfficialExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
         'news_id',
         'title',
         'content',
-        'summary',
-        'pub_time',
-        'pub_date',
+        'date',
         'source',
         'category',
         'url',
@@ -220,9 +218,7 @@ class OfficialExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
             'news_id': news_id,
             'title': title,
             'content': '',  # 需要下载PDF才能获取
-            'summary': title[:100] if len(title) > 100 else title,
-            'pub_time': pub_time,
-            'pub_date': pub_date,
+            'date': pub_date,
             'source': 'sse',
             'category': measure_type or '监管措施',
             'url': doc_url,
@@ -323,16 +319,14 @@ class OfficialExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
             'news_id': news_id,
             'title': title,
             'content': '',  # 需要下载PDF才能获取
-            'summary': title[:100] if len(title) > 100 else title,
-            'pub_time': pub_date,
-            'pub_date': pub_date,
+            'date': pub_date,
             'source': 'szse',
             'category': '监管措施',
             'url': doc_url,
             'related_stocks': f"{stock_code}.{stock_name}" if stock_code else '',
             'stock_code': stock_code,
             'stock_name': stock_name,
-            'keywords': measure,
+            'keywords': measure_type,
         }
     
     def _generate_id(self, content: str) -> str:

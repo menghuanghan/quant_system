@@ -281,8 +281,8 @@ class EastMoneyEventCollector(BaseEventCollector):
                 event_type=event_type,
                 event_subtype=self._extract_event_subtype(title, event_type),
                 title=title or summary,
-                summary=summary,
-                ann_date=ann_date,
+                content=summary,
+                date=ann_date,
                 effective_date='',
                 source=self.SOURCE.value,
                 url='',
@@ -426,8 +426,8 @@ class EastMoneyEventCollector(BaseEventCollector):
                         event_type=event_type,
                         event_subtype='',
                         title=title,
-                        summary=title,
-                        ann_date=ann_date,
+                        content=title,
+                        date=ann_date,
                         effective_date='',
                         source=self.SOURCE.value,
                         url=config['url'],
@@ -526,19 +526,19 @@ def align_events_with_pdf(
         return eastmoney_df
     
     # 转换日期格式
-    eastmoney_df['ann_date'] = pd.to_datetime(eastmoney_df['ann_date'])
-    cninfo_df['ann_date'] = pd.to_datetime(cninfo_df['ann_date'])
+    eastmoney_df['date'] = pd.to_datetime(eastmoney_df['date'])
+    cninfo_df['date'] = pd.to_datetime(cninfo_df['date'])
     
     aligned_records = []
     
     for _, em_row in eastmoney_df.iterrows():
         ts_code = em_row['ts_code']
-        ann_date = em_row['ann_date']
+        ann_date = em_row['date']
         
         # 查找匹配的巨潮记录
         mask = (
             (cninfo_df['ts_code'] == ts_code) &
-            (abs((cninfo_df['ann_date'] - ann_date).dt.days) <= tolerance_days)
+            (abs((cninfo_df['date'] - ann_date).dt.days) <= tolerance_days)
         )
         
         matches = cninfo_df[mask]

@@ -411,7 +411,7 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
                 'ts_code': ts_code,
                 'name': sec_name,
                 'title': title,
-                'ann_date': ann_date,
+                'date': ann_date,
                 'category': category,
                 'url': pdf_url,
                 'original_id': str(ann_id),
@@ -574,7 +574,7 @@ class CninfoAnnouncementCrawler(UnstructuredCollector, CleaningMixin):
             
             # 生成文件名
             ts_code = row.get('ts_code', 'unknown')
-            ann_date = row.get('ann_date', 'unknown')
+            ann_date = row.get('date', 'unknown')
             
             # 构建层级目录: YYYY/MM
             sub_dir = ""

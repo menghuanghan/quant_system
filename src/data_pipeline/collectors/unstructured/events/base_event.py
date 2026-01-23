@@ -54,9 +54,9 @@ class EventDocument:
     event_subtype: str                  # 事件子类型
     
     title: str                          # 标题
-    summary: str                        # 摘要/关键信息
+    content: str = ""                   # 主要内容
     
-    ann_date: str                       # 公告日期 (YYYY-MM-DD)
+    date: str                           # 公告日期 (YYYY-MM-DD)
     effective_date: str                 # 生效日期（如有）
     
     source: str                         # 数据来源 (EventSource.value)
@@ -137,9 +137,9 @@ class BaseEventCollector:
         """
         raise NotImplementedError("子类需要实现collect方法")
     
-    def _generate_id(self, ts_code: str, title: str, ann_date: str) -> str:
+    def _generate_id(self, ts_code: str, title: str, date: str) -> str:
         """生成唯一ID"""
-        key = f"{ts_code}_{title}_{ann_date}"
+        key = f"{ts_code}_{title}_{date}"
         return hashlib.md5(key.encode()).hexdigest()
     
     def _get_pdf_path(
@@ -147,7 +147,7 @@ class BaseEventCollector:
         event_type: str,
         ts_code: str,
         title: str,
-        ann_date: str
+        date: str
     ) -> Path:
         """
         生成PDF存储路径
@@ -158,7 +158,7 @@ class BaseEventCollector:
         event_dir = self.EVENT_DIRS.get(event_type, 'other')
         
         # 提取年份
-        year = ann_date[:4] if ann_date else datetime.now().strftime('%Y')
+        year = date[:4] if date else datetime.now().strftime('%Y')
         
         # 安全文件名
         safe_title = re.sub(r'[\\/:*?"<>|]', '', title)[:50]
@@ -237,8 +237,8 @@ class BaseEventCollector:
                     'event_type': event.event_type,
                     'event_subtype': event.event_subtype,
                     'title': event.title,
-                    'summary': event.summary,
-                    'ann_date': event.ann_date,
+                    'content': event.content,
+                    'date': event.date,
                     'effective_date': event.effective_date,
                     'source': event.source,
                     'url': event.url,
@@ -267,8 +267,8 @@ class BaseEventCollector:
                 'event_type': e.event_type,
                 'event_subtype': e.event_subtype,
                 'title': e.title,
-                'summary': e.summary,
-                'ann_date': e.ann_date,
+                'content': e.content,
+                'date': e.date,
                 'effective_date': e.effective_date,
                 'source': e.source,
                 'url': e.url,

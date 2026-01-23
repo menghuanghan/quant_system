@@ -70,7 +70,7 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         'target_price',  # 注意：接口不返回，留空
         'target_price_low',
         'target_price_high',
-        'pub_date',
+        'date',
         'pdf_url',
         'content',  # 新增：PDF文本内容
         'source',
@@ -206,16 +206,16 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
                 break
         
         if date_col is not None:
-            result['pub_date'] = date_col.apply(self._parse_date)
+            result['date'] = date_col.apply(self._parse_date)
         else:
-            result['pub_date'] = pd.Series([''] * n)
+            result['date'] = pd.Series([''] * n)
         
         # PDF链接
         result['pdf_url'] = safe_get(['报告PDF链接', '研报链接', 'pdf_url'])
         
         # 生成唯一ID
         result['report_id'] = result.apply(
-            lambda row: self._generate_id(str(row['title']), str(row['broker']), str(row['pub_date'])),
+            lambda row: self._generate_id(str(row['title']), str(row['broker']), str(row['date'])),
             axis=1
         )
         
@@ -291,15 +291,15 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         end_date: str
     ) -> pd.DataFrame:
         """按日期过滤"""
-        if df.empty or 'pub_date' not in df.columns:
+        if df.empty or 'date' not in df.columns:
             return df
         
-        df = df[df['pub_date'] != '']
+        df = df[df['date'] != '']
         
         if df.empty:
             return df
         
-        mask = (df['pub_date'] >= start_date) & (df['pub_date'] <= end_date)
+        mask = (df['date'] >= start_date) & (df['date'] <= end_date)
         return df[mask].copy()
     
     def _standardize_output(self, df: pd.DataFrame) -> pd.DataFrame:

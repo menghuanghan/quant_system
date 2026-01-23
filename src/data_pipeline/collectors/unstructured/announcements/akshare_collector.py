@@ -162,7 +162,7 @@ class AKShareAnnouncementCollector(UnstructuredCollector):
         # 常见字段映射
         field_candidates = {
             'title': ['公告标题', 'title', '标题', 'notice_title'],
-            'ann_date': ['公告日期', 'notice_date', 'date', '日期'],
+            'date': ['公告日期', 'notice_date', 'date', '日期'],
             'url': ['公告链接', 'url', 'link', '链接'],
         }
         
@@ -198,7 +198,7 @@ class AKShareAnnouncementCollector(UnstructuredCollector):
             '股票代码': 'symbol',
             '股票名称': 'name',
             '公告标题': 'title',
-            '公告日期': 'ann_date',
+            '公告日期': 'date',
             '公告链接': 'url',
             'code': 'symbol',
             'name': 'name',
@@ -230,14 +230,14 @@ class AKShareAnnouncementCollector(UnstructuredCollector):
         end_date: str
     ) -> pd.DataFrame:
         """按日期过滤数据"""
-        if df.empty or 'ann_date' not in df.columns:
+        if df.empty or 'date' not in df.columns:
             return df
         
         # 标准化日期
-        df['ann_date'] = df['ann_date'].apply(self._standardize_date)
+        df['date'] = df['date'].apply(self._standardize_date)
         
         # 过滤
-        mask = (df['ann_date'] >= start_date) & (df['ann_date'] <= end_date)
+        mask = (df['date'] >= start_date) & (df['date'] <= end_date)
         return df[mask].copy()
     
     def _infer_category(self, title: str) -> str:

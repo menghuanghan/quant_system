@@ -40,9 +40,7 @@ class CCTVNewsCollector(UnstructuredCollector, CleaningMixin):
         'news_id',
         'title',
         'content',
-        'summary',
-        'pub_time',
-        'pub_date',
+        'date',
         'source',
         'category',
         'url',
@@ -147,7 +145,7 @@ class CCTVNewsCollector(UnstructuredCollector, CleaningMixin):
         # 基本字段映射
         result['title'] = df.get('title', df.get('标题', ''))
         result['content'] = df.get('content', df.get('内容', ''))
-        result['pub_date'] = df.get('date', date_str)
+        result['date'] = df.get('date', date_str)
         
         # 生成唯一ID
         result['news_id'] = result.apply(
@@ -155,15 +153,9 @@ class CCTVNewsCollector(UnstructuredCollector, CleaningMixin):
             axis=1
         )
         
-        # 生成摘要（取前200字）
-        result['summary'] = result['content'].apply(
-            lambda x: str(x)[:200] + '...' if len(str(x)) > 200 else str(x)
-        )
-        
         # 设置固定值
         result['source'] = 'cctv'
         result['category'] = NewsCategory.CCTV
-        result['pub_time'] = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} 19:00:00"
         result['url'] = ''
         result['related_stocks'] = ''
         result['keywords'] = ''

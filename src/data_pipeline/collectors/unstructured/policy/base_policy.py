@@ -57,15 +57,14 @@ class PolicyDocument:
     source_dept: str                     # 发文部门
     doc_no: str                          # 发文字号（核心去重键）
     title: str                           # 标题
-    publish_date: str                    # 发布日期
+    date: str                            # 发布日期
     source: str                          # 数据来源
     category: str = ""                   # 政策类别
     tags: List[str] = field(default_factory=list)  # 标签
     file_type: str = ""                  # 文件类型 (html/pdf/doc)
     url: str = ""                        # 原始URL
     local_path: str = ""                 # 本地存储路径
-    content_text: str = ""               # 文本内容（如果是网页或已解析）
-    summary: str = ""                    # 摘要
+    content: str = ""                    # 文本内容（如果是网页或已解析）
     effective_date: str = ""             # 生效日期
     status: str = "active"               # 状态 (active/abolished)
     create_time: str = ""                # 采集时间
@@ -314,12 +313,12 @@ class BasePolicyCollector(UnstructuredCollector):
         self,
         doc_no: str,
         title: str,
-        publish_date: str,
+        date: str,
         file_type: str
     ) -> Path:
         """生成文件存储路径"""
         # 按年份和来源组织
-        year = publish_date[:4] if publish_date else datetime.now().strftime('%Y')
+        year = date[:4] if date else datetime.now().strftime('%Y')
         source_name = self.SOURCE.value
         
         # 文件名：发文字号或标题

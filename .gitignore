@@ -161,3 +161,7 @@ docker/volumes/
 # Data directories
 data/
 logs/
+
+# Local GitHub configs and continuation marker
+.github/
+.continue

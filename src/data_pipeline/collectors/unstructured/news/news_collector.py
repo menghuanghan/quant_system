@@ -13,7 +13,7 @@ import pandas as pd
 
 from ..base import UnstructuredCollector, DateRangeIterator
 from .cctv_collector import CCTVNewsCollector, NewsCategory
-from .exchange_news_crawler import ExchangeNewsCrawler
+from .official_exchange_news_crawler import OfficialExchangeNewsCrawler
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,7 @@ class NewsCollector:
         'news_id',
         'title',
         'content',
-        'summary',
-        'pub_time',
-        'pub_date',
+        'date',
         'source',
         'category',
         'url',
@@ -61,8 +59,8 @@ class NewsCollector:
             'enabled': True,
         },
         'exchange': {
-            'name': '交易所公告解读',
-            'collector': ExchangeNewsCrawler,
+            'name': '交易所官方公告',
+            'collector': OfficialExchangeNewsCrawler,
             'enabled': True,
         },
     }

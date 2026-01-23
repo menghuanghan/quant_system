@@ -3,7 +3,7 @@
 
 包含：
 - CCTVNewsCollector: 央视新闻联播采集器
-- ExchangeNewsCrawler: 交易所公告解读
+- OfficialExchangeNewsCrawler: 交易所官方公告采集器
 - NewsCollector: 统一采集接口
 """
 
@@ -14,10 +14,7 @@ from .cctv_collector import (
     get_cctv_news_recent,
 )
 
-from .exchange_news_crawler import (
-    ExchangeNewsCrawler,
-    get_exchange_news,
-)
+
 
 from .official_exchange_news_crawler import (
     OfficialExchangeNewsCrawler,
@@ -39,7 +36,7 @@ __all__ = [
     
     # Collectors
     'CCTVNewsCollector',
-    'ExchangeNewsCrawler',
+
     'OfficialExchangeNewsCrawler',
     'NewsCollector',
     
@@ -52,6 +49,6 @@ __all__ = [
     # Source-specific functions
     'get_cctv_news',
     'get_cctv_news_recent',
-    'get_exchange_news',
+
     'get_official_exchange_news',
 ]

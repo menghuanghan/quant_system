@@ -139,7 +139,7 @@ class GovCouncilCollector(BasePolicyCollector):
             
             reach_start_date = False
             for item in items:
-                pub_date = item.get('publish_date', '')
+                pub_date = item.get('date', '')
                 
                 # 严格日期过滤
                 if not pub_date:
@@ -238,7 +238,7 @@ class GovCouncilCollector(BasePolicyCollector):
                             items.append({
                                 'title': title,
                                 'url': full_url,
-                                'publish_date': pub_date
+                                'date': pub_date
                             })
                     
                     # 找到有效数据就退出
@@ -291,7 +291,7 @@ class GovCouncilCollector(BasePolicyCollector):
                 content = content_div.get_text(strip=True)
             
             # 发布日期
-            pub_date = item.get('publish_date', '')
+            pub_date = item.get('date', '')
             if not pub_date:
                 date_div = soup.select_one('.pages-date, .article-date, .time')
                 if date_div:
@@ -322,15 +322,14 @@ class GovCouncilCollector(BasePolicyCollector):
                 source_dept="国务院",
                 doc_no=doc_no,
                 title=title,
-                publish_date=pub_date,
+                date=pub_date,
                 source=self.SOURCE.value,
                 category=policy_category,
                 tags=tags,
                 file_type=file_type,
                 url=url,
                 local_path=local_path,
-                content_text=content[:5000] if content else '',
-                summary='',
+                content=content[:5000] if content else '',
                 effective_date='',
                 status='active',
                 create_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -438,7 +437,7 @@ class NDRCCollector(BasePolicyCollector):
             
             reach_start_date = False
             for item in items:
-                pub_date = item.get('publish_date', '')
+                pub_date = item.get('date', '')
                 
                 # 严格日期过滤
                 if not pub_date:
@@ -511,7 +510,7 @@ class NDRCCollector(BasePolicyCollector):
                     items.append({
                         'title': title,
                         'url': full_url,
-                        'publish_date': pub_date
+                        'date': pub_date
                     })
             
         except Exception as e:
@@ -554,7 +553,7 @@ class NDRCCollector(BasePolicyCollector):
             if content_div:
                 content = content_div.get_text(strip=True)
             
-            pub_date = item.get('publish_date', '')
+            pub_date = item.get('date', '')
             
             attachments = []
             for a in soup.select('a[href$=".pdf"], a[href$=".doc"], a[href$=".docx"]'):
@@ -580,15 +579,14 @@ class NDRCCollector(BasePolicyCollector):
                 source_dept="国家发改委",
                 doc_no=doc_no,
                 title=title,
-                publish_date=pub_date,
+                date=pub_date,
                 source=self.SOURCE.value,
                 category=policy_category,
                 tags=tags,
                 file_type=file_type,
                 url=url,
                 local_path=local_path,
-                content_text=content[:5000] if content else '',
-                summary='',
+                content=content[:5000] if content else '',
                 effective_date='',
                 status='active',
                 create_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')

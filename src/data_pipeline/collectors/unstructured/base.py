@@ -96,13 +96,12 @@ class AnnouncementMetadata:
     ts_code: str                    # 股票代码（如 000001.SZ）
     name: str                       # 股票名称
     title: str                      # 公告标题
-    ann_date: str                   # 公告日期（YYYY-MM-DD）
+    date: str                       # 公告日期（YYYY-MM-DD）
     category: str                   # 公告类型
     url: str                        # 公告原文URL
     source: str                     # 数据源（tushare/akshare/cninfo）
     
     # 可选字段
-    ann_time: Optional[str] = None          # 公告时间（HH:MM:SS）
     is_correction: bool = False             # 是否为更正公告
     correction_of: Optional[str] = None     # 原公告ID（仅更正公告有值）
     list_status: str = 'L'                  # 公司上市状态（L/D/P）
@@ -156,7 +155,7 @@ class UnstructuredCollector(ABC):
     
     # 标准输出字段
     STANDARD_FIELDS = [
-        'ts_code', 'name', 'title', 'ann_date', 'ann_time',
+        'ts_code', 'name', 'title', 'date', 'content',
         'category', 'url', 'source', 'is_correction', 
         'correction_of', 'list_status', 'original_id'
     ]
@@ -255,8 +254,8 @@ class UnstructuredCollector(ABC):
         df['source'] = source
         
         # 标准化日期字段
-        if 'ann_date' in df.columns:
-            df['ann_date'] = df['ann_date'].apply(self._standardize_date)
+        if 'date' in df.columns:
+            df['date'] = df['date'].apply(self._standardize_date)
         
         # 确保包含所有标准字段
         for col in self.STANDARD_FIELDS:

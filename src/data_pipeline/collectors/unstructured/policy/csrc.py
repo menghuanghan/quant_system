@@ -145,7 +145,7 @@ class CSRCCollector(BasePolicyCollector):
             # 处理每条政策
             reach_start_date = False
             for item in items:
-                pub_date = item.get('publish_date', '')
+                pub_date = item.get('date', '')
                 
                 # 严格日期过滤
                 if not pub_date:
@@ -295,7 +295,7 @@ class CSRCCollector(BasePolicyCollector):
                 items.append({
                     'title': title,
                     'url': full_url,
-                    'publish_date': pub_date
+                    'date': pub_date
                 })
                 
             except Exception as e:
@@ -373,7 +373,7 @@ class CSRCCollector(BasePolicyCollector):
                 content = content_div.get_text(strip=True)
             
             # 发布日期
-            pub_date = item.get('publish_date', '')
+            pub_date = item.get('date', '')
             if not pub_date:
                 for selector in ['.source', '.info', '.time']:
                     info_div = soup.select_one(selector)
@@ -418,15 +418,14 @@ class CSRCCollector(BasePolicyCollector):
                 source_dept="中国证监会",
                 doc_no=doc_no,
                 title=title,
-                publish_date=pub_date,
+                date=pub_date,
                 source=self.SOURCE.value,
                 category=policy_category,
                 tags=tags,
                 file_type=file_type,
                 url=url,
                 local_path=local_path,
-                content_text=content[:5000] if content else '',  # 限制长度
-                summary='',
+                content=content[:5000] if content else '',  # 限制长度
                 effective_date='',
                 status='active',
                 create_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')

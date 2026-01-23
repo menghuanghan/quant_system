@@ -44,7 +44,7 @@ class ReportCollector:
         'target_price',
         'target_price_low',
         'target_price_high',
-        'pub_date',
+        'date',
         'pdf_url',
         'source',
     ]
