@@ -12,7 +12,6 @@ import pandas as pd
 
 from ..base import UnstructuredCollector
 from .eastmoney_report_collector import EastMoneyReportCollector, ReportRating, RatingChange
-from .analyst_collector import AnalystCollector
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,6 @@ class ReportCollector:
     
     数据源：
     1. 东方财富研报 - 评级、目标价、PDF链接
-    2. 分析师数据 - 排名、业绩
     
     使用示例:
         >>> collector = ReportCollector()
@@ -61,12 +59,6 @@ class ReportCollector:
         if self._report_collector is None:
             self._report_collector = EastMoneyReportCollector()
         return self._report_collector
-    
-    @property
-    def analyst_collector(self):
-        if self._analyst_collector is None:
-            self._analyst_collector = AnalystCollector()
-        return self._analyst_collector
     
     def collect_reports(
         self,
@@ -116,14 +108,6 @@ class ReportCollector:
             top_n=top_n
         )
     
-    def collect_analyst_rank(self) -> pd.DataFrame:
-        """
-        采集分析师排名
-        
-        Returns:
-            分析师排名DataFrame
-        """
-        return self.analyst_collector.collect_analyst_rank()
     
     def collect_incremental(
         self,
@@ -240,12 +224,3 @@ def get_reports_incremental(
     )
 
 
-def get_analyst_rank() -> pd.DataFrame:
-    """
-    获取分析师排名
-    
-    Returns:
-        分析师排名DataFrame
-    """
-    collector = ReportCollector()
-    return collector.collect_analyst_rank()

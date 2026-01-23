@@ -8,10 +8,13 @@ import logging
 import hashlib
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
-from ..base import UnstructuredCollector
+from bs4 import BeautifulSoup
+from ..base import UnstructuredCollector, AnnouncementCategory
+from ..request_utils import safe_request
 from ..cleaning_adapter import CleaningMixin
 from .cctv_collector import NewsCategory
 
@@ -160,19 +163,41 @@ class ExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
             lambda x: str(x)[:100] if len(str(x)) > 100 else str(x)
         )
         
-        result['content'] = ''  # 公告API不返回内容
-        
-        # 公告类型
-        result['category'] = df.get('公告类型', '').apply(self._map_category)
-        
-        # 日期
-        pub_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-        result['pub_date'] = pub_date
-        result['pub_time'] = pub_date
-        
         # 来源和URL
         result['source'] = 'exchange'
-        result['url'] = df.get('公告链接', df.get('url', ''))
+        # 优先使用 '公告链接', 其次 'url', 最后 '网址'
+        result['url'] = df.get('公告链接', df.get('url', df.get('网址', '')))
+        
+        # 提取内容
+        logger.info(f"开始采集 {len(result)} 条公告的正文内容 (并发)...")
+        
+        urls = result['url'].tolist()
+        contents = [''] * len(urls)
+        
+        # 使用线程池并发采集
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_idx = {
+                executor.submit(self._fetch_content, url): idx 
+                for idx, url in enumerate(urls)
+                if url
+            }
+            
+            completed_count = 0
+            total_tasks = len(future_to_idx)
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    content = future.result()
+                    contents[idx] = content
+                except Exception as e:
+                    logger.debug(f"并发采集失败: {e}")
+                
+                completed_count += 1
+                if completed_count % 100 == 0:
+                    logger.info(f"进度: {completed_count}/{total_tasks}")
+        
+        result['content'] = contents
         result['keywords'] = df.get('公告类型', '')
         
         return result
@@ -210,6 +235,42 @@ class ExchangeNewsCrawler(UnstructuredCollector, CleaningMixin):
         
         return df[self.STANDARD_FIELDS]
     
+    def _fetch_content(self, url: str) -> str:
+        """
+        抓取公告正文
+        """
+        if not url or not str(url).startswith('http'):
+            return ''
+            
+        try:
+            # 简单去重/缓存检查可以在这里加
+            
+            # 请求页面
+            response = safe_request(url)
+            if not response:
+                return ''
+                
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 东方财富公告详情页通常在 .detail-body 或 .ctx-content 中
+            content_div = soup.find('div', {'class': 'detail-body'})
+            if not content_div:
+                content_div = soup.find('div', {'class': 'ctx-content'})
+            
+            if content_div:
+                return content_div.get_text(strip=True)
+                
+            # 尝试获取PDF链接 (部分页面是PDF预览)
+            pdf_link = soup.find('a', href=lambda x: x and x.endswith('.pdf'))
+            if pdf_link:
+                return f"[PDF文件] {pdf_link['href']}"
+                
+            return ''
+            
+        except Exception as e:
+            logger.debug(f"抓取内容失败 {url}: {e}")
+            return ''
+
     def collect_recent(self, days: int = 7) -> pd.DataFrame:
         """
         采集最近N天的公告

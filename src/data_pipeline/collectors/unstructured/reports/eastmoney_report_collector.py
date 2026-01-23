@@ -5,8 +5,6 @@
 
 支持：
 - PDF研报文本即时提取（多引擎支持）
-- 同花顺数据补充（目标价、分析师）
-- 评级变化追踪
 - 清洗模块集成
 """
 
@@ -20,8 +18,6 @@ import pandas as pd
 from ..base import UnstructuredCollector
 from ..cleaning_adapter import CleaningMixin
 from ..request_utils import safe_download_bytes
-from .ths_rating_collector import enrich_reports_with_ths_data
-from .rating_change_tracker import RatingChangeTracker
 
 logger = logging.getLogger(__name__)
 
@@ -132,14 +128,6 @@ class EastMoneyReportCollector(CleaningMixin, UnstructuredCollector):
         result = pd.concat(all_data, ignore_index=True)
         result = result.drop_duplicates(subset=['report_id'], keep='first')
         
-        # 使用同花顺数据补充缺失的目标价和分析师
-        logger.info("正在补充同花顺数据（目标价、分析师）...")
-        result = enrich_reports_with_ths_data(result, start_date, end_date)
-        
-        # 检测评级变化
-        logger.info("正在检测评级变化...")
-        rating_tracker = RatingChangeTracker()
-        result = rating_tracker.detect_changes_batch(result)
         
         return self._standardize_output(result)
     

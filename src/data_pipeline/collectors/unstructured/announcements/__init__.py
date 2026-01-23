@@ -9,11 +9,6 @@
 - get_cninfo_announcements_with_text: 带文本提取的公告采集（推荐）
 """
 
-from .tushare_collector import (
-    TushareAnnouncementCollector,
-    get_tushare_announcements,
-)
-
 from .akshare_collector import (
     AKShareAnnouncementCollector,
     get_akshare_announcements,
@@ -37,7 +32,6 @@ from .announcement_collector import (
 
 __all__ = [
     # Collectors
-    'TushareAnnouncementCollector',
     'AKShareAnnouncementCollector',
     'CninfoAnnouncementCrawler',
     'AnnouncementCollector',
@@ -50,7 +44,6 @@ __all__ = [
     'get_full_market_history',
     
     # Source-specific functions
-    'get_tushare_announcements',
     'get_akshare_announcements',
     'get_cninfo_announcements',
     'get_cninfo_announcements_with_text',  # 带文本提取

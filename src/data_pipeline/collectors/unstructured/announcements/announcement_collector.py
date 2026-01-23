@@ -23,7 +23,6 @@ from ..base import (
     generate_task_id,
     parse_date_range
 )
-from .tushare_collector import TushareAnnouncementCollector
 from .akshare_collector import AKShareAnnouncementCollector
 from .cninfo_crawler import CninfoAnnouncementCrawler
 
@@ -37,9 +36,8 @@ class AnnouncementCollector:
     聚合多个数据源，提供标准化的公告采集API
     
     数据源优先级：
-    1. Tushare - 数据质量高，需要权限
-    2. AKShare - 免费，数据可能不完整
-    3. Cninfo - 最完整，需要爬取
+    1. AKShare - 免费，数据可能不完整
+    2. Cninfo - 最完整，需要爬取
     
     使用示例:
         >>> collector = AnnouncementCollector()
@@ -78,7 +76,7 @@ class AnnouncementCollector:
             use_proxy: 是否为爬虫使用代理
             enable_fallback: 是否启用数据源降级
         """
-        self.source_priority = source_priority or ['tushare', 'cninfo', 'akshare']
+        self.source_priority = source_priority or ['cninfo', 'akshare']
         self.use_proxy = use_proxy
         self.enable_fallback = enable_fallback
         
@@ -90,10 +88,6 @@ class AnnouncementCollector:
     
     def _init_collectors(self):
         """初始化各数据源采集器"""
-        try:
-            self._collectors['tushare'] = TushareAnnouncementCollector()
-        except Exception as e:
-            self.logger.warning(f"Tushare 初始化失败: {e}")
         
         try:
             self._collectors['akshare'] = AKShareAnnouncementCollector()
@@ -167,14 +161,7 @@ class AnnouncementCollector:
             try:
                 self.logger.info(f"使用 {source} 采集公告...")
                 
-                if source == 'tushare':
-                    df = collector.collect(
-                        start_date=start_date,
-                        end_date=end_date,
-                        ts_codes=ts_codes,
-                        include_delisted=include_delisted
-                    )
-                elif source == 'akshare':
+                if source == 'akshare':
                     # 转换代码格式
                     symbols = None
                     if ts_codes:

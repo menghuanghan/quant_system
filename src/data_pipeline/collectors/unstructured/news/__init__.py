@@ -19,6 +19,11 @@ from .exchange_news_crawler import (
     get_exchange_news,
 )
 
+from .official_exchange_news_crawler import (
+    OfficialExchangeNewsCrawler,
+    get_official_exchange_news,
+)
+
 from .news_collector import (
     NewsCollector,
     get_news,
@@ -35,6 +40,7 @@ __all__ = [
     # Collectors
     'CCTVNewsCollector',
     'ExchangeNewsCrawler',
+    'OfficialExchangeNewsCrawler',
     'NewsCollector',
     
     # Main functions
@@ -47,4 +53,5 @@ __all__ = [
     'get_cctv_news',
     'get_cctv_news_recent',
     'get_exchange_news',
+    'get_official_exchange_news',
 ]

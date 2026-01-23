@@ -86,7 +86,6 @@ class AnnouncementCategory(Enum):
 
 class DataSourceType(Enum):
     """数据源类型枚举"""
-    TUSHARE = "tushare"
     AKSHARE = "akshare"
     CNINFO = "cninfo"
 
