@@ -328,36 +328,54 @@ class MoneyFlowMarketCollector(BaseCollector):
         params = {}
         if trade_date:
             params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+            return pro.moneyflow_mkt(**params)
         
-        # moneyflow_mkt 接口
-        df = pro.moneyflow_mkt(**params)
+        # 分块采集以避免API限制
+        if start_date and end_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    # Tushare限制约300条。为了稳妥，按月采集。
+                    from datetime import timedelta
+                    next_month = (current_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+                    chunk_end_dt = min(next_month - timedelta(days=1), end_dt)
+                    
+                    p = params.copy()
+                    p['start_date'] = current_dt.strftime('%Y%m%d')
+                    p['end_date'] = chunk_end_dt.strftime('%Y%m%d')
+                    
+                    try:
+                        chunk_df = pro.moneyflow_mkt(**p)
+                        if not chunk_df.empty:
+                            all_dfs.append(chunk_df)
+                            logger.info(f"大盘资金流向分块采集完成: {p['start_date']} - {p['end_date']} ({len(chunk_df)} 条)")
+                    except Exception as e:
+                        logger.warning(f"大盘资金流向分块采集失败 ({p['start_date']}-{p['end_date']}): {e}")
+                    
+                    current_dt = chunk_end_dt + timedelta(days=1)
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+                else:
+                    df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            except Exception as e:
+                logger.error(f"大盘资金流向分块逻辑异常: {e}")
+                if start_date: params['start_date'] = start_date
+                if end_date: params['end_date'] = end_date
+                df = pro.moneyflow_mkt(**params)
+        else:
+             if start_date: params['start_date'] = start_date
+             if end_date: params['end_date'] = end_date
+             df = pro.moneyflow_mkt(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        # 字段转换
-        # Tushare 返回: trade_date, close_hsgt, close_000001, close_399001, net_amount_hsgt, net_amount_000001, net_amount_399001
-        # 我们需要 main_net (主力), retail_net (散户)
-        # Tushare 的 moneyflow_mkt 只有沪深港通和指数的流向，没有"大盘主力/散户"的概念？
-        # 查阅文档：moneyflow_mkt 获取沪深港通资金流向，或者大盘？
-        # 其实 moneyflow_hsgt 才是沪深港通。
-        # Tushare 文档：moneyflow_mkt:获取大盘资金流向，包含沪市、深市、北向、南向。
-        # 实际上 Tushare 的 moneyflow_mkt 返回的是整个市场的。
-        
-        # 如果没有直接的主力/散户字段，可能需要调整OUTPUT_FIELDS或者映射
-        # AkShare 返回的是主力净流入、小单净流入。
-        # Tushare 好像没有这个粒度的大盘数据（除非用 moneyflow_hsgt）。
-        # 如果 Tushare 没有对应数据，那么这个添加可能是徒劳的。
-        # 让我们保持 Tushare 的添加，但如果没有对应列就只能填 None。
-        
         df = self._convert_date_format(df, ['trade_date'])
-        
-        # 假设无法从 Tushare 获取主力/散户净流入，则主要依赖 AkShare
-        # 但既然添加了，就转换一下日期
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -491,12 +509,46 @@ class HSGTFlowCollector(BaseCollector):
         params = {}
         if trade_date:
             params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+            return pro.moneyflow_hsgt(**params)
         
-        df = pro.moneyflow_hsgt(**params)
+        # 分块采集
+        if start_date and end_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    next_year = current_dt.year + 1
+                    chunk_end_dt = min(datetime(next_year, 1, 1) - timedelta(days=1), end_dt)
+                    
+                    p = params.copy()
+                    p['start_date'] = current_dt.strftime('%Y%m%d')
+                    p['end_date'] = chunk_end_dt.strftime('%Y%m%d')
+                    
+                    try:
+                        chunk_df = pro.moneyflow_hsgt(**p)
+                        if not chunk_df.empty:
+                            all_dfs.append(chunk_df)
+                    except Exception as e:
+                        logger.warning(f"沪深港通资金分块采集失败 ({p['start_date']}-{p['end_date']}): {e}")
+                    
+                    current_dt = chunk_end_dt + timedelta(days=1)
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+                else:
+                    df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            except Exception as e:
+                logger.error(f"沪深港通资金分块逻辑异常: {e}")
+                if start_date: params['start_date'] = start_date
+                if end_date: params['end_date'] = end_date
+                df = pro.moneyflow_hsgt(**params)
+        else:
+            if start_date: params['start_date'] = start_date
+            if end_date: params['end_date'] = end_date
+            df = pro.moneyflow_hsgt(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -571,12 +623,13 @@ def get_money_flow(
                             start_date=start_date, end_date=end_date)
 
 
-def get_money_flow_industry(sector_type: str = 'industry') -> pd.DataFrame:
+def get_money_flow_industry(sector_type: str = 'industry', **kwargs) -> pd.DataFrame:
     """
     获取行业资金流向数据
     
     Args:
         sector_type: 板块类型（industry=行业，concept=概念，area=地区）
+        **kwargs: 其他参数，如 start_date, end_date (由调度器传入)
     
     Returns:
         DataFrame: 行业资金流向数据
@@ -585,7 +638,7 @@ def get_money_flow_industry(sector_type: str = 'industry') -> pd.DataFrame:
         >>> df = get_money_flow_industry(sector_type='industry')
     """
     collector = MoneyFlowIndustryCollector()
-    return collector.collect(sector_type=sector_type)
+    return collector.collect(sector_type=sector_type, **kwargs)
 
 
 def get_money_flow_market(

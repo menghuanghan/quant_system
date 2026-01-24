@@ -226,10 +226,14 @@ class IndexDailyCollector(BaseCollector):
         # 降级到BaoStock
         try:
             if ts_code:
-                df = self._collect_from_baostock(ts_code, start_date, end_date)
-                if not df.empty:
-                    logger.info(f"从BaoStock成功获取 {len(df)} 条指数日线数据")
-                    return df
+                # 过滤掉已知BaoStock不支持或可能导致异常的后缀（如长江指数 .CJ）
+                if ts_code.endswith('.CJ'):
+                    logger.info(f"BaoStock 不支持 .CJ 后缀指数: {ts_code}, 跳过")
+                else:
+                    df = self._collect_from_baostock(ts_code, start_date, end_date)
+                    if not df.empty:
+                        logger.info(f"从BaoStock成功获取 {len(df)} 条指数日线数据")
+                        return df
         except Exception as e:
             logger.error(f"BaoStock获取指数日线失败: {e}")
         
@@ -335,20 +339,26 @@ class IndexDailyCollector(BaseCollector):
         import baostock as bs
         
         try:
-            # 登录BaoStock
-            lg = bs.login()
+            # 确保登录 (使用基类的 source_manager)
+            if not self.source_manager.ensure_baostock_login():
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             
             # 转换代码格式
             code = ts_code.split('.')[0] if '.' in ts_code else ts_code
             if ts_code.endswith('.SH') or code.startswith('0'):
                 bs_code = f'sh.{code}'
-            else:
+            elif ts_code.endswith('.SZ') or code.startswith(('3', '0')):
                 bs_code = f'sz.{code}'
+            else:
+                # 其他后缀（如 .CSI, .MSCI 等）BaoStock 往往不支持或格式不同
+                logger.warning(f"BaoStock 可能不支持该指数格式: {ts_code}")
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             
             # 格式化日期
             start = datetime.strptime(start_date, '%Y%m%d').strftime('%Y-%m-%d') if start_date else '2020-01-01'
             end = datetime.strptime(end_date, '%Y%m%d').strftime('%Y-%m-%d') if end_date else datetime.now().strftime('%Y-%m-%d')
             
+            logger.debug(f"BaoStock 查询: {bs_code}, {start} ~ {end}")
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 "date,code,open,high,low,close,preclose,volume,amount,pctChg",
@@ -357,11 +367,13 @@ class IndexDailyCollector(BaseCollector):
                 frequency='d'
             )
             
-            data_list = []
-            while (rs.error_code == '0') & rs.next():
-                data_list.append(rs.get_row_data())
+            if rs.error_code != '0':
+                logger.warning(f"BaoStock 查询失败 [{ts_code}]: {rs.error_msg}")
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             
-            bs.logout()
+            data_list = []
+            while rs.next():
+                data_list.append(rs.get_row_data())
             
             if not data_list:
                 return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -369,7 +381,7 @@ class IndexDailyCollector(BaseCollector):
             df = pd.DataFrame(data_list, columns=rs.fields)
             
         except Exception as e:
-            logger.warning(f"BaoStock获取指数日线失败: {e}")
+            logger.error(f"BaoStock获取指数日线异常: {e}")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 标准化字段
@@ -735,15 +747,18 @@ def get_index_daily(
 
 def get_index_weight(
     index_code: Optional[str] = None,
+    ts_code: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取指数成分权重
     
     Args:
         index_code: 指数代码
+        ts_code: 指数代码（别名，与index_code等效）
         trade_date: 交易日期
         start_date: 开始日期
         end_date: 结束日期
@@ -754,6 +769,10 @@ def get_index_weight(
     Example:
         >>> df = get_index_weight(index_code='000300.SH', trade_date='20250115')
     """
+    # 如果提供了ts_code但没有index_code，使用ts_code作为index_code
+    if ts_code and not index_code:
+        index_code = ts_code
+    
     collector = IndexWeightCollector()
     return collector.collect(index_code=index_code, trade_date=trade_date, start_date=start_date, end_date=end_date)
 

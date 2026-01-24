@@ -922,7 +922,13 @@ class SocialFinanceCollector(BaseCollector):
         if end_m:
             params['end_m'] = end_m
         
-        df = pro.sf(**params)
+        try:
+            df = pro.cn_sf(**params)
+        except Exception:
+            try:
+                df = pro.sf(**params)
+            except Exception:
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -963,71 +969,79 @@ class SocialFinanceCollector(BaseCollector):
 
 def get_cn_gdp(
     start_q: Optional[str] = None,
-    end_q: Optional[str] = None
+    end_q: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取中国GDP数据"""
     collector = ChinaGDPCollector()
-    return collector.collect(start_q=start_q, end_q=end_q)
+    return collector.collect(start_q=start_q, end_q=end_q, **kwargs)
 
 
 def get_cn_cpi(
     start_m: Optional[str] = None,
-    end_m: Optional[str] = None
+    end_m: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取中国CPI数据"""
     collector = ChinaCPICollector()
-    return collector.collect(start_m=start_m, end_m=end_m)
+    return collector.collect(start_m=start_m, end_m=end_m, **kwargs)
 
 
 def get_cn_ppi(
     start_m: Optional[str] = None,
-    end_m: Optional[str] = None
+    end_m: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取中国PPI数据"""
     collector = ChinaPPICollector()
-    return collector.collect(start_m=start_m, end_m=end_m)
+    return collector.collect(start_m=start_m, end_m=end_m, **kwargs)
 
 
 def get_cn_pmi(
     start_m: Optional[str] = None,
-    end_m: Optional[str] = None
+    end_m: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取中国PMI数据"""
     collector = ChinaPMICollector()
-    return collector.collect(start_m=start_m, end_m=end_m)
+    return collector.collect(start_m=start_m, end_m=end_m, **kwargs)
 
 
 def get_cn_m2(
     start_m: Optional[str] = None,
-    end_m: Optional[str] = None
+    end_m: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取中国货币供应量数据"""
     collector = ChinaMoneySupplyCollector()
-    return collector.collect(start_m=start_m, end_m=end_m)
+    return collector.collect(start_m=start_m, end_m=end_m, **kwargs)
 
 
 def get_shibor(
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取Shibor利率数据"""
     collector = ShiborCollector()
-    return collector.collect(start_date=start_date, end_date=end_date)
+    return collector.collect(start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_lpr(
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取LPR利率数据"""
     collector = LPRCollector()
-    return collector.collect(start_date=start_date, end_date=end_date)
+    return collector.collect(start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_sf(
     start_m: Optional[str] = None,
-    end_m: Optional[str] = None
+    end_m: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """获取社会融资规模数据"""
     collector = SocialFinanceCollector()
-    return collector.collect(start_m=start_m, end_m=end_m)
+    return collector.collect(start_m=start_m, end_m=end_m, **kwargs)

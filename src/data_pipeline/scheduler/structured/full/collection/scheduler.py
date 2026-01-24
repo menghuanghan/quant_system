@@ -177,8 +177,12 @@ class FullCollectionScheduler:
         # 采集器函数映射（懒加载）
         self._collector_funcs: Dict[str, Callable] = {}
         
-        # 股票列表缓存
+        # 证券列表缓存
         self._stock_list_cache: Optional[pd.DataFrame] = None
+        self._fund_list_cache: Optional[pd.DataFrame] = None
+        self._index_list_cache: Optional[pd.DataFrame] = None
+        self._option_list_cache: Optional[pd.DataFrame] = None
+        self._bond_list_cache: Optional[pd.DataFrame] = None
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -402,14 +406,13 @@ class FullCollectionScheduler:
         try:
             # 预期与预测分析域
             from src.data_pipeline.collectors.structured.expectations import (
-                get_earnings_forecast, get_broker_forecast, get_consensus_forecast,
+                get_earnings_forecast, get_consensus_forecast,
                 get_inst_rating, get_rating_summary, get_inst_survey,
                 get_analyst_rank, get_analyst_detail, 
                 get_broker_gold_stock, get_forecast_revision,
             )
             self._collector_funcs.update({
                 "get_earnings_forecast": get_earnings_forecast,
-                "get_broker_forecast": get_broker_forecast,
                 "get_consensus_forecast": get_consensus_forecast,
                 "get_inst_rating": get_inst_rating,
                 "get_rating_summary": get_rating_summary,
@@ -448,6 +451,8 @@ class FullCollectionScheduler:
         
         logger.info(f"成功加载 {len(self._collector_funcs)} 个采集器函数")
     
+    
+    
     def _get_stock_list(self) -> List[str]:
         """获取全A股股票列表"""
         if self._stock_list_cache is not None:
@@ -477,6 +482,126 @@ class FullCollectionScheduler:
         
         logger.error("无法获取股票列表")
         return []
+
+    def _get_fund_list(self) -> List[str]:
+        """获取全量基金列表"""
+        if self._fund_list_cache is not None:
+            return self._fund_list_cache['ts_code'].tolist()
+        
+        logger.info("获取全量基金列表...")
+        
+        # 尝试从本地文件加载
+        fund_list_path = self.output_dir / "derivatives" / "fund_basic.parquet"
+        if fund_list_path.exists():
+            try:
+                self._fund_list_cache = pd.read_parquet(fund_list_path)
+                logger.info(f"从本地文件加载基金列表: {len(self._fund_list_cache)} 只")
+                return self._fund_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.warning(f"读取本地基金列表失败: {e}")
+        
+        # 使用采集器获取
+        if "get_fund_basic" in self._collector_funcs:
+            try:
+                self._fund_list_cache = self._collector_funcs["get_fund_basic"]()
+                if not self._fund_list_cache.empty:
+                    logger.info(f"从API获取基金列表: {len(self._fund_list_cache)} 只")
+                    return self._fund_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.error(f"获取基金列表失败: {e}")
+        
+        logger.error("无法获取基金列表")
+        return []
+
+    def _get_index_list(self) -> List[str]:
+        """获取全量指数列表"""
+        if self._index_list_cache is not None:
+            return self._index_list_cache['ts_code'].tolist()
+        
+        logger.info("获取全量指数列表...")
+        
+        # 尝试从本地文件加载
+        index_list_path = self.output_dir / "index_benchmark" / "index_basic.parquet"
+        if index_list_path.exists():
+            try:
+                self._index_list_cache = pd.read_parquet(index_list_path)
+                logger.info(f"从本地文件加载指数列表: {len(self._index_list_cache)} 只")
+                return self._index_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.warning(f"读取本地指数列表失败: {e}")
+        
+        # 使用采集器获取
+        if "get_index_basic" in self._collector_funcs:
+            try:
+                self._index_list_cache = self._collector_funcs["get_index_basic"]()
+                if not self._index_list_cache.empty:
+                    logger.info(f"从API获取指数列表: {len(self._index_list_cache)} 只")
+                    return self._index_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.error(f"获取指数列表失败: {e}")
+        
+        logger.error("无法获取指数列表")
+        return []
+
+    def _get_option_list(self) -> List[str]:
+        """获取全量期权列表"""
+        if self._option_list_cache is not None:
+            return self._option_list_cache['ts_code'].tolist()
+        
+        logger.info("获取全量期权列表...")
+        
+        # 尝试从本地文件加载
+        opt_list_path = self.output_dir / "derivatives" / "opt_basic.parquet"
+        if opt_list_path.exists():
+            try:
+                self._option_list_cache = pd.read_parquet(opt_list_path)
+                logger.info(f"从本地文件加载期权列表: {len(self._option_list_cache)} 只")
+                return self._option_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.warning(f"读取本地期权列表失败: {e}")
+        
+        # 使用采集器获取
+        if "get_opt_basic" in self._collector_funcs:
+            try:
+                self._option_list_cache = self._collector_funcs["get_opt_basic"]()
+                if not self._option_list_cache.empty:
+                    logger.info(f"从API获取期权列表: {len(self._option_list_cache)} 只")
+                    return self._option_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.error(f"获取期权列表失败: {e}")
+        
+        logger.error("无法获取期权列表")
+        return []
+
+    def _get_bond_list(self) -> List[str]:
+        """获取全量债券（转债）列表"""
+        if self._bond_list_cache is not None:
+            return self._bond_list_cache['ts_code'].tolist()
+        
+        logger.info("获取全量可转债列表...")
+        
+        # 尝试从本地文件加载
+        bond_list_path = self.output_dir / "derivatives" / "cb_basic.parquet"
+        if bond_list_path.exists():
+            try:
+                self._bond_list_cache = pd.read_parquet(bond_list_path)
+                logger.info(f"从本地文件加载转债列表: {len(self._bond_list_cache)} 只")
+                return self._bond_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.warning(f"读取本地转债列表失败: {e}")
+        
+        # 使用采集器获取
+        if "get_cb_basic" in self._collector_funcs:
+            try:
+                self._bond_list_cache = self._collector_funcs["get_cb_basic"]()
+                if not self._bond_list_cache.empty:
+                    logger.info(f"从API获取转债列表: {len(self._bond_list_cache)} 只")
+                    return self._bond_list_cache['ts_code'].tolist()
+            except Exception as e:
+                logger.error(f"获取转债列表失败: {e}")
+        
+        logger.error("无法获取转债列表")
+        return []
     
     def _save_to_parquet(
         self, 
@@ -485,6 +610,10 @@ class FullCollectionScheduler:
         append: bool = False
     ) -> bool:
         """保存数据到parquet文件"""
+        if df.empty:
+            logger.debug(f"跳过保存空数据: {output_path}")
+            return True
+            
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -506,6 +635,22 @@ class FullCollectionScheduler:
         ts_code: Optional[str] = None,
     ) -> TaskResult:
         """执行单个采集任务"""
+        # 检查是否跳过已存在的文件
+        output_file = task.output_file
+        if ts_code and '{ts_code}' in output_file:
+            output_file = output_file.replace('{ts_code}', ts_code.replace('.', '_'))
+        
+        output_path = self.output_dir / task.domain / output_file
+        
+        if self.skip_existing and output_path.exists():
+            logger.info(f"跳过已存在的文件: {output_path}")
+            return TaskResult(
+                task_name=task.name,
+                domain=task.domain,
+                status=TaskStatus.SKIPPED,
+                output_path=str(output_path),
+            )
+
         result = TaskResult(
             task_name=task.name,
             domain=task.domain,
@@ -534,6 +679,20 @@ class FullCollectionScheduler:
             # 执行采集
             logger.debug(f"执行采集: {task.name}, 参数: {params}")
             df = collector_func(**params)
+            
+            if df is not None and not df.empty:
+                # 强制日期过滤，确保数据不超出指定范围
+                date_field = task.date_field or 'trade_date'
+                if date_field in df.columns:
+                    try:
+                        # 统一转换为字符串进行比较，或者转换为datetime
+                        df[date_field] = df[date_field].astype(str).str.replace('-', '').str.replace('/', '')
+                        mask = (df[date_field] >= self.start_date) & (df[date_field] <= self.end_date)
+                        df = df[mask].copy()
+                        if df.empty:
+                            logger.warning(f"任务 {task.name} 经过日期过滤后返回空数据")
+                    except Exception as e:
+                        logger.warning(f"日期过滤执行失败: {e}")
             
             if df is None or df.empty:
                 logger.warning(f"任务 {task.name} 返回空数据")
@@ -631,6 +790,58 @@ class FullCollectionScheduler:
                 return [result]
             
             results = self._execute_batch_task(task, stock_list)
+        elif task.stock_scope == StockScope.ALL_FUND:
+            # 需要遍历全量基金
+            fund_list = self._get_fund_list()
+            if not fund_list:
+                logger.error(f"任务 {task.name} 无法获取基金列表，跳过")
+                result = TaskResult(
+                    task_name=task.name,
+                    domain=task.domain,
+                    status=TaskStatus.SKIPPED,
+                    error_message="无法获取基金列表"
+                )
+                return [result]
+            results = self._execute_batch_task(task, fund_list)
+        elif task.stock_scope == StockScope.ALL_INDEX:
+            # 需要遍历全量指数
+            index_list = self._get_index_list()
+            if not index_list:
+                logger.error(f"任务 {task.name} 无法获取指数列表，跳过")
+                result = TaskResult(
+                    task_name=task.name,
+                    domain=task.domain,
+                    status=TaskStatus.SKIPPED,
+                    error_message="无法获取指数列表"
+                )
+                return [result]
+            results = self._execute_batch_task(task, index_list)
+        elif task.stock_scope == StockScope.ALL_OPTION:
+            # 需要遍历全量期权
+            option_list = self._get_option_list()
+            if not option_list:
+                logger.error(f"任务 {task.name} 无法获取期权列表，跳过")
+                result = TaskResult(
+                    task_name=task.name,
+                    domain=task.domain,
+                    status=TaskStatus.SKIPPED,
+                    error_message="无法获取期权列表"
+                )
+                return [result]
+            results = self._execute_batch_task(task, option_list)
+        elif task.stock_scope == StockScope.ALL_BOND:
+            # 需要遍历全量可转债
+            bond_list = self._get_bond_list()
+            if not bond_list:
+                logger.error(f"任务 {task.name} 无法获取转债列表，跳过")
+                result = TaskResult(
+                    task_name=task.name,
+                    domain=task.domain,
+                    status=TaskStatus.SKIPPED,
+                    error_message="无法获取转债列表"
+                )
+                return [result]
+            results = self._execute_batch_task(task, bond_list)
         else:
             # 单次采集
             result = self._execute_single_task(task)
@@ -716,6 +927,7 @@ class FullCollectionScheduler:
         self,
         domains: Optional[List[str]] = None,
         exclude_domains: Optional[List[str]] = None,
+        task_names: Optional[List[str]] = None,
     ) -> CollectionProgress:
         """
         执行全部数据域的采集任务
@@ -723,6 +935,7 @@ class FullCollectionScheduler:
         Args:
             domains: 指定要执行的数据域列表，None表示执行全部
             exclude_domains: 要排除的数据域列表
+            task_names: 指定要执行的任务名称列表 (可选)
         
         Returns:
             采集进度对象
@@ -737,10 +950,12 @@ class FullCollectionScheduler:
             all_domains = [d for d in all_domains if d not in exclude_domains]
         
         # 初始化进度
-        total_tasks = sum(
-            len([t for t in TASKS_BY_DOMAIN[d] if t.enabled and not t.realtime])
-            for d in all_domains
-        )
+        total_tasks = 0
+        for d in all_domains:
+            tasks = [t for t in TASKS_BY_DOMAIN[d] if t.enabled and not t.realtime]
+            if task_names:
+                tasks = [t for t in tasks if t.name in task_names]
+            total_tasks += len(tasks)
         self.progress = CollectionProgress(
             total_tasks=total_tasks,
             start_time=datetime.now()
@@ -756,7 +971,7 @@ class FullCollectionScheduler:
         # 按数据域依次执行
         for domain in all_domains:
             logger.info("-" * 40)
-            self.run_domain(domain)
+            self.run_domain(domain, task_names=task_names)
         
         # 保存采集报告
         self._save_collection_report()

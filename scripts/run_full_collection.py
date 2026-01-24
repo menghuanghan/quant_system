@@ -29,14 +29,6 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/full_collection.log', encoding='utf-8'),
-    ]
-)
 logger = logging.getLogger(__name__)
 
 
@@ -50,15 +42,15 @@ def parse_args():
     parser.add_argument(
         '--start-date',
         type=str,
-        default=(datetime.now() - timedelta(days=3*365)).strftime('%Y%m%d'),
-        help='开始日期（YYYYMMDD格式），默认近3年'
+        default='20210101',
+        help='开始日期（YYYYMMDD格式），默认 20210101'
     )
     
     parser.add_argument(
         '--end-date',
         type=str,
-        default=datetime.now().strftime('%Y%m%d'),
-        help='结束日期（YYYYMMDD格式），默认今天'
+        default='20251231',
+        help='结束日期（YYYYMMDD格式），默认 20251231'
     )
     
     parser.add_argument(
@@ -107,6 +99,21 @@ def parse_args():
         '--list-domains',
         action='store_true',
         help='列出所有数据域并退出'
+    )
+    
+    parser.add_argument(
+        '--tasks',
+        type=str,
+        nargs='+',
+        default=None,
+        help='指定具体要执行的任务名称列表'
+    )
+    
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        default='logs/full_collection.log',
+        help='日志文件路径'
     )
     
     return parser.parse_args()
@@ -166,6 +173,20 @@ def main():
     """主函数"""
     args = parse_args()
     
+    # 配置日志
+    log_path = Path(args.log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(args.log_file, encoding='utf-8'),
+        ],
+        force=True  # 允许重新配置
+    )
+    
     # 确保日志目录存在
     Path('logs').mkdir(exist_ok=True)
     
@@ -208,6 +229,7 @@ def main():
         progress = scheduler.run_all(
             domains=args.domains,
             exclude_domains=args.exclude_domains,
+            task_names=args.tasks
         )
         
         # 输出汇总

@@ -495,13 +495,14 @@ class ConsensusForecastCollector(BaseCollector):
             logger.warning(f"AkShare获取一致预期失败: {e}")
         
         # 降级：通过report_rc聚合计算
-        try:
-            df = self._calculate_from_broker_forecast(ts_code, year)
-            if not df.empty:
-                logger.info(f"从券商预测聚合计算得到 {len(df)} 条一致预期数据")
-                return df
-        except Exception as e:
-            logger.error(f"聚合计算一致预期失败: {e}")
+        # 降级：通过report_rc聚合计算
+        # try:
+        #     df = self._calculate_from_broker_forecast(ts_code, year)
+        #     if not df.empty:
+        #         logger.info(f"从券商预测聚合计算得到 {len(df)} 条一致预期数据")
+        #         return df
+        # except Exception as e:
+        #     logger.error(f"聚合计算一致预期失败: {e}")
         
         logger.error("所有数据源均无法获取一致预期数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)

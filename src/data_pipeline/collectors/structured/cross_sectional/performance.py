@@ -617,7 +617,8 @@ class LimitUpPoolCollector(BaseCollector):
 
 def get_sector_performance(
     sector_type: str = 'industry',
-    trade_date: Optional[str] = None
+    trade_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取板块涨跌幅排行
@@ -634,10 +635,10 @@ def get_sector_performance(
         >>> df = get_sector_performance(sector_type='concept')
     """
     collector = SectorPerformanceCollector()
-    return collector.collect(sector_type=sector_type, trade_date=trade_date)
+    return collector.collect(sector_type=sector_type, trade_date=trade_date, **kwargs)
 
 
-def get_industry_board_em() -> pd.DataFrame:
+def get_industry_board_em(**kwargs) -> pd.DataFrame:
     """
     获取东方财富行业板块行情
     
@@ -648,10 +649,10 @@ def get_industry_board_em() -> pd.DataFrame:
         >>> df = get_industry_board_em()
     """
     collector = IndustryBoardEMCollector()
-    return collector.collect()
+    return collector.collect(**kwargs)
 
 
-def get_concept_board_em() -> pd.DataFrame:
+def get_concept_board_em(**kwargs) -> pd.DataFrame:
     """
     获取东方财富概念板块行情
     
@@ -662,14 +663,15 @@ def get_concept_board_em() -> pd.DataFrame:
         >>> df = get_concept_board_em()
     """
     collector = ConceptBoardEMCollector()
-    return collector.collect()
+    return collector.collect(**kwargs)
 
 
 def get_sector_hist(
-    sector_name: str,
+    sector_name: Optional[str] = None,
     sector_type: str = 'concept',
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取板块历史行情
@@ -687,15 +689,24 @@ def get_sector_hist(
         >>> df = get_sector_hist('人工智能', 'concept')
         >>> df = get_sector_hist('银行', 'industry', start_date='20250101')
     """
+    if not sector_name:
+        # 尝试从 kwargs 中获取可能传递过来的代码/名称
+        sector_name = kwargs.get('ts_code') or kwargs.get('symbol')
+        
+    if not sector_name:
+        logger.warning("get_sector_hist: sector_name is required but not provided")
+        return pd.DataFrame()
+
     collector = SectorHistCollector()
     return collector.collect(sector_name=sector_name, sector_type=sector_type, 
-                            start_date=start_date, end_date=end_date)
+                            start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_sector_rank(
     sector_type: str = 'concept',
     rank_by: str = 'pct_change',
-    top_n: int = 50
+    top_n: int = 50,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取板块热度排行
@@ -712,10 +723,10 @@ def get_sector_rank(
         >>> df = get_sector_rank(sector_type='concept', rank_by='pct_change', top_n=20)
     """
     collector = SectorRankCollector()
-    return collector.collect(sector_type=sector_type, rank_by=rank_by, top_n=top_n)
+    return collector.collect(sector_type=sector_type, rank_by=rank_by, top_n=top_n, **kwargs)
 
 
-def get_limit_up_pool(trade_date: Optional[str] = None) -> pd.DataFrame:
+def get_limit_up_pool(trade_date: Optional[str] = None, **kwargs) -> pd.DataFrame:
     """
     获取涨停板池
     
@@ -729,4 +740,4 @@ def get_limit_up_pool(trade_date: Optional[str] = None) -> pd.DataFrame:
         >>> df = get_limit_up_pool()
     """
     collector = LimitUpPoolCollector()
-    return collector.collect(trade_date=trade_date)
+    return collector.collect(trade_date=trade_date, **kwargs)

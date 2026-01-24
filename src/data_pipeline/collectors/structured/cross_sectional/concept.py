@@ -385,19 +385,47 @@ class THSDailyCollector(BaseCollector):
     ) -> pd.DataFrame:
         """从Tushare获取同花顺板块行情"""
         pro = self.tushare_api
+        import time
+        from datetime import datetime, timedelta
         
         params = {}
         if ts_code:
             params['ts_code'] = ts_code
         if trade_date:
             params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        
-        df = pro.ths_daily(**params)
-        
+            return pro.ths_daily(**params)
+            
+        # 范围查询优化
+        if start_date and end_date and not ts_code:
+            try:
+                cal = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
+                dates = cal['cal_date'].tolist()
+            except Exception:
+                dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
+                
+            all_dfs = []
+            for date in dates:
+                try:
+                    # 同花顺板块接口限流极严 (10次/分钟)
+                    time.sleep(6.2) 
+                    df = pro.ths_daily(trade_date=date)
+                    if not df.empty:
+                        all_dfs.append(df)
+                except Exception as e:
+                    if "访问该接口" in str(e):
+                        time.sleep(30)
+                    else:
+                        logger.warning(f"同花顺行情 {date} 采集失败: {e}")
+            
+            if all_dfs:
+                df = pd.concat(all_dfs, ignore_index=True)
+            else:
+                df = pd.DataFrame()
+        else:
+            if start_date: params['start_date'] = start_date
+            if end_date: params['end_date'] = end_date
+            df = pro.ths_daily(**params)
+            
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
@@ -927,7 +955,8 @@ class KPLConceptConsCollector(BaseCollector):
 def get_ths_index(
     ts_code: Optional[str] = None,
     exchange: str = 'A',
-    type: Optional[str] = None
+    type: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取同花顺概念/行业板块列表
@@ -945,12 +974,13 @@ def get_ths_index(
         >>> df = get_ths_index(type='I')  # 获取行业指数
     """
     collector = THSIndexCollector()
-    return collector.collect(ts_code=ts_code, exchange=exchange, type=type)
+    return collector.collect(ts_code=ts_code, exchange=exchange, type=type, **kwargs)
 
 
 def get_ths_member(
     ts_code: Optional[str] = None,
-    con_code: Optional[str] = None
+    con_code: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取同花顺概念板块成分
@@ -966,14 +996,15 @@ def get_ths_member(
         >>> df = get_ths_member(ts_code='885800.TI')
     """
     collector = THSMemberCollector()
-    return collector.collect(ts_code=ts_code, con_code=con_code)
+    return collector.collect(ts_code=ts_code, con_code=con_code, **kwargs)
 
 
 def get_ths_daily(
     ts_code: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取同花顺板块指数行情
@@ -991,7 +1022,7 @@ def get_ths_daily(
         >>> df = get_ths_daily(ts_code='885800.TI', start_date='20250101')
     """
     collector = THSDailyCollector()
-    return collector.collect(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date)
+    return collector.collect(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_dc_index(
@@ -999,7 +1030,8 @@ def get_dc_index(
     name: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取东方财富概念板块
@@ -1019,13 +1051,14 @@ def get_dc_index(
         >>> df = get_dc_index(name='人形机器人')
     """
     collector = DCIndexCollector()
-    return collector.collect(ts_code=ts_code, name=name, trade_date=trade_date, start_date=start_date, end_date=end_date)
+    return collector.collect(ts_code=ts_code, name=name, trade_date=trade_date, start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_dc_member(
     ts_code: Optional[str] = None,
     con_code: Optional[str] = None,
-    trade_date: Optional[str] = None
+    trade_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取东方财富概念板块成分
@@ -1042,13 +1075,14 @@ def get_dc_member(
         >>> df = get_dc_member(ts_code='BK1184.DC', trade_date='20250102')
     """
     collector = DCMemberCollector()
-    return collector.collect(ts_code=ts_code, con_code=con_code, trade_date=trade_date)
+    return collector.collect(ts_code=ts_code, con_code=con_code, trade_date=trade_date, **kwargs)
 
 
 def get_kpl_concept(
     trade_date: Optional[str] = None,
     ts_code: Optional[str] = None,
-    name: Optional[str] = None
+    name: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取开盘啦题材库
@@ -1067,13 +1101,14 @@ def get_kpl_concept(
     注意：此接口因源站改版暂无新增数据
     """
     collector = KPLConceptCollector()
-    return collector.collect(trade_date=trade_date, ts_code=ts_code, name=name)
+    return collector.collect(trade_date=trade_date, ts_code=ts_code, name=name, **kwargs)
 
 
 def get_kpl_concept_cons(
     trade_date: Optional[str] = None,
     ts_code: Optional[str] = None,
-    con_code: Optional[str] = None
+    con_code: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取开盘啦题材成分
@@ -1092,4 +1127,4 @@ def get_kpl_concept_cons(
     注意：此接口因源站改版暂无新增数据
     """
     collector = KPLConceptConsCollector()
-    return collector.collect(trade_date=trade_date, ts_code=ts_code, con_code=con_code)
+    return collector.collect(trade_date=trade_date, ts_code=ts_code, con_code=con_code, **kwargs)

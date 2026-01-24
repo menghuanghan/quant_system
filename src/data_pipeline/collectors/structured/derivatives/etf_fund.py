@@ -355,27 +355,18 @@ class FundNavCollector(BaseCollector):
         Returns:
             DataFrame: 标准化的基金净值数据
         """
-        # 优先使用Tushare
+        # 仅使用Tushare获取，因为AkShare不提供公告日期(ann_date)
         try:
             df = self._collect_from_tushare(ts_code, nav_date, market, start_date, end_date)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条基金净值数据")
                 return df
         except Exception as e:
-            logger.warning(f"Tushare获取基金净值失败: {e}")
+            logger.error(f"获取基金净值最后失败: {e}")
         
-        # 降级到AkShare
-        try:
-            df = self._collect_from_akshare(ts_code, start_date, end_date)
-            if not df.empty:
-                logger.info(f"从AkShare成功获取 {len(df)} 条基金净值数据")
-                return df
-        except Exception as e:
-            logger.warning(f"AkShare获取基金净值失败: {e}")
-        
-        logger.error("无法获取基金净值数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
+    @retry_on_failure(max_retries=10, delay=10.0, backoff_factor=1.5)
     def _collect_from_tushare(
         self,
         ts_code: Optional[str],
@@ -401,6 +392,12 @@ class FundNavCollector(BaseCollector):
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        # 严格过滤日期范围
+        if 'nav_date' in df.columns and end_date:
+            df = df[df['nav_date'] <= end_date]
+        if 'ann_date' in df.columns and end_date:
+            df = df[df['ann_date'] <= end_date]
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -408,54 +405,7 @@ class FundNavCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(
-        self,
-        ts_code: Optional[str],
-        start_date: Optional[str],
-        end_date: Optional[str]
-    ) -> pd.DataFrame:
-        """从AkShare获取基金净值"""
-        import akshare as ak
-        
-        if not ts_code:
-            logger.warning("AkShare需要指定ts_code获取基金净值")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 提取纯代码
-        code = ts_code.split('.')[0]
-        
-        try:
-            df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
-        except Exception as e:
-            logger.warning(f"AkShare获取基金净值失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 标准化字段
-        column_mapping = {
-            '净值日期': 'nav_date',
-            '单位净值': 'unit_nav',
-            '累计净值': 'accum_nav',
-            '日增长率': 'pct_chg',
-        }
-        df = self._standardize_columns(df, column_mapping)
-        df['ts_code'] = ts_code
-        
-        # 日期格式转换和筛选
-        if 'nav_date' in df.columns:
-            df['nav_date'] = pd.to_datetime(df['nav_date']).dt.strftime('%Y%m%d')
-            if start_date:
-                df = df[df['nav_date'] >= start_date]
-            if end_date:
-                df = df[df['nav_date'] <= end_date]
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+
 
 
 @CollectorRegistry.register("fund_portfolio")
@@ -725,7 +675,8 @@ class FundShareCollector(BaseCollector):
 def get_fund_basic(
     ts_code: Optional[str] = None,
     market: str = 'E',
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取公募基金列表
@@ -734,6 +685,7 @@ def get_fund_basic(
         ts_code: 基金代码
         market: 交易市场（E场内，O场外）
         status: 存续状态（D摘牌，I发行，L上市中）
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 基金列表数据
@@ -743,14 +695,15 @@ def get_fund_basic(
         >>> df = get_fund_basic(market='O', status='L')  # 场外上市基金
     """
     collector = FundBasicCollector()
-    return collector.collect(ts_code=ts_code, market=market, status=status)
+    return collector.collect(ts_code=ts_code, market=market, status=status, **kwargs)
 
 
 def get_fund_daily(
     ts_code: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取ETF日线行情
@@ -769,7 +722,7 @@ def get_fund_daily(
     """
     collector = FundDailyCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,
-                            start_date=start_date, end_date=end_date)
+                            start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_fund_nav(
@@ -777,7 +730,8 @@ def get_fund_nav(
     nav_date: Optional[str] = None,
     market: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取公募基金净值
@@ -798,14 +752,15 @@ def get_fund_nav(
     """
     collector = FundNavCollector()
     return collector.collect(ts_code=ts_code, nav_date=nav_date,
-                            market=market, start_date=start_date, end_date=end_date)
+                            market=market, start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_fund_portfolio(
     ts_code: Optional[str] = None,
     symbol: Optional[str] = None,
     ann_date: Optional[str] = None,
-    period: Optional[str] = None
+    period: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取公募基金持仓
@@ -815,6 +770,7 @@ def get_fund_portfolio(
         symbol: 股票代码
         ann_date: 公告日期
         period: 季度（如20231231）
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 基金持仓数据
@@ -825,14 +781,15 @@ def get_fund_portfolio(
     """
     collector = FundPortfolioCollector()
     return collector.collect(ts_code=ts_code, symbol=symbol,
-                            ann_date=ann_date, period=period)
+                            ann_date=ann_date, period=period, **kwargs)
 
 
 def get_fund_share(
     ts_code: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取基金规模（份额）
@@ -851,4 +808,4 @@ def get_fund_share(
     """
     collector = FundShareCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,
-                            start_date=start_date, end_date=end_date)
+                            start_date=start_date, end_date=end_date, **kwargs)

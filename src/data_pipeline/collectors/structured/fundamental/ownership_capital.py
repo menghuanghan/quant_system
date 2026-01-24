@@ -310,7 +310,10 @@ class PledgeCollector(BaseCollector):
         params = {}
         if ts_code:
             params['ts_code'] = ts_code
-        if end_date:
+            # 如果指定了ts_code，忽略end_date以获取全量历史数据
+            pass
+        elif end_date:
+            # 如果没有ts_code，才使用end_date（例如获取全市场快照）
             params['end_date'] = end_date
         
         df = pro.pledge_stat(**params)
@@ -742,7 +745,8 @@ def get_top10_holders(
 
 def get_pledge(
     ts_code: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取股权质押数据
@@ -755,7 +759,7 @@ def get_pledge(
         DataFrame: 股权质押数据
     """
     collector = PledgeCollector()
-    return collector.collect(ts_code=ts_code, end_date=end_date)
+    return collector.collect(ts_code=ts_code, end_date=end_date, **kwargs)
 
 
 def get_share_float(

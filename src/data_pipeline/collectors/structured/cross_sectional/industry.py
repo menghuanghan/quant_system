@@ -382,19 +382,48 @@ class SWDailyCollector(BaseCollector):
     ) -> pd.DataFrame:
         """从Tushare获取申万行业指数日行情"""
         pro = self.tushare_api
+        import time
+        from datetime import datetime, timedelta
         
         params = {}
         if ts_code:
             params['ts_code'] = ts_code
         if trade_date:
             params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        
-        df = pro.sw_daily(**params)
-        
+            return pro.sw_daily(**params)
+            
+        # 范围查询优化
+        if start_date and end_date and not ts_code:
+            all_dfs = []
+            try:
+                # 获取交易日历以减少空请求
+                cal = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
+                dates = cal['cal_date'].tolist()
+            except Exception:
+                dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
+                
+            for date in dates:
+                    try:
+                        # 申万指数接口限流极严 (10次/分钟)
+                        time.sleep(6.2) 
+                        df = pro.sw_daily(trade_date=date)
+                        if not df.empty:
+                            all_dfs.append(df)
+                    except Exception as e:
+                        if "访问该接口" in str(e):
+                            time.sleep(30) # 触发限流，多等会儿
+                        else:
+                            logger.warning(f"申万行情 {date} 采集失败: {e}")
+            
+            if all_dfs:
+                df = pd.concat(all_dfs, ignore_index=True)
+            else:
+                df = pd.DataFrame()
+        else:
+            if start_date: params['start_date'] = start_date
+            if end_date: params['end_date'] = end_date
+            df = pro.sw_daily(**params)
+            
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
@@ -473,7 +502,8 @@ def get_sw_index_classify(
     level: Optional[str] = None,
     src: str = 'SW2021',
     parent_code: Optional[str] = None,
-    index_code: Optional[str] = None
+    index_code: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取申万行业分类
@@ -492,7 +522,7 @@ def get_sw_index_classify(
         >>> df = get_sw_index_classify(level='L2', parent_code='801010.SI')
     """
     collector = SWIndexClassifyCollector()
-    return collector.collect(level=level, src=src, parent_code=parent_code, index_code=index_code)
+    return collector.collect(level=level, src=src, parent_code=parent_code, index_code=index_code, **kwargs)
 
 
 def get_sw_index_member(
@@ -500,7 +530,8 @@ def get_sw_index_member(
     l2_code: Optional[str] = None,
     l3_code: Optional[str] = None,
     ts_code: Optional[str] = None,
-    is_new: str = 'Y'
+    is_new: str = 'Y',
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取申万行业成分股
@@ -520,14 +551,15 @@ def get_sw_index_member(
         >>> df = get_sw_index_member(ts_code='000001.SZ')
     """
     collector = SWIndexMemberCollector()
-    return collector.collect(l1_code=l1_code, l2_code=l2_code, l3_code=l3_code, ts_code=ts_code, is_new=is_new)
+    return collector.collect(l1_code=l1_code, l2_code=l2_code, l3_code=l3_code, ts_code=ts_code, is_new=is_new, **kwargs)
 
 
 def get_sw_daily(
     ts_code: Optional[str] = None,
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取申万行业指数日行情
@@ -546,4 +578,4 @@ def get_sw_daily(
         >>> df = get_sw_daily(ts_code='801010.SI', start_date='20250101', end_date='20250115')
     """
     collector = SWDailyCollector()
-    return collector.collect(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date)
+    return collector.collect(ts_code=ts_code, trade_date=trade_date, start_date=start_date, end_date=end_date, **kwargs)

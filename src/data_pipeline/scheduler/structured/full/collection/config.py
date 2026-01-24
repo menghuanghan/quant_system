@@ -22,7 +22,11 @@ class StockScope(Enum):
     ALL_A = "all_a"              # 全A股
     SINGLE = "single"           # 单只股票
     INDEX = "index"             # 指数成分
-    NONE = "none"               # 不需要股票代码
+    ALL_FUND = "all_fund"       # 全量基金
+    ALL_INDEX = "all_index"     # 全量指数
+    ALL_OPTION = "all_option"   # 全量期权
+    ALL_BOND = "all_bond"       # 全量债券（转债）
+    NONE = "none"               # 不需要证券代码
 
 
 class CollectionFrequency(Enum):
@@ -232,10 +236,10 @@ MARKET_DATA_TASKS = [
         domain="market_data",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_index_daily",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_INDEX,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="index_daily.parquet",
+        output_file="index_daily/{ts_code}.parquet",
     ),
     CollectionTask(
         name="etf_daily",
@@ -243,10 +247,10 @@ MARKET_DATA_TASKS = [
         domain="market_data",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_etf_daily",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_FUND,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="etf_daily.parquet",
+        output_file="etf_daily/{ts_code}.parquet",
     ),
     
     # 技术指标（时间相关）
@@ -404,7 +408,7 @@ FUNDAMENTAL_TASKS = [
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.QUARTERLY,
         priority=5,
-        output_file="share_structure.parquet",
+        output_file="share_structure/{ts_code}.parquet",
         date_field="ann_date",
     ),
     CollectionTask(
@@ -428,8 +432,8 @@ FUNDAMENTAL_TASKS = [
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.DAILY,
         priority=6,
-        output_file="pledge.parquet",
-        date_field="ann_date",
+        output_file="pledge/{ts_code}.parquet",
+        date_field="end_date",
     ),
     CollectionTask(
         name="share_float",
@@ -503,7 +507,7 @@ TRADING_BEHAVIOR_TASKS = [
         collector_func="get_money_flow_market",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
-        priority=6,
+        priority=4,
         output_file="money_flow_market.parquet",
     ),
     CollectionTask(
@@ -538,9 +542,9 @@ TRADING_BEHAVIOR_TASKS = [
         collector_func="get_margin_detail",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.DAILY,
-        priority=6,
+        priority=7,
         output_file="margin_detail/{ts_code}.parquet",
-        batch_size=50,
+        batch_size=100,
     ),
     CollectionTask(
         name="margin_target",
@@ -596,7 +600,7 @@ TRADING_BEHAVIOR_TASKS = [
         collector_func="get_block_trade",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
-        priority=5,
+        priority=4,
         output_file="block_trade.parquet",
     ),
 ]
@@ -801,27 +805,17 @@ DERIVATIVES_TASKS = [
         output_file="fund_basic.parquet",
     ),
     CollectionTask(
-        name="fund_daily",
-        description="ETF/LOF日线行情",
-        domain="derivatives",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_fund_daily",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=5,
-        output_file="fund_daily.parquet",
-    ),
-    CollectionTask(
         name="fund_nav",
-        description="基金净值",
+        description="公募基金净值",
         domain="derivatives",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_fund_nav",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_FUND,
         frequency=CollectionFrequency.DAILY,
-        priority=5,
-        output_file="fund_nav.parquet",
-        date_field="ann_date",
+        priority=6,
+        output_file="fund_nav/{ts_code}.parquet",
+        date_field="nav_date",
+        batch_size=50,
     ),
     CollectionTask(
         name="fund_portfolio",
@@ -841,11 +835,11 @@ DERIVATIVES_TASKS = [
         domain="derivatives",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_fund_share",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_FUND,
         frequency=CollectionFrequency.QUARTERLY,
         priority=6,
-        output_file="fund_share.parquet",
-        date_field="ann_date",
+        output_file="fund_share/{ts_code}.parquet",
+        date_field="trade_date",
     ),
     
     # 期货与期权
@@ -910,10 +904,10 @@ DERIVATIVES_TASKS = [
         domain="derivatives",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_opt_daily",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_OPTION,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="opt_daily.parquet",
+        output_file="opt_daily/{ts_code}.parquet",
     ),
     
     # 债券与可转债
@@ -945,10 +939,10 @@ DERIVATIVES_TASKS = [
         domain="derivatives",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_cb_daily",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_BOND,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="cb_daily.parquet",
+        output_file="cb_daily/{ts_code}.parquet",
     ),
     CollectionTask(
         name="repo_daily",
@@ -959,7 +953,7 @@ DERIVATIVES_TASKS = [
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="repo_daily.parquet",
+        output_file="repo_daily/{ts_code}.parquet",
     ),
     CollectionTask(
         name="cb_premium",
@@ -988,26 +982,15 @@ INDEX_BENCHMARK_TASKS = [
         output_file="index_basic.parquet",
     ),
     CollectionTask(
-        name="index_daily",
-        description="指数日线行情",
-        domain="index_benchmark",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_index_daily",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=4,
-        output_file="index_daily.parquet",
-    ),
-    CollectionTask(
         name="index_weight",
         description="指数成分权重",
         domain="index_benchmark",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_index_weight",
-        stock_scope=StockScope.NONE,
+        stock_scope=StockScope.ALL_INDEX,
         frequency=CollectionFrequency.MONTHLY,
         priority=5,
-        output_file="index_weight.parquet",
+        output_file="index_weight/{ts_code}.parquet",
     ),
     CollectionTask(
         name="index_member",
@@ -1136,6 +1119,7 @@ MACRO_EXOGENOUS_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="us_treasury.parquet",
+        date_field="date",
     ),
     CollectionTask(
         name="eco_calendar",
@@ -1147,6 +1131,7 @@ MACRO_EXOGENOUS_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="eco_calendar.parquet",
+        date_field="date",
     ),
     
     # 行业与现实经济映射
@@ -1188,19 +1173,6 @@ EXPECTATIONS_TASKS = [
         priority=5,
         output_file="earnings_forecast.parquet",
         date_field="ann_date",
-    ),
-    CollectionTask(
-        name="broker_forecast",
-        description="券商盈利预测",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_broker_forecast",
-        stock_scope=StockScope.ALL_A,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=6,
-        output_file="broker_forecast/{ts_code}.parquet",
-        date_field="ann_date",
-        batch_size=100,
     ),
     CollectionTask(
         name="consensus_forecast",
@@ -1397,6 +1369,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=5,
         output_file="esg_msci.parquet",
+        date_field="rating_date",
     ),
     CollectionTask(
         name="esg_hz",
@@ -1408,6 +1381,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=5,
         output_file="esg_hz.parquet",
+        date_field="date",
     ),
     CollectionTask(
         name="esg_refinitiv",
@@ -1419,6 +1393,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=5,
         output_file="esg_refinitiv.parquet",
+        date_field="date",
     ),
     CollectionTask(
         name="esg_zhiding",
@@ -1430,6 +1405,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=5,
         output_file="esg_zhiding.parquet",
+        date_field="report_date",
     ),
 ]
 

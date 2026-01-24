@@ -11,6 +11,8 @@ import logging
 from typing import Optional, List
 from datetime import datetime, timedelta
 
+import time
+from pathlib import Path
 import pandas as pd
 
 from ..base import (
@@ -258,14 +260,14 @@ class TopInstCollector(BaseCollector):
         """从Tushare获取营业部明细"""
         pro = self.tushare_api
         
-        # 1. 单日查询
+        # 1. 单日查询 (已有逻辑)
         if trade_date:
             params = {'trade_date': trade_date}
             if ts_code:
                 params['ts_code'] = ts_code
             return pro.top_inst(**params)
             
-        # 2. 范围查询（循环）
+        # 2. 范围查询（优化：市场大盘轮询后拆分）
         if start_date and end_date:
             try:
                 cal = pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open='1')
@@ -274,22 +276,62 @@ class TopInstCollector(BaseCollector):
                 logger.warning(f"获取交易日历失败，尝试直接按日遍历: {e}")
                 dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
             
-            all_dfs = []
-            for date in dates:
-                try:
-                    params = {'trade_date': date}
-                    if ts_code:
-                        params['ts_code'] = ts_code
-                    df = pro.top_inst(**params)
-                    if not df.empty:
-                        all_dfs.append(df)
-                except Exception as e:
-                    logger.debug(f"{date} 采集失败: {e}")
-                    
-            if all_dfs:
-                return pd.concat(all_dfs, ignore_index=True)
+            # 如果没有指定ts_code，说明是全局大批量采集
+            if not ts_code:
+                all_dfs = []
+                total_dates = len(dates)
+                for i, date in enumerate(dates):
+                    try:
+                        # 增加频控 (Tushare top_inst 限制较宽，但出于礼貌加个小延时)
+                        time.sleep(0.12)
+                        df = pro.top_inst(trade_date=date)
+                        if not df.empty:
+                            all_dfs.append(df)
+                            if (i + 1) % 50 == 0:
+                                logger.info(f"龙虎榜详情采集进度: {i+1}/{total_dates}")
+                    except Exception as e:
+                        if "最多访问" in str(e):
+                            time.sleep(15.0)
+                        else:
+                            logger.debug(f"{date} 龙虎榜详情采集失败: {e}")
                 
+                if all_dfs:
+                    full_df = pd.concat(all_dfs, ignore_index=True)
+                    # 执行分文件存储逻辑
+                    self._split_and_save_top_inst(full_df)
+                    # 返回聚合后的全量数据（供调度器存一份总档或统计，由于调度器config那边指定了存总档，这里就返回全量）
+                    return full_df
+            else:
+                # 给定了 ts_code，只为该 code 循环获取历史
+                all_dfs = []
+                for date in dates:
+                    try:
+                        time.sleep(0.05)
+                        df = pro.top_inst(trade_date=date, ts_code=ts_code)
+                        if not df.empty:
+                            all_dfs.append(df)
+                    except: pass
+                if all_dfs:
+                    return pd.concat(all_dfs, ignore_index=True)
+                    
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+    def _split_and_save_top_inst(self, df: pd.DataFrame):
+        """将聚合的龙虎榜详情按 ts_code 拆分并保存"""
+        if df.empty or 'ts_code' not in df.columns:
+            return
+            
+        output_base = Path("data/raw/structured/trading_behavior/top_inst")
+        output_base.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"正在拆分龙虎榜详情，涉及 {len(df['ts_code'].unique())} 个标的...")
+        
+        for code, group in df.groupby('ts_code'):
+            file_path = output_base / f"{code.replace('.', '_')}.parquet"
+            # 采用追加或覆盖模式？考虑到是全量采集，直接覆盖更干净
+            group.to_parquet(file_path, index=False, compression='snappy')
+        
+        logger.info("龙虎榜详情拆分保存完成")
     
     def _collect_from_akshare(self) -> pd.DataFrame:
         """从AkShare获取营业部明细"""
@@ -401,7 +443,57 @@ class BlockTradeCollector(BaseCollector):
         if end_date:
             params['end_date'] = end_date
         
-        df = pro.block_trade(**params)
+        # 如果有日期范围，进行分块采集以避免达到API限制
+        if start_date and end_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    # 大宗交易全市场一天可能数百条，为稳妥起见按天采集
+                    # Tushare 限制 200次/分钟，增加小延时
+                    trade_date_str = current_dt.strftime('%Y%m%d')
+                    
+                    p = params.copy()
+                    p['trade_date'] = trade_date_str
+                    p.pop('start_date', None)
+                    p.pop('end_date', None)
+                    
+                    # 内部重试机制
+                    success = False
+                    for attempt in range(3):
+                        try:
+                            chunk_df = pro.block_trade(**p)
+                            if not chunk_df.empty:
+                                all_dfs.append(chunk_df)
+                                logger.info(f"大宗交易采集完成: {trade_date_str} ({len(chunk_df)} 条)")
+                            success = True
+                            break
+                        except Exception as e:
+                            if "最多访问该接口200次" in str(e):
+                                time.sleep(20.0) # 限流了，多等一会儿
+                            else:
+                                logger.warning(f"大宗交易 {trade_date_str} 第 {attempt+1} 次尝试失败: {e}")
+                                time.sleep(2.0)
+                    
+                    if not success:
+                        logger.error(f"大宗交易 {trade_date_str} 采集彻底失败")
+                    
+                    # 即使成功也稍微等一下，防限流 (60s/200 = 0.3s)
+                    time.sleep(0.35)
+                    current_dt += timedelta(days=1)
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+                else:
+                    df = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"大宗交易分块逻辑异常: {e}, 尝试直接采集")
+                df = pro.block_trade(**params)
+        else:
+            df = pro.block_trade(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)

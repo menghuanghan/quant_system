@@ -613,12 +613,53 @@ class RepoDailyCollector(BaseCollector):
             params['ts_code'] = ts_code
         if trade_date:
             params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        
-        df = self.tushare_api.repo_daily(**params)
+            return self.tushare_api.repo_daily(**params)
+            
+        # 分块采集以避免API限制 (Tushare限制约2000-5000条)
+        if start_date and end_date:
+            try:
+                from datetime import timedelta
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    # 每次采集一个月
+                    next_month = current_dt.replace(day=28) + timedelta(days=4)
+                    next_month = next_month.replace(day=1)
+                    chunk_end_dt = min(next_month - timedelta(days=1), end_dt)
+                    
+                    p = params.copy()
+                    p['start_date'] = current_dt.strftime('%Y%m%d')
+                    p['end_date'] = chunk_end_dt.strftime('%Y%m%d')
+                    
+                    try:
+                        chunk_df = self.tushare_api.repo_daily(**p)
+                        if not chunk_df.empty:
+                            all_dfs.append(chunk_df)
+                    except Exception as e:
+                        logger.warning(f"回购行情分块采集失败 ({p['start_date']}-{p['end_date']}): {e}")
+                    
+                    current_dt = chunk_end_dt + timedelta(days=1)
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+                    # 执行分文件存储逻辑
+                    self._split_and_save_repo_daily(df)
+                else:
+                    df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            except Exception as e:
+                logger.error(f"回购行情分块逻辑异常: {e}, 尝试直接采集")
+                if start_date: params['start_date'] = start_date
+                if end_date: params['end_date'] = end_date
+                df = self.tushare_api.repo_daily(**params)
+                self._split_and_save_repo_daily(df)
+        else:
+            if start_date: params['start_date'] = start_date
+            if end_date: params['end_date'] = end_date
+            df = self.tushare_api.repo_daily(**params)
+            self._split_and_save_repo_daily(df)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -628,6 +669,23 @@ class RepoDailyCollector(BaseCollector):
                 df[col] = None
         
         return df[self.OUTPUT_FIELDS]
+
+    def _split_and_save_repo_daily(self, df: pd.DataFrame):
+        """将聚合的回购行情按 ts_code 拆分并保存"""
+        from pathlib import Path
+        if df.empty or 'ts_code' not in df.columns:
+            return
+            
+        output_base = Path("data/raw/structured/derivatives/repo_daily")
+        output_base.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"正在拆分回购行情，涉及 {len(df['ts_code'].unique())} 个品种...")
+        
+        for code, group in df.groupby('ts_code'):
+            file_path = output_base / f"{code.replace('.', '_')}.parquet"
+            group.to_parquet(file_path, index=False, compression='snappy')
+        
+        logger.info("回购行情拆分保存完成")
     
     def _collect_from_akshare(self, trade_date: Optional[str] = None) -> pd.DataFrame:
         """从AkShare获取回购行情"""
@@ -823,7 +881,8 @@ def get_yield_curve(
 def get_cb_basic(
     ts_code: Optional[str] = None,
     list_date: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取可转债基本信息
@@ -832,6 +891,7 @@ def get_cb_basic(
         ts_code: 转债代码
         list_date: 上市日期
         exchange: 上市地点
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 可转债基本信息
@@ -841,7 +901,7 @@ def get_cb_basic(
         >>> df = get_cb_basic(exchange='SH')  # 上交所可转债
     """
     collector = CBBasicCollector()
-    return collector.collect(ts_code=ts_code, list_date=list_date, exchange=exchange)
+    return collector.collect(ts_code=ts_code, list_date=list_date, exchange=exchange, **kwargs)
 
 
 def get_cb_daily(
@@ -897,12 +957,13 @@ def get_repo_daily(
                             start_date=start_date, end_date=end_date)
 
 
-def get_cb_premium(ts_code: Optional[str] = None) -> pd.DataFrame:
+def get_cb_premium(ts_code: Optional[str] = None, **kwargs) -> pd.DataFrame:
     """
     获取可转债溢价率数据
     
     Args:
         ts_code: 转债代码
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 可转债溢价率数据
@@ -912,4 +973,4 @@ def get_cb_premium(ts_code: Optional[str] = None) -> pd.DataFrame:
         >>> df = get_cb_premium(ts_code='110030.SH')  # 指定转债
     """
     collector = CBPremiumCollector()
-    return collector.collect(ts_code=ts_code)
+    return collector.collect(ts_code=ts_code, **kwargs)

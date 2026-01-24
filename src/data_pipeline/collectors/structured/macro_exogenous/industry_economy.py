@@ -250,29 +250,28 @@ class CarSalesCollector(BaseCollector):
         import akshare as ak
         
         try:
-            # 尝试获取乘用车销量数据
-            df = ak.car_gasgoo_rank(symbol="销量")
+            # 尝试获取广义乘用车零售销量数据 (CPCA)
+            df = ak.car_market_cate_cpca()
+            if not df.empty:
+                # 转换格式：将年份列转为行
+                years = [col for col in df.columns if '年' in col]
+                result = []
+                for _, row in df.iterrows():
+                    month_str = row['月份'].replace('月', '').zfill(2)
+                    for year_col in years:
+                        year = year_col.replace('年', '')
+                        val = row[year_col]
+                        if pd.notna(val):
+                            result.append({
+                                'month': f"{year}{month_str}",
+                                'brand': '乘用车(合计)',
+                                'sales_vol': float(val) * 10000 # 原始单位通常是万辆
+                            })
+                return pd.DataFrame(result)
         except Exception as e:
             logger.warning(f"AkShare获取汽车销量失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 标准化字段
-        column_mapping = {
-            '月份': 'month',
-            '厂商': 'brand',
-            '品牌': 'brand',
-            '销量': 'sales_vol',
-        }
-        df = self._standardize_columns(df, column_mapping)
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
 
 
 # ============= 便捷函数接口 =============
@@ -302,7 +301,8 @@ def get_box_office(
 
 def get_car_sales(
     month: Optional[str] = None,
-    brand: Optional[str] = None
+    brand: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取汽车销量数据
@@ -310,6 +310,7 @@ def get_car_sales(
     Args:
         month: 月份
         brand: 品牌
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 汽车销量数据
@@ -319,4 +320,4 @@ def get_car_sales(
         >>> df = get_car_sales(brand='比亚迪')
     """
     collector = CarSalesCollector()
-    return collector.collect(month=month, brand=brand)
+    return collector.collect(month=month, brand=brand, **kwargs)

@@ -243,7 +243,44 @@ class FuturesDailyCollector(BaseCollector):
         if end_date:
             params['end_date'] = end_date
         
-        df = self.tushare_api.fut_daily(**params)
+        # 分块采集以避免API限制
+        if start_date and end_date and not ts_code:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    # 期货日线全市场约1000条，2天就会超过2000限制。
+                    # 因此必须按天采集。
+                    trade_date = current_dt.strftime('%Y%m%d')
+                    
+                    p = params.copy()
+                    p['trade_date'] = trade_date
+                    # 清除日期范围参数以免API冲突
+                    p.pop('start_date', None)
+                    p.pop('end_date', None)
+                    
+                    try:
+                        chunk_df = self.tushare_api.fut_daily(**p)
+                        if not chunk_df.empty:
+                            all_dfs.append(chunk_df)
+                            logger.info(f"期货日线采集完成: {trade_date} ({len(chunk_df)} 条)")
+                    except Exception as e:
+                        logger.warning(f"期货日线采集失败 ({trade_date}): {e}")
+                    
+                    current_dt = current_dt + timedelta(days=1)
+                
+                if all_dfs:
+                    return pd.concat(all_dfs, ignore_index=True)
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            except Exception as e:
+                logger.error(f"期货日线分块逻辑异常: {e}")
+                # Fallback to normal
+                df = self.tushare_api.fut_daily(**params)
+        else:
+            df = self.tushare_api.fut_daily(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -615,6 +652,8 @@ class OptionsBasicCollector(BaseCollector):
         'min_price_chg',    # 最小价格波幅
     ]
     
+    EXCHANGES = ['SSE', 'SZSE', 'CFFEX', 'DCE', 'SHFE', 'CZCE', 'GFEX']
+
     def collect(
         self,
         ts_code: Optional[str] = None,
@@ -628,13 +667,28 @@ class OptionsBasicCollector(BaseCollector):
         
         Args:
             ts_code: TS期权代码
-            exchange: 交易所代码（SSE/SZSE/CFFEX/DCE/SHFE/CZCE）
+            exchange: 交易所代码
             opt_code: 标准合约代码
-            call_put: 期权类型（C/P）
+            call_put: 期权类型
         
         Returns:
             DataFrame: 标准化的期权合约信息
         """
+        # 如果未指定交易所，则遍历所有交易所采集
+        if not exchange and not ts_code:
+            all_dfs = []
+            for exc in self.EXCHANGES:
+                try:
+                    df = self._collect_from_tushare(ts_code, exc, opt_code, call_put)
+                    if not df.empty:
+                        all_dfs.append(df)
+                except Exception as e:
+                    logger.warning(f"采集 {exc} 期权合约失败: {e}")
+            
+            if all_dfs:
+                return pd.concat(all_dfs, ignore_index=True)
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
         # 优先使用Tushare（需要5000积分）
         try:
             df = self._collect_from_tushare(ts_code, exchange, opt_code, call_put)
@@ -915,7 +969,8 @@ def get_fut_daily(
 def get_fut_holding(
     trade_date: Optional[str] = None,
     symbol: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取期货每日持仓排名
@@ -924,6 +979,7 @@ def get_fut_holding(
         trade_date: 交易日期
         symbol: 合约或产品代码
         exchange: 交易所代码
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 持仓排名数据
@@ -932,13 +988,14 @@ def get_fut_holding(
         >>> df = get_fut_holding(trade_date='20250115', symbol='C', exchange='DCE')
     """
     collector = FuturesHoldingCollector()
-    return collector.collect(trade_date=trade_date, symbol=symbol, exchange=exchange)
+    return collector.collect(trade_date=trade_date, symbol=symbol, exchange=exchange, **kwargs)
 
 
 def get_fut_wsr(
     trade_date: Optional[str] = None,
     symbol: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取仓单日报
@@ -947,6 +1004,7 @@ def get_fut_wsr(
         trade_date: 交易日期
         symbol: 产品代码
         exchange: 交易所代码
+        **kwargs: 其他参数（由调度器传入）
     
     Returns:
         DataFrame: 仓单日报数据
@@ -955,7 +1013,7 @@ def get_fut_wsr(
         >>> df = get_fut_wsr(trade_date='20250115', symbol='ZN')
     """
     collector = FuturesWarehouseCollector()
-    return collector.collect(trade_date=trade_date, symbol=symbol, exchange=exchange)
+    return collector.collect(trade_date=trade_date, symbol=symbol, exchange=exchange, **kwargs)
 
 
 def get_opt_basic(
