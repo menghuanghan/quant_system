@@ -106,8 +106,10 @@ class InstitutionalRatingCollector(BaseCollector):
         import akshare as ak
         
         try:
-            # 使用机构推荐池接口
-            df = ak.stock_institute_recommend(symbol="全部")
+            # 使用巨潮资讯-投资评级接口
+            # date格式需为 YYYYMMDD
+            current_date = date.replace('-', '') if date else datetime.now().strftime('%Y%m%d')
+            df = ak.stock_rank_forecast_cninfo(date=current_date)
         except Exception as e:
             logger.warning(f"AkShare获取机构评级失败: {e}")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -117,17 +119,31 @@ class InstitutionalRatingCollector(BaseCollector):
         
         # 字段映射
         column_mapping = {
-            '股票代码': 'ts_code',
-            '股票简称': 'name',
-            '最新评级日期': 'rating_date',
-            '机构名称': 'org_name',
-            '最新评级': 'rating',
+            '证券代码': 'ts_code',
+            '证券简称': 'name',
+            '发布日期': 'rating_date',
+            '研究机构名称': 'org_name',
+            '研究员名称': 'analyst_name',
+            '投资评级': 'rating',
+            '评级变化': 'rating_change',
+            '前一次投资评级': 'pre_rating',
+            '是否首次评级': 'is_first',
+            '目标价格-下限': 'target_price_low',
+            '目标价格-上限': 'target_price_high',
         }
         df = df.rename(columns=column_mapping)
         
         # 补充交易所后缀
         if 'ts_code' in df.columns:
             df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
+            
+        # 计算目标价均值
+        if 'target_price_low' in df.columns and 'target_price_high' in df.columns:
+            df['target_price'] = (pd.to_numeric(df['target_price_low'], errors='coerce') + 
+                                pd.to_numeric(df['target_price_high'], errors='coerce')) / 2
+        
+        # 补充报告标题（该接口不提供标题，设为空）
+        df['report_title'] = None
         
         # 确保包含所有字段
         for col in self.OUTPUT_FIELDS:

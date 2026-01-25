@@ -11,6 +11,7 @@ import logging
 from typing import Optional, List
 from datetime import datetime, timedelta
 
+import time
 import pandas as pd
 
 from ..base import (
@@ -478,10 +479,10 @@ class SLBCollector(BaseCollector):
         'trade_date',           # 交易日期
         'ts_code',              # 证券代码
         'name',                 # 证券名称
-        'rq_vol',               # 融券量（股）
-        'rq_balance',           # 融券余额（元）
-        'lend_vol',             # 出借量（股）
-        'lend_balance',         # 出借余额（元）
+        'ope_inv',              # 期初余量（股/份）
+        'lent_qnt',             # 当日出借数量（股/份）
+        'cls_inv',              # 期末余量（股/份）
+        'end_bal',              # 期末余额（元）
     ]
     
     def collect(
@@ -494,17 +495,17 @@ class SLBCollector(BaseCollector):
     ) -> pd.DataFrame:
         """
         采集转融通数据
-        
-        Args:
-            trade_date: 交易日期
-            ts_code: 证券代码
-            start_date: 开始日期
-            end_date: 结束日期
-        
-        Returns:
-            DataFrame: 标准化的转融通数据
         """
-        # 使用AkShare
+        # 优先使用Tushare
+        try:
+            df = self._collect_from_tushare(trade_date, ts_code, start_date, end_date)
+            if not df.empty:
+                logger.info(f"从Tushare成功获取 {len(df)} 条转融通数据")
+                return df
+        except Exception as e:
+            logger.warning(f"Tushare获取转融通失败: {e}")
+            
+        # 降级到AkShare
         try:
             df = self._collect_from_akshare()
             if not df.empty:
@@ -515,27 +516,103 @@ class SLBCollector(BaseCollector):
         
         logger.error("无法获取转融通数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def _collect_from_tushare(
+        self,
+        trade_date: Optional[str],
+        ts_code: Optional[str],
+        start_date: Optional[str],
+        end_date: Optional[str]
+    ) -> pd.DataFrame:
+        """从Tushare获取转融通数据 (详情)"""
+        pro = self.tushare_api
+        
+        params = {}
+        if ts_code: params['ts_code'] = ts_code
+        
+        # 如果是单日
+        if trade_date:
+            params['trade_date'] = trade_date
+            return pro.slb_len_mm(**params)
+            
+        # 范围查询，需要分块请求
+        if start_date and end_date:
+            all_dfs = []
+            try:
+                start_dt = datetime.strptime(start_date, '%Y%m%d')
+                end_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                current_dt = start_dt
+                while current_dt <= end_dt:
+                    d_str = current_dt.strftime('%Y%m%d')
+                    
+                    success = False
+                    for attempt in range(3):
+                        try:
+                            chunk = pro.slb_len_mm(trade_date=d_str, **params)
+                            if not chunk.empty:
+                                all_dfs.append(chunk)
+                                logger.info(f"成功获取转融通数据: {d_str} ({len(chunk)} 条)")
+                            success = True
+                            break
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "最多访问" in err_msg:
+                                logger.warning(f"触发Tushare限制，等待60秒后重试 ({d_str})...")
+                                time.sleep(60.0)
+                            else:
+                                logger.warning(f"转融通数据采集失败 ({d_str}), 第 {attempt+1} 次尝试: {e}")
+                                time.sleep(2.0)
+                    
+                    if not success:
+                        logger.error(f"转融通数据彻底采集失败: {d_str}")
+                        
+                    current_dt += timedelta(days=1)
+                    # 适量延时，平滑请求
+                    time.sleep(0.35)
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+                else:
+                    df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            except Exception as e:
+                logger.error(f"转融通分块逻辑错误: {e}")
+                df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        else:
+            if start_date: params['start_date'] = start_date
+            if end_date: params['end_date'] = end_date
+            df = pro.slb_len_mm(**params)
+            
+        if df.empty:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        df = self._convert_date_format(df, ['trade_date'])
+        
+        for col in self.OUTPUT_FIELDS:
+            if col not in df.columns:
+                df[col] = None
+                
+        return df[self.OUTPUT_FIELDS]
     
     def _collect_from_akshare(self) -> pd.DataFrame:
         """从AkShare获取转融通数据"""
         import akshare as ak
         
         try:
+            # 这是一个汇总接口，不含明细，但姑且作为垫底
             df = ak.stock_margin_szse(date="")
-        except Exception as e:
-            logger.warning(f"AkShare获取转融通失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+            if df.empty: return pd.DataFrame()
+            
+            df = df.rename(columns={'信用交易日期': 'trade_date'})
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y%m%d')
+            
+            for col in self.OUTPUT_FIELDS:
+                if col not in df.columns:
+                    df[col] = None
+            return df[self.OUTPUT_FIELDS]
+        except:
+            return pd.DataFrame()
 
 
 # ============= 便捷函数接口 =============

@@ -437,57 +437,74 @@ class SWDailyCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
+    @retry_on_failure(max_retries=3)
     def _collect_from_akshare(
         self,
         ts_code: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ) -> pd.DataFrame:
-        """从AkShare获取申万行业指数日行情"""
+        """从AkShare获取申万行业指数行情"""
         import akshare as ak
         
-        try:
-            if not ts_code:
-                logger.warning("AkShare需要指定行业指数代码")
-                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-            
-            # 提取代码
-            code = ts_code.split('.')[0] if '.' in ts_code else ts_code
-            df = ak.sw_index_daily_indicator(symbol=code)
-        except Exception as e:
-            logger.warning(f"AkShare获取申万行业指数行情失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 标准化字段
-        column_mapping = {
-            '日期': 'trade_date',
-            '收盘': 'close',
-            '开盘': 'open',
-            '最高': 'high',
-            '最低': 'low',
-            '成交量': 'vol',
-            '成交额': 'amount',
-            '涨跌幅': 'pct_change',
-            '涨跌点': 'change',
-            '市盈率': 'pe',
-            '市净率': 'pb',
-        }
-        df = self._standardize_columns(df, column_mapping)
-        
-        # 设置ts_code
-        df['ts_code'] = ts_code
-        df['name'] = None
-        
-        # 日期筛选
-        if start_date:
-            start_dt = pd.to_datetime(start_date, format='%Y%m%d')
-            df = df[pd.to_datetime(df['trade_date']) >= start_dt]
-        if end_date:
-            end_dt = pd.to_datetime(end_date, format='%Y%m%d')
-            df = df[pd.to_datetime(df['trade_date']) <= end_dt]
+        # 如果提供了ts_code，获取历史
+        if ts_code:
+            try:
+                code = ts_code.split('.')[0] if '.' in ts_code else ts_code
+                df = ak.sw_index_daily_indicator(symbol=code)
+                if df.empty: return pd.DataFrame()
+                
+                column_mapping = {
+                    '日期': 'trade_date',
+                    '收盘': 'close',
+                    '开盘': 'open',
+                    '最高': 'high',
+                    '最低': 'low',
+                    '成交量': 'vol',
+                    '成交额': 'amount',
+                    '涨跌幅': 'pct_change',
+                    '涨跌点': 'change',
+                    '市盈率': 'pe',
+                    '市净率': 'pb',
+                }
+                df = self._standardize_columns(df, column_mapping)
+                df['ts_code'] = ts_code
+            except Exception as e:
+                logger.warning(f"AkShare获取申万指数历史失败 ({ts_code}): {e}")
+                return pd.DataFrame()
+        else:
+            # 否则获取全市场快照
+            try:
+                # 使用一级行业作为代表
+                df = ak.sw_index_first_info() 
+                if df.empty: return pd.DataFrame()
+                
+                # 获取实时快照
+                df_spot = ak.sw_index_spot()
+                if df_spot.empty: return pd.DataFrame()
+                
+                column_mapping = {
+                    '指数代码': 'ts_code',
+                    '指数名称': 'name',
+                    '昨收': 'pre_close',
+                    '今开': 'open',
+                    '成交额': 'amount',
+                    '最新价': 'close',
+                    '涨跌幅': 'pct_change',
+                }
+                df = self._standardize_columns(df_spot, column_mapping)
+                df['trade_date'] = datetime.now().strftime('%Y%m%d')
+            except Exception as e:
+                logger.warning(f"AkShare获取申万全市场快照失败: {e}")
+                return pd.DataFrame()
+
+        # 日期筛选与标准化
+        if not df.empty and 'trade_date' in df.columns:
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y%m%d')
+            if start_date:
+                df = df[df['trade_date'] >= start_date]
+            if end_date:
+                df = df[df['trade_date'] <= end_date]
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:

@@ -365,7 +365,7 @@ class THSDailyCollector(BaseCollector):
         # 降级到AkShare
         try:
             if ts_code:
-                df = self._collect_from_akshare(ts_code, start_date, end_date)
+                df = self._collect_from_akshare(ts_code, start_date, end_date, **kwargs)
                 if not df.empty:
                     logger.info(f"从AkShare成功获取 {len(df)} 条同花顺板块行情数据")
                     return df
@@ -437,57 +437,85 @@ class THSDailyCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
+    @retry_on_failure(max_retries=3)
     def _collect_from_akshare(
         self,
-        ts_code: str,
+        ts_code: Optional[str] = None,
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        **kwargs
     ) -> pd.DataFrame:
         """从AkShare获取同花顺板块行情"""
         import akshare as ak
         
-        try:
-            # 从ts_code提取板块名称
-            concept_df = ak.stock_board_concept_name_ths()
-            code = ts_code.split('.')[0] if '.' in ts_code else ts_code
-            
-            matched = concept_df[concept_df['代码'].astype(str) == code]
-            if matched.empty:
-                logger.warning(f"未找到对应的同花顺板块: {ts_code}")
-                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-            
-            board_name = matched.iloc[0]['概念名称']
-            df = ak.stock_board_concept_hist_ths(symbol=board_name)
-        except Exception as e:
-            logger.warning(f"AkShare获取同花顺板块行情失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 标准化字段
-        column_mapping = {
-            '日期': 'trade_date',
-            '收盘价': 'close',
-            '开盘价': 'open',
-            '最高价': 'high',
-            '最低价': 'low',
-            '成交量': 'vol',
-            '涨跌幅': 'pct_change',
-        }
-        df = self._standardize_columns(df, column_mapping)
-        
-        df['ts_code'] = ts_code
-        
+        # 如果提供了ts_code，尝试获取该板块历史
+        if ts_code:
+            try:
+                # 首先需要通过指数代码找板块名称
+                # 如果没有缓存，则获取一次
+                concept_df = ak.stock_board_concept_name_ths()
+                code = ts_code.split('.')[0] if '.' in ts_code else ts_code
+                matched = concept_df[concept_df['代码'].astype(str) == code]
+                
+                if matched.empty:
+                    # 尝试行业板块
+                    industry_df = ak.stock_board_industry_name_ths()
+                    matched = industry_df[industry_df['代码'].astype(str) == code]
+                    
+                if matched.empty:
+                    logger.warning(f"未能找到板块代码对应的名称: {ts_code}")
+                    return pd.DataFrame()
+                
+                board_name = matched.iloc[0]['概念名称'] if '概念名称' in matched.columns else matched.iloc[0]['name']
+                df = ak.stock_board_concept_hist_ths(symbol=board_name)
+                
+                if df.empty: return pd.DataFrame()
+                
+                column_mapping = {
+                    '日期': 'trade_date',
+                    '开盘价': 'open',
+                    '收盘价': 'close',
+                    '最高价': 'high',
+                    '最低价': 'low',
+                    '成交量': 'vol',
+                    '成交额': 'amount',
+                    '换手率': 'turnover_rate',
+                }
+                df = self._standardize_columns(df, column_mapping)
+                df['ts_code'] = ts_code
+            except Exception as e:
+                logger.warning(f"AkShare获取同花顺板块历史失败 ({ts_code}): {e}")
+                return pd.DataFrame()
+        else:
+            # 获取当前所有概念板块快照
+            try:
+                df = ak.stock_board_concept_name_ths()
+                if df.empty: return pd.DataFrame()
+                
+                column_mapping = {
+                    '代码': 'ts_code',
+                    '概念名称': 'name',
+                    '最新价': 'close',
+                    '涨跌额': 'change',
+                    '涨跌幅': 'pct_change',
+                    '成交额': 'amount',
+                }
+                df = self._standardize_columns(df, column_mapping)
+                # 使用上下文 end_date 标记快照日期
+                df['trade_date'] = kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
+                if 'ts_code' in df.columns:
+                    df['ts_code'] = df['ts_code'].astype(str) + '.TI'
+            except Exception as e:
+                logger.warning(f"AkShare获取同花顺板块快照失败: {e}")
+                return pd.DataFrame()
+
         # 日期筛选
-        if 'trade_date' in df.columns:
-            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y-%m-%d')
+        if not df.empty and 'trade_date' in df.columns:
+            df['trade_date'] = pd.to_datetime(df['trade_date']).dt.strftime('%Y%m%d')
             if start_date:
-                start_dt = pd.to_datetime(start_date, format='%Y%m%d')
-                df = df[pd.to_datetime(df['trade_date']) >= start_dt]
+                df = df[df['trade_date'] >= start_date]
             if end_date:
-                end_dt = pd.to_datetime(end_date, format='%Y%m%d')
-                df = df[pd.to_datetime(df['trade_date']) <= end_dt]
+                df = df[df['trade_date'] <= end_date]
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -553,7 +581,7 @@ class DCIndexCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(name)
+            df = self._collect_from_akshare(name=name, trade_date=trade_date, end_date=end_date, **kwargs)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条东方财富概念板块数据")
                 return df
@@ -600,7 +628,7 @@ class DCIndexCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self, name: Optional[str] = None) -> pd.DataFrame:
+    def _collect_from_akshare(self, name: Optional[str] = None, trade_date: Optional[str] = None, end_date: Optional[str] = None, **kwargs) -> pd.DataFrame:
         """从AkShare获取东方财富概念板块"""
         import akshare as ak
         
@@ -628,8 +656,9 @@ class DCIndexCollector(BaseCollector):
         }
         df = self._standardize_columns(df, column_mapping)
         
-        # 设置当前日期
-        df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
+        # 设置日期（快照日期）
+        eff_date = trade_date or end_date or kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
+        df['trade_date'] = eff_date
         
         # 如果指定了名称，过滤
         if name and 'name' in df.columns:
@@ -689,7 +718,7 @@ class DCMemberCollector(BaseCollector):
         # 降级到AkShare
         try:
             if ts_code:
-                df = self._collect_from_akshare(ts_code)
+                df = self._collect_from_akshare(ts_code, trade_date=trade_date, **kwargs)
                 if not df.empty:
                     logger.info(f"从AkShare成功获取 {len(df)} 条东方财富板块成分数据")
                     return df
@@ -730,7 +759,7 @@ class DCMemberCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self, ts_code: str) -> pd.DataFrame:
+    def _collect_from_akshare(self, ts_code: str, trade_date: Optional[str] = None, **kwargs) -> pd.DataFrame:
         """从AkShare获取东方财富板块成分"""
         import akshare as ak
         
@@ -763,7 +792,7 @@ class DCMemberCollector(BaseCollector):
         
         # 设置板块代码和日期
         df['ts_code'] = ts_code
-        df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
+        df['trade_date'] = trade_date or kwargs.get('end_date') or datetime.now().strftime('%Y-%m-%d')
         
         # 格式化股票代码
         if 'con_code' in df.columns:
@@ -840,7 +869,8 @@ class KPLConceptCollector(BaseCollector):
         self,
         trade_date: Optional[str],
         ts_code: Optional[str],
-        name: Optional[str]
+        name: Optional[str],
+        **kwargs
     ) -> pd.DataFrame:
         """从Tushare获取题材库"""
         pro = self.tushare_api

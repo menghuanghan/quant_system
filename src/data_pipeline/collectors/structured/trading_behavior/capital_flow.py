@@ -553,11 +553,16 @@ class HSGTFlowCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        # 计算北向和南向资金
+        # 确保数值列为 float 并计算北向/南向资金
+        num_cols = ['hgt', 'sgt', 'ggt_ss', 'ggt_sz']
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        
         if 'hgt' in df.columns and 'sgt' in df.columns:
-            df['north_money'] = df['hgt'].fillna(0) + df['sgt'].fillna(0)
+            df['north_money'] = df['hgt'] + df['sgt']
         if 'ggt_ss' in df.columns and 'ggt_sz' in df.columns:
-            df['south_money'] = df['ggt_ss'].fillna(0) + df['ggt_sz'].fillna(0)
+            df['south_money'] = df['ggt_ss'] + df['ggt_sz']
         
         df = self._convert_date_format(df, ['trade_date'])
         

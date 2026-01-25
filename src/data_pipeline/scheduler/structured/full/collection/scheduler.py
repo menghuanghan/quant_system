@@ -403,27 +403,27 @@ class FullCollectionScheduler:
         except ImportError as e:
             logger.warning(f"宏观与外生变量域采集器导入失败: {e}")
         
-        try:
-            # 预期与预测分析域
-            from src.data_pipeline.collectors.structured.expectations import (
-                get_earnings_forecast, get_consensus_forecast,
-                get_inst_rating, get_rating_summary, get_inst_survey,
-                get_analyst_rank, get_analyst_detail, 
-                get_broker_gold_stock, get_forecast_revision,
-            )
-            self._collector_funcs.update({
-                "get_earnings_forecast": get_earnings_forecast,
-                "get_consensus_forecast": get_consensus_forecast,
-                "get_inst_rating": get_inst_rating,
-                "get_rating_summary": get_rating_summary,
-                "get_inst_survey": get_inst_survey,
-                "get_analyst_rank": get_analyst_rank,
-                "get_analyst_detail": get_analyst_detail,
-                "get_broker_gold_stock": get_broker_gold_stock,
-                "get_forecast_revision": get_forecast_revision,
-            })
-        except ImportError as e:
-            logger.warning(f"预期与预测分析域采集器导入失败: {e}")
+        # try:
+        #     # 预期与预测分析域
+        #     from src.data_pipeline.collectors.structured.expectations import (
+        #         get_earnings_forecast, get_consensus_forecast,
+        #         get_inst_rating, get_rating_summary, get_inst_survey,
+        #         get_analyst_rank, get_analyst_detail, 
+        #         get_broker_gold_stock, get_forecast_revision,
+        #     )
+        #     self._collector_funcs.update({
+        #         "get_earnings_forecast": get_earnings_forecast,
+        #         "get_consensus_forecast": get_consensus_forecast,
+        #         "get_inst_rating": get_inst_rating,
+        #         "get_rating_summary": get_rating_summary,
+        #         "get_inst_survey": get_inst_survey,
+        #         "get_analyst_rank": get_analyst_rank,
+        #         "get_analyst_detail": get_analyst_detail,
+        #         "get_broker_gold_stock": get_broker_gold_stock,
+        #         "get_forecast_revision": get_forecast_revision,
+        #     })
+        # except ImportError as e:
+        #     logger.warning(f"预期与预测分析域采集器导入失败: {e}")
         
         try:
             # 深度风险与质量因子域
@@ -667,10 +667,17 @@ class FullCollectionScheduler:
             # 构建参数
             params = dict(task.params)
             
-            # 时间相关任务添加日期参数
-            if task.category == DataCategory.TIME_DEPENDENT:
+            # 为所有任务提供基础时间上下文参数 (start_date/end_date)
+            # 这有助于采集器在没有显式参数时尊重全局调度范围，避免出现未来日期的硬编码
+            if 'start_date' not in params:
                 params['start_date'] = self.start_date
+            if 'end_date' not in params:
                 params['end_date'] = self.end_date
+            
+            # 时间相关任务的特定逻辑（如果需要显式覆盖或基于分类的其他处理）
+            if task.category == DataCategory.TIME_DEPENDENT:
+                # 这种情况下一般已通过 params 传递了日期范围
+                pass
             
             # 需要股票代码的任务
             if ts_code:
@@ -685,9 +692,11 @@ class FullCollectionScheduler:
                 date_field = task.date_field or 'trade_date'
                 if date_field in df.columns:
                     try:
-                        # 统一转换为字符串进行比较，或者转换为datetime
-                        df[date_field] = df[date_field].astype(str).str.replace('-', '').str.replace('/', '')
-                        mask = (df[date_field] >= self.start_date) & (df[date_field] <= self.end_date)
+                        # 统一转换为字符串进行比较
+                        date_series = df[date_field].astype(str).str.replace('-', '').str.replace('/', '')
+                        # 核心逻辑：在指定日期范围内的，或者日期确实（None/NaN）的允许通过
+                        # 对于元数据列表，缺失日期不应导致整行被过滤
+                        mask = (date_series >= self.start_date) & (date_series <= self.end_date) | (date_series.isin(['None', 'nan', '', 'NaT']))
                         df = df[mask].copy()
                         if df.empty:
                             logger.warning(f"任务 {task.name} 经过日期过滤后返回空数据")
@@ -699,24 +708,51 @@ class FullCollectionScheduler:
                 result.status = TaskStatus.SUCCESS
                 result.records_count = 0
             else:
-                # 确定输出路径
-                output_file = task.output_file
-                if ts_code and '{ts_code}' in output_file:
-                    output_file = output_file.replace('{ts_code}', ts_code.replace('.', '_'))
-                
-                output_path = self.output_dir / task.domain / output_file
-                
-                # 保存数据
-                if self._save_to_parquet(df, output_path):
+                # 检查是否需要拆分保存
+                if task.split_by and task.split_by in df.columns:
+                    split_col = task.split_by
+                    logger.info(f"任务 {task.name} 开启拆分保存模式 (split_by={split_col})")
+                    
+                    unique_entities = df[split_col].unique()
+                    for entity in unique_entities:
+                        entity_df = df[df[split_col] == entity]
+                        
+                        # 构建该实体的输出路径
+                        output_file = task.output_file
+                        # 假设实体是代码，支持 {ts_code} 替换
+                        if '{ts_code}' in output_file:
+                            output_file = output_file.replace('{ts_code}', str(entity).replace('.', '_'))
+                        elif '{' in output_file and '}' in output_file:
+                            # 通用替换，如 {industry_name}
+                            import re
+                            output_file = re.sub(r'\{.*?\}', str(entity).replace('.', '_'), output_file)
+                        
+                        output_path = self.output_dir / task.domain / output_file
+                        self._save_to_parquet(entity_df, output_path)
+                    
                     result.status = TaskStatus.SUCCESS
                     result.records_count = len(df)
-                    result.output_path = str(output_path)
-                    logger.info(
-                        f"任务 {task.name} 完成: "
-                        f"{result.records_count} 条记录 -> {output_path}"
-                    )
+                    result.output_path = str(self.output_dir / task.domain / task.output_file.split('/')[0])
+                    logger.info(f"任务 {task.name} 拆分保存完成，共 {len(unique_entities)} 个实体")
                 else:
-                    raise Exception(f"保存数据失败: {output_path}")
+                    # 确定输出路径
+                    output_file = task.output_file
+                    if ts_code and '{ts_code}' in output_file:
+                        output_file = output_file.replace('{ts_code}', ts_code.replace('.', '_'))
+                    
+                    output_path = self.output_dir / task.domain / output_file
+                    
+                    # 保存数据
+                    if self._save_to_parquet(df, output_path):
+                        result.status = TaskStatus.SUCCESS
+                        result.records_count = len(df)
+                        result.output_path = str(output_path)
+                        logger.info(
+                            f"任务 {task.name} 完成: "
+                            f"{result.records_count} 条记录 -> {output_path}"
+                        )
+                    else:
+                        raise Exception(f"保存数据失败: {output_path}")
         
         except Exception as e:
             result.status = TaskStatus.FAILED

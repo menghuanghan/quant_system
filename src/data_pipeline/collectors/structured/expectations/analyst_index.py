@@ -155,9 +155,9 @@ class AnalystDetailCollector(BaseCollector):
         Returns:
             DataFrame: 标准化的分析师详情数据
         """
-        if not analyst_id and not analyst_name:
-            logger.warning("需要提供analyst_id或analyst_name")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        # if not analyst_id and not analyst_name:
+        #     logger.warning("需要提供analyst_id或analyst_name")
+        #     return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 使用AkShare
         try:
@@ -175,39 +175,76 @@ class AnalystDetailCollector(BaseCollector):
         """从AkShare获取分析师详情"""
         import akshare as ak
         
-        try:
-            df = ak.stock_analyst_detail_em(analyst_id=analyst_id)
-        except Exception as e:
-            logger.warning(f"AkShare获取分析师详情失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 列名映射
-        column_mapping = {
-            '分析师': 'analyst_name',
-            '分析师ID': 'analyst_id',
-            '券商': 'org_name',
-            '股票代码': 'ts_code',
-            '股票名称': 'stock_name',
-            '推荐日期': 'recommend_date',
-            '评级': 'rating',
-            '目标价': 'target_price',
-            '收益率': 'recommend_return',
-        }
-        df = df.rename(columns=column_mapping)
-        
-        # 补充交易所后缀
-        if 'ts_code' in df.columns:
-            df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
-        
-        # 确保包含所有字段
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        if analyst_id:
+            try:
+                df = ak.stock_analyst_detail_em(analyst_id=analyst_id)
+                if not df.empty:
+                    # 列名映射
+                    column_mapping = {
+                        '分析师': 'analyst_name',
+                        '分析师ID': 'analyst_id',
+                        '券商': 'org_name',
+                        '股票代码': 'ts_code',
+                        '股票名称': 'stock_name',
+                        '推荐日期': 'recommend_date',
+                        '评级': 'rating',
+                        '目标价': 'target_price',
+                        '收益率': 'recommend_return',
+                    }
+                    df = df.rename(columns=column_mapping)
+                    if 'ts_code' in df.columns:
+                        df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
+                    for col in self.OUTPUT_FIELDS:
+                        if col not in df.columns: df[col] = None
+                    return df[self.OUTPUT_FIELDS]
+            except Exception as e:
+                logger.warning(f"AkShare stock_analyst_detail_em failed: {e}")
+
+        # Fallback to stock_rank_forecast_cninfo (recent ratings)
+        # Try last 7 days to ensure we get some data
+        for i in range(8):
+            try:
+                target_date = (datetime.now() - timedelta(days=i)).strftime('%Y%m%d')
+                # logger.info(f"Trying fallback date: {target_date}")
+                
+                df = ak.stock_rank_forecast_cninfo(date=target_date)
+                
+                if df.empty:
+                    continue
+
+                column_mapping = {
+                    '证券代码': 'ts_code',
+                    '证券简称': 'stock_name',
+                    '发布日期': 'recommend_date',
+                    '研究机构名称': 'org_name',
+                    '研究员名称': 'analyst_name',
+                    '投资评级': 'rating',
+                    '目标价格-下限': 'target_price_low',
+                    '目标价格-上限': 'target_price_high',
+                }
+                df = df.rename(columns=column_mapping)
+                
+                # Calculate target price
+                if 'target_price_low' in df.columns and 'target_price_high' in df.columns:
+                    df['target_price'] = (pd.to_numeric(df['target_price_low'], errors='coerce') + 
+                                        pd.to_numeric(df['target_price_high'], errors='coerce')) / 2
+                
+                if 'ts_code' in df.columns:
+                    df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
+                    
+                for col in self.OUTPUT_FIELDS:
+                    if col not in df.columns:
+                        df[col] = None
+                
+                logger.info(f"Using fallback data from {target_date}, count: {len(df)}")
+                return df[self.OUTPUT_FIELDS]
+                
+            except Exception as e:
+                # logger.debug(f"Fallback attempt for {target_date} failed: {e}")
+                continue
+
+        logger.warning("AkShare stock_rank_forecast_cninfo fallback failed for last 7 days")
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     def _add_exchange_suffix(self, code: str) -> str:
         """为股票代码添加交易所后缀"""

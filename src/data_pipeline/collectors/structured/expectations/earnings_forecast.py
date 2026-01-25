@@ -11,6 +11,7 @@
 import logging
 from typing import Optional, List
 from datetime import datetime
+import re
 
 import pandas as pd
 
@@ -137,27 +138,35 @@ class EarningsForecastCollector(BaseCollector):
                 df[col] = None
         
         return df[self.OUTPUT_FIELDS]
-    
+
     def _collect_from_akshare(self, period: Optional[str] = None) -> pd.DataFrame:
         """从AkShare获取业绩预告"""
         import akshare as ak
-        import re
         
+        # AkShare interface: stock_yjyg_em (Earnings Forecast)
+        # It takes 'date' in YYYYMMDD (quarter end)
+        if period:
+            target_period = period
+        else:
+            # Detect latest quarter end
+            now = datetime.now()
+            month = now.month
+            year = now.year
+            if month <= 3: target_period = f"{year-1}1231"
+            elif month <= 6: target_period = f"{year}0331"
+            elif month <= 9: target_period = f"{year}0630"
+            else: target_period = f"{year}0930"
+
         try:
-            # AkShare要求提供完整的报告期日期（季末），如20231231
-            target_period = period if period else '20231231' 
             df = ak.stock_yjyg_em(date=target_period)
         except Exception as e:
-            logger.warning(f"AkShare获取业绩预告失败: {e}")
+            logger.warning(f"AkShare stock_yjyg_em failed: {e}")
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        if df is None or df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # AkShare实际字段：['序号', '股票代码', '股票简称', '预测指标', '业绩变动', '预测数值', 
-        #                  '业绩变动幅度', '业绩变动原因', '预告类型', '上年同期值', '公告日期']
-        
-        # 列名映射
+        # Mapping - AkShare: ['股票代码', '股票简称', '预测指标', '业绩变动', '预测数值', '业绩变动幅度', '业绩变动原因', '预告类型', '上年同期值', '公告日期']
         column_mapping = {
             '股票代码': 'ts_code',
             '股票简称': 'name',
@@ -222,27 +231,27 @@ class EarningsForecastCollector(BaseCollector):
             df['net_profit_max'] = ranges.apply(lambda x: x[1] if x[1] is not None else None)
         
         # 处理上年同期值（转换为万元）
-        if 'last_parent_net' in df.columns:
-            def convert_to_wan(val):
-                """转换金额为万元"""
-                if pd.isna(val):
-                    return None
-                if isinstance(val, (int, float)):
-                    return val  # 假设已经是万元
-                if isinstance(val, str):
-                    numbers = re.findall(r'([-+]?\d*\.?\d+)', val)
-                    if numbers:
-                        num = float(numbers[0])
-                        if '亿' in val:
-                            return num * 10000
-                        elif '万' in val:
-                            return num
-                        elif '元' in val:
-                            return num * 0.0001
-                        return num
+        def convert_to_wan_local(val):
+            """转换金额为万元"""
+            if pd.isna(val):
                 return None
-            
-            df['last_parent_net'] = df['last_parent_net'].apply(convert_to_wan)
+            if isinstance(val, (int, float)):
+                return val  # 假设已经是万元
+            if isinstance(val, str):
+                numbers = re.findall(r'([-+]?\d*\.?\d+)', val)
+                if numbers:
+                    num = float(numbers[0])
+                    if '亿' in val:
+                        return num * 10000
+                    elif '万' in val:
+                        return num
+                    elif '元' in val:
+                        return num * 0.0001
+                    return num
+            return None
+
+        if 'last_parent_net' in df.columns:
+            df['last_parent_net'] = df['last_parent_net'].apply(convert_to_wan_local)
         
         # 补充交易所后缀
         if 'ts_code' in df.columns:
@@ -507,49 +516,83 @@ class ConsensusForecastCollector(BaseCollector):
         logger.error("所有数据源均无法获取一致预期数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
+    
     def _collect_from_akshare(self, ts_code: Optional[str] = None) -> pd.DataFrame:
         """从AkShare获取一致预期"""
         import akshare as ak
         
+        # Try stock_profit_forecast_ths if single stock is requested
+        if ts_code:
+            try:
+                code = ts_code.split('.')[0]
+                df_ths = ak.stock_profit_forecast_ths(symbol=code)
+                if not df_ths.empty:
+                    # Map THS: 年度, 预测机构数, 最小值, 均值, 最大值, 行业平均数
+                    df_ths['ts_code'] = ts_code
+                    df_ths['name'] = None
+                    df_ths['report_date'] = datetime.now().strftime('%Y%m%d')
+                    column_mapping = {
+                        '年度': 'year',
+                        '预测机构数': 'analyst_count',
+                        '最小值': 'eps_min',
+                        '均值': 'eps_avg',
+                        '最大值': 'eps_max',
+                    }
+                    df_ths = df_ths.rename(columns=column_mapping)
+                    for col in self.OUTPUT_FIELDS:
+                        if col not in df_ths.columns: df_ths[col] = None
+                    return df_ths[self.OUTPUT_FIELDS]
+            except Exception as e:
+                logger.warning(f"AkShare stock_profit_forecast_ths failed for {ts_code}: {e}")
+
         try:
-            # 使用机构推荐接口获取个股评级详情
-            if ts_code:
-                symbol = ts_code.split('.')[0]
-                df = ak.stock_institute_recommend_detail(symbol=symbol)
-            else:
-                # 全市场机构推荐池
-                df = ak.stock_institute_recommend(symbol="全部")
+            # Fallback to rank for market overview
+            df = ak.stock_analyst_rank_em()
         except Exception as e:
-            logger.warning(f"AkShare获取一致预期失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            logger.warning(f"AkShare stock_analyst_rank_em failed: {e}")
+            return pd.DataFrame()
         
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        if df is None or df.empty:
+            return pd.DataFrame()
             
-        # 字段映射
-        column_mapping = {
-            '股票代码': 'ts_code',
-            '股票简称': 'name',
-            '股票名称': 'name',
-            '评级日期': 'report_date',
-            '最新评级日期': 'report_date',
-            '评级机构': 'analyst_count',  # 借用，实际是机构名
-            '最新评级': 'rating_buy',
-        }
+        # Robust Column mapping
+        column_mapping = {}
+        for col in df.columns:
+            if '股票代码' in col or '证券代码' in col:
+                column_mapping[col] = 'ts_code'
+            elif '股票名称' in col or '证券简称' in col:
+                column_mapping[col] = 'name'
+            elif '评级日期' in col or '更新日期' in col or '公告日期' in col:
+                column_mapping[col] = 'report_date'
+        
         df = df.rename(columns=column_mapping)
         
-        # 补充交易所后缀
+        # Ensure name exists if not found
+        if 'name' not in df.columns and '股票名称' in df.columns: # fallback for exact match
+             df = df.rename(columns={'股票名称': 'name'})
+        if 'ts_code' not in df.columns and '股票代码' in df.columns:
+             df = df.rename(columns={'股票代码': 'ts_code'})
+        
+        # Extract current/next year EPS
+        current_year = str(datetime.now().year)
+        eps_col = next((c for c in df.columns if f'{current_year}预测每股收益' in c), None)
+        
+        if eps_col:
+            df['eps_avg'] = df[eps_col]
+            df['year'] = current_year
+        else:
+            next_year = str(datetime.now().year + 1)
+            eps_col_next = next((c for c in df.columns if f'{next_year}预测每股收益' in c), None)
+            if eps_col_next:
+                df['eps_avg'] = df[eps_col_next]
+                df['year'] = next_year
+        
+        # Process codes
         if 'ts_code' in df.columns:
-            def add_suffix(code):
-                if not code or '.' in str(code):
-                    return code
-                code = str(code).zfill(6)
-                if code.startswith(('6', '5')):
-                    return f"{code}.SH"
-                elif code.startswith(('0', '3', '2')):
-                    return f"{code}.SZ"
-                return code
-            df['ts_code'] = df['ts_code'].apply(add_suffix)
+            df['ts_code'] = df['ts_code'].apply(self._add_exchange_suffix)
+            
+        if ts_code:
+            df = df[df['ts_code'] == ts_code]
         
         # 确保包含所有字段
         for col in self.OUTPUT_FIELDS:

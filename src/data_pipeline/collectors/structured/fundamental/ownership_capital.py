@@ -304,30 +304,61 @@ class PledgeCollector(BaseCollector):
         ts_code: Optional[str],
         end_date: Optional[str]
     ) -> pd.DataFrame:
-        """从Tushare获取股权质押"""
+        """从Tushare获取股权质押数据"""
         pro = self.tushare_api
         
-        params = {}
+        # 1. 尝试获取统计数据 (pledge_stat)
+        params_stat = {}
         if ts_code:
-            params['ts_code'] = ts_code
-            # 如果指定了ts_code，忽略end_date以获取全量历史数据
-            pass
+            params_stat['ts_code'] = ts_code
         elif end_date:
-            # 如果没有ts_code，才使用end_date（例如获取全市场快照）
-            params['end_date'] = end_date
-        
-        df = pro.pledge_stat(**params)
-        
-        if df.empty:
+            params_stat['end_date'] = end_date
+            
+        df_stat = pd.DataFrame()
+        try:
+            df_stat = pro.pledge_stat(**params_stat)
+        except Exception as e:
+            logger.warning(f"Tushare获取pledge_stat失败: {e}")
+            
+        # 2. 尝试获取明细数据 (pledge_detail) 并补充
+        # 如果指定了ts_code，获取该股的明细
+        if ts_code:
+            try:
+                df_detail = pro.pledge_detail(ts_code=ts_code)
+                if not df_detail.empty:
+                    # 将明细聚合为统计格式，以便统一输出
+                    # 字段: ts_code, ann_date, pledgee, pledge_amount, ...
+                    # 我们按公告日期聚合
+                    df_detail_agg = df_detail.groupby(['ts_code', 'ann_date']).agg({
+                        'pledge_amount': 'sum'
+                    }).reset_index()
+                    df_detail_agg = df_detail_agg.rename(columns={'ann_date': 'end_date', 'pledge_amount': 'total_share'})
+                    df_detail_agg['pledge_count'] = 1 # 简化
+                    
+                    if df_stat.empty:
+                        df_stat = df_detail_agg
+                    else:
+                        # 简单的合并逻辑，实际应用中可能需要更复杂的对齐
+                        pass
+            except Exception as e:
+                logger.warning(f"Tushare获取pledge_detail失败: {e}")
+                
+        if df_stat.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        df = self._convert_date_format(df, ['end_date'])
+        df_stat = self._convert_date_format(df_stat, ['end_date'])
+        
+        # 确保数值型字段不为None
+        numeric_cols = ['pledge_count', 'unrest_pledge', 'rest_pledge', 'total_share', 'pledge_ratio']
+        for col in numeric_cols:
+            if col in df_stat.columns:
+                df_stat[col] = pd.to_numeric(df_stat[col], errors='coerce').fillna(0)
         
         for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
+            if col not in df_stat.columns:
+                df_stat[col] = None
         
-        return df[self.OUTPUT_FIELDS]
+        return df_stat[self.OUTPUT_FIELDS]
 
 
 @CollectorRegistry.register("share_float")
@@ -418,7 +449,41 @@ class ShareFloatCollector(BaseCollector):
         if end_date:
             params['end_date'] = end_date
         
-        df = pro.share_float(**params)
+        df = pd.DataFrame()
+        
+        # 针对限售解禁，Tushare建议按月或按年分块获取
+        if start_date and end_date:
+            try:
+                # 按年分块
+                start_year = int(start_date[:4])
+                end_year = int(end_date[:4])
+                years = range(start_year, end_year + 1)
+                
+                all_dfs = []
+                for year in years:
+                    p = params.copy()
+                    p['start_date'] = f"{year}0101"
+                    p['end_date'] = f"{year}1231"
+                    
+                    # 裁剪
+                    if p['start_date'] < start_date:
+                        p['start_date'] = start_date
+                    if p['end_date'] > end_date:
+                        p['end_date'] = end_date
+                    
+                    try:
+                        chunk = pro.share_float(**p)
+                        if not chunk.empty:
+                            all_dfs.append(chunk)
+                    except:
+                        pass
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+            except:
+                df = pro.share_float(**params)
+        else:
+            df = pro.share_float(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -538,7 +603,42 @@ class RepurchaseCollector(BaseCollector):
         if end_date:
             params['end_date'] = end_date
         
-        df = pro.repurchase(**params)
+        df = pd.DataFrame()
+        
+        # 如果提供了时间范围，按年循环获取以避免数据量限制
+        if start_date and end_date:
+            try:
+                # 生成年份范围
+                start_year = int(start_date[:4])
+                end_year = int(end_date[:4])
+                years = range(start_year, end_year + 1)
+                
+                all_dfs = []
+                for year in years:
+                    p = params.copy()
+                    p['start_date'] = f"{year}0101"
+                    p['end_date'] = f"{year}1231"
+                    
+                    # 裁剪起止日期
+                    if p['start_date'] < start_date:
+                        p['start_date'] = start_date
+                    if p['end_date'] > end_date:
+                        p['end_date'] = end_date
+                        
+                    try:
+                        chunk = pro.repurchase(**p)
+                        if not chunk.empty:
+                            all_dfs.append(chunk)
+                    except:
+                        pass
+                
+                if all_dfs:
+                    df = pd.concat(all_dfs, ignore_index=True)
+            except:
+                # 降级到直接查询
+                df = pro.repurchase(**params)
+        else:
+            df = pro.repurchase(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)

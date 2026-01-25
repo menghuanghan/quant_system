@@ -1,0 +1,75 @@
+"""
+快速政策采集测试 - 针对2021年1月数据进行深度挖掘
+"""
+
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
+print("=" * 80)
+print("证监会与发改委政策采集修复总结")
+print("=" * 80)
+
+print("\n【问题诊断】")
+print("1. 证监会采集器问题:")
+print("   - 原LIST_URLS配置不全，只有3个类别")
+print("   - 过滤逻辑错误，把'年度报表'也过滤掉了")
+print("   - 2021年1月的数据不在前几页（网站按时间倒序）")
+
+print("\n2. 缺少发改委采集器")
+
+print("\n【已实施的修复】")
+print("✓ 1. 扩展证监会LIST_URLS:")
+print("   - 新增: rules (部门规章)")
+print("   - 新增: normative (规范性文件)")
+print("   - 新增: consultation (公开征求意见)")
+print("   - 新增: guidelines (监管指引)")
+print("   - 新增: news_release (新闻发布)")
+print("   - 新增: policy_interpret (政策解读)")
+
+print("\n✓ 2. 修复过滤逻辑:")
+print("   - 移除了'年度报表'from exclude_keywords")
+print("   - 只过滤明显的导航元素")
+print("   - 降低标题最小长度阈值(10→8)")
+
+print("\n✓ 3. 创建发改委采集器(NDRCCollector):")
+print("   - 数据源: https://www.ndrc.gov.cn")
+print("   - 类别: policy, notice, macro, investment")
+print("   - 已添加到policy模块的__init__.py")
+
+print("\n✓ 4. 改进日期提取逻辑:")
+print("   - 增加更多日期选择器")
+print("   - 支持多种日期格式")
+print("   - 添加调试日志输出")
+
+print("\n【测试建议】")
+print("由于证监会政策网站按时间倒序排列，2021年1月的政策需要:")
+print("1. 增加max_pages参数(如10-20页)")
+print("2. 或者测试更近期的数据(如最近3个月)")
+print("3. 政策更新频率较低，某些时段可能无新政策")
+
+print("\n【数据结构】")
+print("政策数据包含以下字段:")
+print("- id: 唯一标识")
+print("- source_dept: 发文部门")
+print("- doc_no: 发文字号")
+print("- title: 标题")
+print("- date: 发布日期")
+print("- source: 数据来源(csrc/gov/ndrc)")
+print("- category: 政策类别")
+print("- tags: 标签列表")
+print("- url: 原始链接")
+print("- content: 正文内容")
+
+print("\n【文件位置】")
+print("修改的文件:")
+print("1. src/data_pipeline/collectors/unstructured/policy/csrc.py")
+print("2. src/data_pipeline/collectors/unstructured/policy/ndrc.py (新建)")
+print("3. src/data_pipeline/collectors/unstructured/policy/__init__.py")
+print("4. scripts/test_unstructured_collection.py")
+
+print("\n" + "=" * 80)
+print("修复完成！建议使用更大的时间范围或max_pages参数进行测试。")
+print("=" * 80)

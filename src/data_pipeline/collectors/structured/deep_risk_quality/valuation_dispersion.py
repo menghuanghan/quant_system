@@ -100,26 +100,37 @@ class APEPBEWMedianCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名
+        # 标准化列名 - AkShare实际返回 English
         column_mapping = {
-            '日期': 'date',
+            'date': 'date',
+            'equalWeightAveragePB': 'pb_ew',
+            'middlePB': 'pb_median',
             '等权重市盈率': 'pe_ew',
             '中位数市盈率': 'pe_median',
-            '等权重市净率': 'pb_ew',
-            '中位数市净率': 'pb_median',
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 兼容性寻找 PE 数据 (如果存在)
+        if 'pe_ew' not in df.columns:
+            for col in df.columns:
+                if 'equalWeightAveragePE' in col:
+                    df = df.rename(columns={col: 'pe_ew'})
+                if 'middlePE' in col:
+                    df = df.rename(columns={col: 'pe_median'})
+        
         # 日期过滤
         if start_date or end_date:
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date:
-                start = pd.to_datetime(start_date)
-                df = df[df['date'] >= start]
-            if end_date:
-                end = pd.to_datetime(end_date)
-                df = df[df['date'] <= end]
-            df['date'] = df['date'].dt.strftime('%Y%m%d')
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+                if start_date:
+                    start = pd.to_datetime(start_date)
+                    df = df[df['date'] >= start]
+                if end_date:
+                    end = pd.to_datetime(end_date)
+                    df = df[df['date'] <= end]
+                df['date'] = df['date'].dt.strftime('%Y%m%d')
+            except Exception as e:
+                logger.warning(f"PE/PB数据日期过滤失败: {e}")
         
         return df
     
@@ -230,12 +241,13 @@ class MarketCongestionCollector(BaseCollector):
         import akshare as ak
         
         # AkShare接口：stock_a_congestion_lg
+        # 注意：此数据源（理杏仁）通常从2022年开始提供
         df = ak.stock_a_congestion_lg()
         
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['date', 'close', 'congestion']
+        # 标准化列名 - AkShare实际返回可能为 English (date, close, congestion) 或 中文
         column_mapping = {
             '日期': 'date',
             '收盘价': 'close',
@@ -243,16 +255,25 @@ class MarketCongestionCollector(BaseCollector):
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 确保关键字段存在
+        if 'date' not in df.columns:
+            logger.warning("未能找到'date'列，尝试寻找'日期'")
+            if '日期' in df.columns:
+                df = df.rename(columns={'日期': 'date'})
+        
         # 日期过滤
         if start_date or end_date:
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date:
-                start = pd.to_datetime(start_date)
-                df = df[df['date'] >= start]
-            if end_date:
-                end = pd.to_datetime(end_date)
-                df = df[df['date'] <= end]
-            df['date'] = df['date'].dt.strftime('%Y%m%d')
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+                if start_date:
+                    start = pd.to_datetime(start_date)
+                    df = df[df['date'] >= start]
+                if end_date:
+                    end = pd.to_datetime(end_date)
+                    df = df[df['date'] <= end]
+                df['date'] = df['date'].dt.strftime('%Y%m%d')
+            except Exception as e:
+                logger.warning(f"拥挤度数据日期过滤失败: {e}")
         
         return df
 
@@ -330,25 +351,37 @@ class StockBondSpreadCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['日期', '沪深300指数', '股债利差', '股债利差均线']
+        # 标准化列名 - AkShare可能返回 [date, indexClose, spread, spreadMa]
         column_mapping = {
             '日期': 'date',
             '沪深300指数': 'index_close',
             '股债利差': 'spread',
             '股债利差均线': 'spread_ma',
+            'indexClose': 'index_close',
+            'spreadMa': 'spread_ma',
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 兼容性检测日期列
+        if 'date' not in df.columns:
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower():
+                    df = df.rename(columns={col: 'date'})
+                    break
+
         # 日期过滤
         if start_date or end_date:
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date:
-                start = pd.to_datetime(start_date)
-                df = df[df['date'] >= start]
-            if end_date:
-                end = pd.to_datetime(end_date)
-                df = df[df['date'] <= end]
-            df['date'] = df['date'].dt.strftime('%Y%m%d')
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+                if start_date:
+                    start = pd.to_datetime(start_date)
+                    df = df[df['date'] >= start]
+                if end_date:
+                    end = pd.to_datetime(end_date)
+                    df = df[df['date'] <= end]
+                df['date'] = df['date'].dt.strftime('%Y%m%d')
+            except Exception as e:
+                logger.warning(f"股债利差日期过滤失败: {e}")
         
         return df
 
@@ -428,7 +461,7 @@ class BuffettIndicatorCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['日期', '收盘价', '总市值', 'GDP', '近十年分位数', '总历史分位数']
+        # 标准化列名 - AkShare可能返回 [date, close, totalMarketCap, gdp, quantileInRecent10Years, quantileInAllHistory]
         column_mapping = {
             '日期': 'date',
             '收盘价': 'close',
@@ -436,19 +469,32 @@ class BuffettIndicatorCollector(BaseCollector):
             'GDP': 'gdp',
             '近十年分位数': 'quantile_10y',
             '总历史分位数': 'quantile_all',
+            'totalMarketCap': 'total_market_cap',
+            'quantileInRecent10Years': 'quantile_10y',
+            'quantileInAllHistory': 'quantile_all',
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 兼容性检测日期列
+        if 'date' not in df.columns:
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower():
+                    df = df.rename(columns={col: 'date'})
+                    break
+
         # 日期过滤
         if start_date or end_date:
-            df['date'] = pd.to_datetime(df['date'])
-            if start_date:
-                start = pd.to_datetime(start_date)
-                df = df[df['date'] >= start]
-            if end_date:
-                end = pd.to_datetime(end_date)
-                df = df[df['date'] <= end]
-            df['date'] = df['date'].dt.strftime('%Y%m%d')
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+                if start_date:
+                    start = pd.to_datetime(start_date)
+                    df = df[df['date'] >= start]
+                if end_date:
+                    end = pd.to_datetime(end_date)
+                    df = df[df['date'] <= end]
+                df['date'] = df['date'].dt.strftime('%Y%m%d')
+            except Exception as e:
+                logger.warning(f"巴菲特指标日期过滤失败: {e}")
         
         return df
 

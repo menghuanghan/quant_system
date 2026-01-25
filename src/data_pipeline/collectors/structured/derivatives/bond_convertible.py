@@ -58,30 +58,19 @@ class YieldCurveCollector(BaseCollector):
     ) -> pd.DataFrame:
         """
         采集国债收益率曲线
-        
-        Args:
-            ts_code: 收益率曲线编码（1001.CB-国债收益率曲线）
-            curve_type: 曲线类型（0-到期，1-即期）
-            trade_date: 交易日期
-            start_date: 查询起始日期
-            end_date: 查询结束日期
-            curve_term: 期限
-        
-        Returns:
-            DataFrame: 标准化的国债收益率曲线数据
         """
-        # 优先使用Tushare（需要特殊权限）
+        # 优先使用Tushare
         try:
             df = self._collect_from_tushare(ts_code, curve_type, trade_date, start_date, end_date, curve_term)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条收益率曲线数据")
                 return df
         except Exception as e:
-            logger.warning(f"Tushare获取收益率曲线失败（需要特殊权限）: {e}")
+            logger.warning(f"Tushare获取收益率曲线失败: {e}")
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(trade_date)
+            df = self._collect_from_akshare(trade_date, start_date, end_date)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条收益率曲线数据")
                 return df
@@ -102,37 +91,78 @@ class YieldCurveCollector(BaseCollector):
     ) -> pd.DataFrame:
         """从Tushare获取收益率曲线"""
         params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if curve_type:
-            params['curve_type'] = curve_type
-        if trade_date:
-            params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        if curve_term:
-            params['curve_term'] = curve_term
+        if ts_code: params['ts_code'] = ts_code
+        if curve_type: params['curve_type'] = curve_type
+        if trade_date: params['trade_date'] = trade_date
+        if curve_term: params['curve_term'] = curve_term
         
+        # Tushare 单次限制可能只有2000-5000条，按年获取更稳
+        if start_date and end_date and not trade_date:
+            try:
+                # Loop by month (safe within 2000 limit)
+                from datetime import datetime, timedelta
+                from dateutil.relativedelta import relativedelta
+                
+                s_dt = datetime.strptime(start_date, '%Y%m%d')
+                e_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                all_dfs = []
+                # Align to start
+                curr = s_dt
+                
+                while curr <= e_dt:
+                    # Define 5-day range (approx 1000 rows, safe for 2000 limit)
+                    chunk_end = curr + timedelta(days=5)
+                    
+                    real_start = curr.strftime('%Y%m%d')
+                    real_end = min(chunk_end, e_dt).strftime('%Y%m%d')
+                    
+                    if real_start <= real_end:
+                        p = params.copy()
+                        p['start_date'] = real_start
+                        p['end_date'] = real_end
+                        p['limit'] = 5000 # Force limit param if supported
+                        
+                        try:
+                            # 2026-01-25: Reduced chunk size to 5 days to avoid 2000 row limit
+                            chunk = self.tushare_api.yc_cb(**p)
+                            if not chunk.empty:
+                                all_dfs.append(chunk)
+                            time.sleep(0.3)
+                        except Exception as e:
+                           logger.warning(f"Tushare收益率采集分块异常 ({real_start}-{real_end}): {e}")
+
+                    # Next chunk
+                    curr = chunk_end + timedelta(days=1)
+                    
+                if all_dfs:
+                    return pd.concat(all_dfs, ignore_index=True)
+            except Exception as e:
+                logger.error(f"Tushare收益率分块采集异常: {e}")
+
+        if start_date: params['start_date'] = start_date
+        if end_date: params['end_date'] = end_date
         df = self.tushare_api.yc_cb(**params)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
-    
-    def _collect_from_akshare(self, trade_date: Optional[str] = None) -> pd.DataFrame:
+        return df
+
+    def _collect_from_akshare(
+        self, 
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
         """从AkShare获取收益率曲线"""
         import akshare as ak
         
+        # 确定起始日期
+        fetch_start = "2020-01-01"
+        if start_date:
+            try:
+                fetch_start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+            except: pass
+
         try:
-            # 获取国债收益率曲线
-            df = ak.bond_china_yield(start_date="2020-01-01")
+            df = ak.bond_china_yield(start_date=fetch_start)
         except Exception as e:
             logger.warning(f"AkShare获取收益率曲线失败: {e}")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -140,7 +170,6 @@ class YieldCurveCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        # 标准化字段
         column_mapping = {
             '日期': 'trade_date',
             '中债国债到期收益率:1年': 'y_1y',
@@ -150,12 +179,16 @@ class YieldCurveCollector(BaseCollector):
         }
         df = self._standardize_columns(df, column_mapping)
         
-        # 转换为长格式
         result = []
         for _, row in df.iterrows():
             date = row.get('trade_date', '')
             if pd.notna(date):
                 date_str = pd.to_datetime(date).strftime('%Y%m%d')
+                # 范围过滤
+                if trade_date and date_str != trade_date: continue
+                if start_date and date_str < start_date: continue
+                if end_date and date_str > end_date: continue
+
                 for term, col in [(1, 'y_1y'), (2, 'y_2y'), (5, 'y_5y'), (10, 'y_10y')]:
                     if col in row and pd.notna(row[col]):
                         result.append({
@@ -171,11 +204,6 @@ class YieldCurveCollector(BaseCollector):
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         df_result = pd.DataFrame(result)
-        
-        # 日期筛选
-        if trade_date:
-            df_result = df_result[df_result['trade_date'] == trade_date]
-        
         return df_result[self.OUTPUT_FIELDS]
 
 
@@ -365,7 +393,7 @@ class CBDailyCollector(BaseCollector):
         """
         # 优先使用Tushare
         try:
-            df = self._collect_from_tushare(ts_code, trade_date, start_date, end_date)
+            df = self._collect_from_tushare(ts_code, trade_date, start_date, end_date, **kwargs)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条可转债行情数据")
                 return df
@@ -374,7 +402,7 @@ class CBDailyCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(ts_code, trade_date)
+            df = self._collect_from_akshare(ts_code, trade_date, end_date=end_date)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条可转债行情数据")
                 return df
@@ -521,7 +549,9 @@ class CBDailyCollector(BaseCollector):
             
             df['ts_code'] = df['raw_code'].apply(add_exchange_suffix)
         
-        df['trade_date'] = trade_date or datetime.now().strftime('%Y%m%d')
+        # 设置日期
+        eff_date = trade_date or kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
+        df['trade_date'] = eff_date
         
         # 筛选指定转债
         if ts_code:
@@ -590,7 +620,7 @@ class RepoDailyCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(trade_date)
+            df = self._collect_from_akshare(trade_date, end_date=end_date)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条回购行情数据")
                 return df
@@ -661,14 +691,8 @@ class RepoDailyCollector(BaseCollector):
             df = self.tushare_api.repo_daily(**params)
             self._split_and_save_repo_daily(df)
         
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        # Return empty DataFrame because we handled saving internally
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
 
     def _split_and_save_repo_daily(self, df: pd.DataFrame):
         """将聚合的回购行情按 ts_code 拆分并保存"""

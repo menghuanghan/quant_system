@@ -56,6 +56,7 @@ class CollectionTask:
     date_field: str = "trade_date"                 # 日期字段名
     enabled: bool = True                           # 是否启用
     realtime: bool = False                         # 是否为实时数据（排除）
+    split_by: Optional[str] = None                 # 是否按列拆分保存（如按ts_code拆分）
 
 
 # ==================== 数据域任务配置 ====================
@@ -95,28 +96,31 @@ METADATA_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=1,
         output_file="stock_list_us.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="name_change",
         description="股票曾用名及代码变更记录",
         domain="metadata",
-        category=DataCategory.TIME_INDEPENDENT,
+        category=DataCategory.TIME_DEPENDENT,
         collector_func="get_name_change",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.ONCE,
         priority=2,
         output_file="name_change.parquet",
+        date_field="start_date",
     ),
     CollectionTask(
         name="st_status",
         description="ST/*ST/风险警示标识",
         domain="metadata",
-        category=DataCategory.TIME_INDEPENDENT,
+        category=DataCategory.TIME_DEPENDENT,
         collector_func="get_st_status",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.ONCE,
         priority=2,
         output_file="st_status.parquet",
+        date_field="st_start_date",
     ),
     CollectionTask(
         name="ah_stock",
@@ -433,10 +437,7 @@ FUNDAMENTAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="pledge/{ts_code}.parquet",
-<<<<<<< HEAD
         date_field="end_date",
-=======
->>>>>>> 244d356caea56f27cf34583c6dca3610c6885871
     ),
     CollectionTask(
         name="share_float",
@@ -501,6 +502,7 @@ TRADING_BEHAVIOR_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="money_flow_industry.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="money_flow_market",
@@ -512,6 +514,7 @@ TRADING_BEHAVIOR_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=4,
         output_file="money_flow_market.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="hsgt_flow",
@@ -560,17 +563,17 @@ TRADING_BEHAVIOR_TASKS = [
         priority=4,
         output_file="margin_target.parquet",
     ),
-    CollectionTask(
-        name="slb",
-        description="转融通",
-        domain="trading_behavior",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_slb",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=6,
-        output_file="slb.parquet",
-    ),
+    # CollectionTask(
+    #     name="slb",
+    #     description="转融通",
+    #     domain="trading_behavior",
+    #     category=DataCategory.TIME_DEPENDENT,
+    #     collector_func="get_slb",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.DAILY,
+    #     priority=6,
+    #     output_file="slb.parquet",
+    # ),
     
     # 特殊交易行为
     CollectionTask(
@@ -593,7 +596,8 @@ TRADING_BEHAVIOR_TASKS = [
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="top_inst.parquet",
+        output_file="top_inst/{ts_code}.parquet",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="block_trade",
@@ -643,6 +647,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="sw_daily.parquet",
+        enabled=False,  # 耗时太长，且Tushare限流
     ),
     
     # 概念与主题板块
@@ -667,6 +672,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=3,
         output_file="ths_member.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="ths_daily",
@@ -678,6 +684,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="ths_daily.parquet",
+        enabled=False,  # 耗时太长
     ),
     CollectionTask(
         name="dc_index",
@@ -689,6 +696,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=3,
         output_file="dc_index.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="dc_member",
@@ -700,6 +708,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=3,
         output_file="dc_member.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="kpl_concept",
@@ -711,6 +720,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=4,
         output_file="kpl_concept.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="kpl_concept_cons",
@@ -722,6 +732,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.ONCE,
         priority=4,
         output_file="kpl_concept_cons.parquet",
+        enabled=False,
     ),
     
     # 板块行情与强弱
@@ -735,6 +746,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="sector_performance.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="industry_board_em",
@@ -746,6 +758,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="industry_board_em.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="concept_board_em",
@@ -768,6 +781,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="sector_hist.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="sector_rank",
@@ -779,6 +793,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="sector_rank.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="limit_up_pool",
@@ -790,6 +805,7 @@ CROSS_SECTIONAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="limit_up_pool.parquet",
+        enabled=False,
     ),
 ]
 
@@ -831,6 +847,7 @@ DERIVATIVES_TASKS = [
         priority=6,
         output_file="fund_portfolio.parquet",
         date_field="ann_date",
+        enabled=False,
     ),
     CollectionTask(
         name="fund_share",
@@ -866,7 +883,7 @@ DERIVATIVES_TASKS = [
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
         priority=5,
-        output_file="fut_daily.parquet",
+        output_file="fut_daily/{ts_code}.parquet",
     ),
     CollectionTask(
         name="fut_holding",
@@ -876,8 +893,9 @@ DERIVATIVES_TASKS = [
         collector_func="get_fut_holding",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
-        priority=6,
+        priority=5,
         output_file="fut_holding.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="fut_wsr",
@@ -887,8 +905,9 @@ DERIVATIVES_TASKS = [
         collector_func="get_fut_wsr",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
-        priority=6,
+        priority=5,
         output_file="fut_wsr.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="opt_basic",
@@ -914,17 +933,17 @@ DERIVATIVES_TASKS = [
     ),
     
     # 债券与可转债
-    CollectionTask(
-        name="yield_curve",
-        description="国债收益率曲线",
-        domain="derivatives",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_yield_curve",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=4,
-        output_file="yield_curve.parquet",
-    ),
+    # CollectionTask(
+    #     name="yield_curve",
+    #     description="国债收益率曲线",
+    #     domain="derivatives",
+    #     category=DataCategory.TIME_DEPENDENT,
+    #     collector_func="get_yield_curve",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.DAILY,
+    #     priority=4,
+    #     output_file="yield_curve.parquet",
+    # ),
     CollectionTask(
         name="cb_basic",
         description="可转债基本信息",
@@ -966,8 +985,9 @@ DERIVATIVES_TASKS = [
         collector_func="get_cb_premium",
         stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
-        priority=5,
+        priority=6,
         output_file="cb_premium.parquet",
+        enabled=False,
     ),
 ]
 
@@ -1016,6 +1036,7 @@ INDEX_BENCHMARK_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="index_global.parquet",
+        enabled=False,
     ),
 ]
 
@@ -1109,6 +1130,7 @@ MACRO_EXOGENOUS_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=4,
         output_file="social_finance.parquet",
+        enabled=False,
     ),
     
     # 国际宏观
@@ -1135,6 +1157,7 @@ MACRO_EXOGENOUS_TASKS = [
         priority=5,
         output_file="eco_calendar.parquet",
         date_field="date",
+        enabled=False,
     ),
     
     # 行业与现实经济映射
@@ -1148,6 +1171,7 @@ MACRO_EXOGENOUS_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="box_office.parquet",
+        enabled=False,
     ),
     CollectionTask(
         name="car_sales",
@@ -1159,122 +1183,123 @@ MACRO_EXOGENOUS_TASKS = [
         frequency=CollectionFrequency.MONTHLY,
         priority=6,
         output_file="car_sales.parquet",
+        enabled=False,
     ),
 ]
 
 # ---------- 9. 预期与预测分析域 (Expectations & Forecasts) ----------
-EXPECTATIONS_TASKS = [
-    # 盈利预测
-    CollectionTask(
-        name="earnings_forecast",
-        description="业绩预告（公司官方）",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_earnings_forecast",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.QUARTERLY,
-        priority=5,
-        output_file="earnings_forecast.parquet",
-        date_field="ann_date",
-    ),
-    CollectionTask(
-        name="consensus_forecast",
-        description="一致预期数据（EPS/营收/净利润预测）",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_consensus_forecast",
-        stock_scope=StockScope.ALL_A,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=6,
-        output_file="consensus_forecast/{ts_code}.parquet",
-        date_field="ann_date",
-        batch_size=100,
-    ),
-    
-    # 机构评级
-    CollectionTask(
-        name="inst_rating",
-        description="机构投资评级",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_inst_rating",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=5,
-        output_file="inst_rating.parquet",
-        date_field="ann_date",
-    ),
-    CollectionTask(
-        name="rating_summary",
-        description="评级汇总统计（买入/增持评级统计）",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_rating_summary",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=5,
-        output_file="rating_summary.parquet",
-    ),
-    CollectionTask(
-        name="inst_survey",
-        description="机构调研记录",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_inst_survey",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=6,
-        output_file="inst_survey.parquet",
-        date_field="ann_date",
-    ),
-    
-    # 研究员指数
-    CollectionTask(
-        name="analyst_rank",
-        description="分析师指数排行",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_analyst_rank",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=6,
-        output_file="analyst_rank.parquet",
-    ),
-    CollectionTask(
-        name="analyst_detail",
-        description="分析师详情",
-        domain="expectations",
-        category=DataCategory.TIME_INDEPENDENT,
-        collector_func="get_analyst_detail",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.ONCE,
-        priority=5,
-        output_file="analyst_detail.parquet",
-    ),
-    CollectionTask(
-        name="broker_gold_stock",
-        description="券商月度金股组合",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_broker_gold_stock",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=6,
-        output_file="broker_gold_stock.parquet",
-    ),
-    CollectionTask(
-        name="forecast_revision",
-        description="预测修正数据",
-        domain="expectations",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_forecast_revision",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.DAILY,
-        priority=6,
-        output_file="forecast_revision.parquet",
-        date_field="ann_date",
-    ),
-]
+# EXPECTATIONS_TASKS = [
+#     # 盈利预测
+#     CollectionTask(
+#         name="earnings_forecast",
+#         description="业绩预告（公司官方）",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_earnings_forecast",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.QUARTERLY,
+#         priority=5,
+#         output_file="earnings_forecast.parquet",
+#         date_field="ann_date",
+#     ),
+#     CollectionTask(
+#         name="consensus_forecast",
+#         description="一致预期数据（EPS/营收/净利润预测）",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_consensus_forecast",
+#         stock_scope=StockScope.ALL_A,
+#         frequency=CollectionFrequency.MONTHLY,
+#         priority=6,
+#         output_file="consensus_forecast/{ts_code}.parquet",
+#         date_field="ann_date",
+#         batch_size=100,
+#     ),
+#     
+#     # 机构评级
+#     CollectionTask(
+#         name="inst_rating",
+#         description="机构投资评级",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_inst_rating",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.DAILY,
+#         priority=5,
+#         output_file="inst_rating.parquet",
+#         date_field="ann_date",
+#     ),
+#     CollectionTask(
+#         name="rating_summary",
+#         description="评级汇总统计（买入/增持评级统计）",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_rating_summary",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.MONTHLY,
+#         priority=5,
+#         output_file="rating_summary.parquet",
+#     ),
+#     CollectionTask(
+#         name="inst_survey",
+#         description="机构调研记录",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_inst_survey",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.DAILY,
+#         priority=6,
+#         output_file="inst_survey.parquet",
+#         date_field="ann_date",
+#     ),
+#     
+#     # 研究员指数
+#     CollectionTask(
+#         name="analyst_rank",
+#         description="分析师指数排行",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_analyst_rank",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.MONTHLY,
+#         priority=6,
+#         output_file="analyst_rank.parquet",
+#     ),
+#     CollectionTask(
+#         name="analyst_detail",
+#         description="分析师详情",
+#         domain="expectations",
+#         category=DataCategory.TIME_INDEPENDENT,
+#         collector_func="get_analyst_detail",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.ONCE,
+#         priority=5,
+#         output_file="analyst_detail.parquet",
+#     ),
+#     CollectionTask(
+#         name="broker_gold_stock",
+#         description="券商月度金股组合",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_broker_gold_stock",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.MONTHLY,
+#         priority=6,
+#         output_file="broker_gold_stock.parquet",
+#     ),
+#     CollectionTask(
+#         name="forecast_revision",
+#         description="预测修正数据",
+#         domain="expectations",
+#         category=DataCategory.TIME_DEPENDENT,
+#         collector_func="get_forecast_revision",
+#         stock_scope=StockScope.NONE,
+#         frequency=CollectionFrequency.DAILY,
+#         priority=6,
+#         output_file="forecast_revision.parquet",
+#         date_field="ann_date",
+#     ),
+# ]
 
 # ---------- 10. 深度风险与质量因子域 (Deep Risk & Quality) ----------
 DEEP_RISK_QUALITY_TASKS = [
@@ -1335,6 +1360,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.QUARTERLY,
         priority=5,
         output_file="stock_goodwill.parquet",
+        enabled=False,
         date_field="ann_date",
     ),
     CollectionTask(
@@ -1347,6 +1373,7 @@ DEEP_RISK_QUALITY_TASKS = [
         frequency=CollectionFrequency.QUARTERLY,
         priority=5,
         output_file="goodwill_impairment.parquet",
+        enabled=False,
         date_field="ann_date",
     ),
     CollectionTask(
@@ -1362,54 +1389,51 @@ DEEP_RISK_QUALITY_TASKS = [
     ),
     
     # ESG评价
-    CollectionTask(
-        name="esg_msci",
-        description="MSCI-ESG评级",
-        domain="deep_risk_quality",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_esg_msci",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=5,
-        output_file="esg_msci.parquet",
-        date_field="rating_date",
-    ),
-    CollectionTask(
-        name="esg_hz",
-        description="华证指数-ESG评级",
-        domain="deep_risk_quality",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_esg_hz",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=5,
-        output_file="esg_hz.parquet",
-        date_field="date",
-    ),
-    CollectionTask(
-        name="esg_refinitiv",
-        description="路孚特-ESG评级",
-        domain="deep_risk_quality",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_esg_refinitiv",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=5,
-        output_file="esg_refinitiv.parquet",
-        date_field="date",
-    ),
-    CollectionTask(
-        name="esg_zhiding",
-        description="秩鼎-ESG评级",
-        domain="deep_risk_quality",
-        category=DataCategory.TIME_DEPENDENT,
-        collector_func="get_esg_zhiding",
-        stock_scope=StockScope.NONE,
-        frequency=CollectionFrequency.MONTHLY,
-        priority=5,
-        output_file="esg_zhiding.parquet",
-        date_field="report_date",
-    ),
+    # ESG tasks removed as they only provide snapshots
+    # CollectionTask(
+    #     name="esg_msci",
+    #     description="MSCI-ESG评级",
+    #     domain="deep_risk_quality",
+    #     category=DataCategory.TIME_INDEPENDENT,
+    #     collector_func="get_esg_msci",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.MONTHLY,
+    #     priority=5,
+    #     output_file="esg_msci.parquet",
+    # ),
+    # CollectionTask(
+    #     name="esg_hz",
+    #     description="华证指数-ESG评级",
+    #     domain="deep_risk_quality",
+    #     category=DataCategory.TIME_INDEPENDENT,
+    #     collector_func="get_esg_hz",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.MONTHLY,
+    #     priority=5,
+    #     output_file="esg_hz.parquet",
+    # ),
+    # CollectionTask(
+    #     name="esg_refinitiv",
+    #     description="路孚特-ESG评级",
+    #     domain="deep_risk_quality",
+    #     category=DataCategory.TIME_INDEPENDENT,
+    #     collector_func="get_esg_refinitiv",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.MONTHLY,
+    #     priority=5,
+    #     output_file="esg_refinitiv.parquet",
+    # ),
+    # CollectionTask(
+    #     name="esg_zhiding",
+    #     description="秩鼎-ESG评级",
+    #     domain="deep_risk_quality",
+    #     category=DataCategory.TIME_INDEPENDENT,
+    #     collector_func="get_esg_zhiding",
+    #     stock_scope=StockScope.NONE,
+    #     frequency=CollectionFrequency.MONTHLY,
+    #     priority=5,
+    #     output_file="esg_zhiding.parquet",
+    # ),
 ]
 
 
@@ -1424,7 +1448,7 @@ ALL_TASKS = (
     DERIVATIVES_TASKS +
     INDEX_BENCHMARK_TASKS +
     MACRO_EXOGENOUS_TASKS +
-    EXPECTATIONS_TASKS +
+    # EXPECTATIONS_TASKS +
     DEEP_RISK_QUALITY_TASKS
 )
 
@@ -1438,7 +1462,7 @@ TASKS_BY_DOMAIN = {
     "derivatives": DERIVATIVES_TASKS,
     "index_benchmark": INDEX_BENCHMARK_TASKS,
     "macro_exogenous": MACRO_EXOGENOUS_TASKS,
-    "expectations": EXPECTATIONS_TASKS,
+    # "expectations": EXPECTATIONS_TASKS,
     "deep_risk_quality": DEEP_RISK_QUALITY_TASKS,
 }
 
@@ -1452,7 +1476,7 @@ DOMAIN_NAMES = {
     "derivatives": "衍生品与多资产数据域",
     "index_benchmark": "指数与基准数据域",
     "macro_exogenous": "宏观与外生变量域",
-    "expectations": "预期与预测分析域",
+    # "expectations": "预期与预测分析域",
     "deep_risk_quality": "深度风险与质量因子域",
 }
 

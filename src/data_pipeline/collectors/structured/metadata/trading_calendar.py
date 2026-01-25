@@ -12,6 +12,7 @@ import logging
 from typing import Optional, List
 from datetime import datetime, timedelta
 
+import time
 import pandas as pd
 
 from ..base import (
@@ -86,11 +87,12 @@ class TradeCalendarCollector(BaseCollector):
             - is_open: 是否交易日
             - pretrade_date: 上一个交易日
         """
-        # 设置默认日期范围
+        # 优先使用传入参数，如果没有则设置默认日期范围
         if not start_date:
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
         if not end_date:
-            end_date = (datetime.now() + timedelta(days=365)).strftime('%Y%m%d')
+            # 默认不应超过当前时间太多，除非是显式扩充。这里根据全量采集习惯设定。
+            end_date = kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
         
         # 优先使用Tushare
         try:
@@ -302,7 +304,7 @@ class SuspendInfoCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(trade_date)
+            df = self._collect_from_akshare(trade_date, end_date=end_date)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条停复牌记录")
                 return df
@@ -325,23 +327,53 @@ class SuspendInfoCollector(BaseCollector):
         pro = self.tushare_api
         
         params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if suspend_type:
-            params['suspend_type'] = suspend_type
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+        if ts_code: params['ts_code'] = ts_code
+        if trade_date: params['trade_date'] = trade_date
+        if suspend_type: params['suspend_type'] = suspend_type
         
-        # 必须至少传一个参数
-        if not params:
-            params['trade_date'] = datetime.now().strftime('%Y%m%d')
+        # 范围查询优化：支持分块采集以绕过条数限制 (Tushare 限制 5000 条)
+        if start_date and end_date and not ts_code and not trade_date:
+            all_dfs = []
+            try:
+                from dateutil.relativedelta import relativedelta
+                s_dt = datetime.strptime(start_date, '%Y%m%d')
+                e_dt = datetime.strptime(end_date, '%Y%m%d')
+                
+                curr_dt = s_dt
+                while curr_dt <= e_dt:
+                    # 按月采集以确保条数不超过 5000
+                    chunk_start = curr_dt.strftime('%Y%m%d')
+                    chunk_next = curr_dt + relativedelta(months=1)
+                    chunk_end = (chunk_next - timedelta(days=1)).strftime('%Y%m%d')
+                    if chunk_end > end_date:
+                        chunk_end = end_date
+                    
+                    logger.info(f"正在采集停复牌信息: {chunk_start} - {chunk_end}")
+                    chunk = pro.suspend_d(start_date=chunk_start, end_date=chunk_end, **params)
+                    if not chunk.empty:
+                        all_dfs.append(chunk)
+                        if len(chunk) >= 5000:
+                            logger.warning(f"警告：{chunk_start}-{chunk_end} 采集达到 5000 条上限，可能存在数据截断！")
+                    
+                    curr_dt = chunk_next
+                    time.sleep(0.4) # 避免频率限制
+                
+                if not all_dfs: return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+                df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
+                return self._post_process_suspend(df)
+            except Exception as e:
+                logger.error(f"停复牌范围采集逻辑错误: {e}")
+
+        # 单次或已指定代码的查询
+        if start_date: params['start_date'] = start_date
+        if end_date: params['end_date'] = end_date
+        if not params: params['trade_date'] = trade_date or end_date or datetime.now().strftime('%Y%m%d')
         
         df = pro.suspend_d(**params)
-        
+        return self._post_process_suspend(df)
+
+    def _post_process_suspend(self, df: pd.DataFrame) -> pd.DataFrame:
+        """停复牌数据后处理"""
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
@@ -354,15 +386,18 @@ class SuspendInfoCollector(BaseCollector):
         
         # 确保包含所有字段
         df = self._ensure_columns(df, self.OUTPUT_FIELDS)
-        
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self, trade_date: Optional[str] = None) -> pd.DataFrame:
-        """从AkShare获取停复牌信息"""
+    def _collect_from_akshare(self, trade_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """从AkShare获取今日停复牌信息"""
         import akshare as ak
         
         try:
-            # AkShare的停复牌接口
+            # 标记日期：优先使用显式 trade_date，其次是 end_date，最后是当前
+            eff_date = trade_date or end_date or datetime.now().strftime('%Y%m%d')
+            if len(eff_date.replace('-', '')) == 8:
+                eff_date = f"{eff_date[:4]}-{eff_date[4:6]}-{eff_date[6:8]}"
+            
             df = ak.stock_tfp_em()  # 东方财富停复牌数据
             
             if df.empty:
@@ -384,7 +419,7 @@ class SuspendInfoCollector(BaseCollector):
                 df['ts_code'] = df['symbol'].apply(self._symbol_to_tscode)
             
             # 设置trade_date
-            df['trade_date'] = datetime.now().strftime('%Y-%m-%d')
+            df['trade_date'] = eff_date
             df['suspend_type'] = 'S'  # 停牌
             df['suspend_timing'] = None
             df['ann_date'] = None
@@ -801,10 +836,11 @@ def get_trade_calendar(
     exchange: str = 'SSE',
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    is_open: Optional[int] = None
+    is_open: Optional[int] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
-    获取交易日历
+    获取交易日历数据
     
     Args:
         exchange: 交易所代码（SSE/SZSE/BSE/CFFEX/SHFE/CZCE/DCE/INE）
@@ -821,7 +857,7 @@ def get_trade_calendar(
     """
     collector = TradeCalendarCollector()
     return collector.collect(exchange=exchange, start_date=start_date, 
-                            end_date=end_date, is_open=is_open)
+                            end_date=end_date, is_open=is_open, **kwargs)
 
 
 def get_suspend_info(
@@ -829,7 +865,8 @@ def get_suspend_info(
     trade_date: Optional[str] = None,
     suspend_type: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取停复牌信息
@@ -851,12 +888,13 @@ def get_suspend_info(
     collector = SuspendInfoCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,
                             suspend_type=suspend_type, start_date=start_date,
-                            end_date=end_date)
+                            end_date=end_date, **kwargs)
 
 
 def get_price_limit_rule(
     market: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取涨跌停规则配置
@@ -872,12 +910,13 @@ def get_price_limit_rule(
         >>> df = get_price_limit_rule(market='创业板')
     """
     collector = PriceLimitRuleCollector()
-    return collector.collect(market=market, exchange=exchange)
+    return collector.collect(market=market, exchange=exchange, **kwargs)
 
 
 def get_auction_time(
     market: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取集合竞价时间配置
@@ -893,7 +932,7 @@ def get_auction_time(
         >>> df = get_auction_time(market='A股')
     """
     collector = AuctionTimeCollector()
-    return collector.collect(market=market, exchange=exchange)
+    return collector.collect(market=market, exchange=exchange, **kwargs)
 
 
 def get_trade_dates(

@@ -93,21 +93,36 @@ class BoxOfficeCollector(BaseCollector):
         """从Tushare获取票房数据"""
         pro = self.tushare_api
         
-        # bo_daily需要必填参数date，如果没有提供，使用end_date或当前日期
-        if not date:
-            if end_date:
-                date = end_date
-            else:
-                from datetime import datetime
-                date = datetime.now().strftime('%Y%m%d')
+        all_dfs = []
         
-        params = {'date': date}
+        # 确定日期列表
+        if date:
+            dates = [date]
+        elif start_date and end_date:
+            try:
+                dt_range = pd.date_range(start=start_date, end=end_date)
+                dates = [d.strftime('%Y%m%d') for d in dt_range]
+            except:
+                # 容错：使用上下文 end_date
+                dates = [end_date or datetime.now().strftime('%Y%m%d')]
+        else:
+            # 默认：使用上下文 end_date 或当前日期
+            dates = [end_date or datetime.now().strftime('%Y%m%d')]
+            
+        # 循环获取
+        for d in dates:
+            try:
+                df = pro.bo_daily(date=d)
+                if not df.empty:
+                    all_dfs.append(df)
+            except Exception as e:
+                # 某些日期可能无数据或报错
+                pass
         
-        # 尝试获取每日票房数据
-        df = pro.bo_daily(**params)
-        
-        if df.empty:
+        if not all_dfs:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        df = pd.concat(all_dfs, ignore_index=True)
         
         # Tushare字段映射
         column_mapping = {
@@ -181,6 +196,8 @@ class CarSalesCollector(BaseCollector):
         self,
         month: Optional[str] = None,
         brand: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -189,13 +206,12 @@ class CarSalesCollector(BaseCollector):
         Args:
             month: 月份（YYYYMM）
             brand: 品牌
-        
-        Returns:
-            DataFrame: 标准化的汽车销量数据
+            start_date: 开始日期 (YYYYMMDD)
+            end_date: 结束日期 (YYYYMMDD)
         """
         # 优先使用Tushare
         try:
-            df = self._collect_from_tushare(month, brand)
+            df = self._collect_from_tushare(month, brand, start_date, end_date)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条汽车销量数据")
                 return df
@@ -218,26 +234,47 @@ class CarSalesCollector(BaseCollector):
     def _collect_from_tushare(
         self,
         month: Optional[str],
-        brand: Optional[str]
+        brand: Optional[str],
+        start_date: Optional[str],
+        end_date: Optional[str]
     ) -> pd.DataFrame:
         """从Tushare获取汽车销量"""
         pro = self.tushare_api
         
-        params = {}
+        months = []
         if month:
-            params['month'] = month
-        if brand:
-            params['brand'] = brand
+            months = [month]
+        elif start_date and end_date:
+            try:
+                # 生成月份列表 YYYYMM
+                s = pd.to_datetime(start_date)
+                e = pd.to_datetime(end_date)
+                months = pd.period_range(s, e, freq='M').strftime('%Y%m').tolist()
+            except:
+                pass
         
-        # 尝试获取汽车销量
-        try:
-            df = pro.car_sales(**params)
-        except:
-            # Tushare可能没有此接口或需更高积分
+        # 如果没有指定日期，默认查最近一个月
+        if not months:
+            import datetime
+            months = [datetime.datetime.now().strftime('%Y%m')]
+            
+        all_dfs = []
+        for m in months:
+            params = {'month': m}
+            if brand:
+                params['brand'] = brand
+            
+            try:
+                df = pro.car_sales(**params)
+                if not df.empty:
+                    all_dfs.append(df)
+            except:
+                pass
+                
+        if not all_dfs:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        df = pd.concat(all_dfs, ignore_index=True)
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -279,7 +316,8 @@ class CarSalesCollector(BaseCollector):
 def get_box_office(
     date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取电影票房数据
@@ -296,7 +334,7 @@ def get_box_office(
         >>> df = get_box_office(date='20250115')
     """
     collector = BoxOfficeCollector()
-    return collector.collect(date=date, start_date=start_date, end_date=end_date)
+    return collector.collect(date=date, start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_car_sales(

@@ -73,6 +73,8 @@ class StockListACollector(BaseCollector):
         exchange: Optional[str] = None,
         list_status: str = 'L',
         is_hs: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -106,9 +108,12 @@ class StockListACollector(BaseCollector):
             - act_name: 实际控制人
             - act_ent_type: 实控人企业性质
         """
-        # 优先使用Tushare
         try:
-            df = self._collect_from_tushare(market, exchange, list_status, is_hs)
+            # 优先从 kwargs 提取日期，若无则使用显式参数
+            s_date = start_date or kwargs.get('start_date')
+            e_date = end_date or kwargs.get('end_date')
+            
+            df = self._collect_from_tushare(market, exchange, list_status, is_hs, s_date, e_date)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条A股股票数据")
                 return df
@@ -117,7 +122,7 @@ class StockListACollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(list_status)
+            df = self._collect_from_akshare(list_status, **kwargs)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条A股股票数据")
                 return df
@@ -126,7 +131,7 @@ class StockListACollector(BaseCollector):
         
         # 降级到BaoStock
         try:
-            df = self._collect_from_baostock()
+            df = self._collect_from_baostock(**kwargs)
             if not df.empty:
                 logger.info(f"从BaoStock成功获取 {len(df)} 条A股股票数据")
                 return df
@@ -142,7 +147,9 @@ class StockListACollector(BaseCollector):
         market: Optional[str],
         exchange: Optional[str],
         list_status: str,
-        is_hs: Optional[str]
+        is_hs: Optional[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """从Tushare获取A股列表"""
         pro = self.tushare_api
@@ -183,6 +190,16 @@ class StockListACollector(BaseCollector):
         # 标准化日期格式
         df = self._convert_date_format(df, ['list_date', 'delist_date'])
         
+        # 动态过滤：根据传入的 end_date 过滤上市日期
+        if not df.empty and end_date and 'list_date' in df.columns:
+            df = df[df['list_date'] <= str(end_date)]
+        
+        # 动态过滤：根据传入的 start_date 过滤
+        if not df.empty and start_date and 'list_date' in df.columns:
+             # 注意：对于基础列表，通常我们关心的是 "截至某日的存量"
+             # 如果需要严格过滤 start_date 之后的上市，可以加
+             pass
+        
         # 确保包含所有字段（但不填充None，保持原始数据）
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -190,7 +207,7 @@ class StockListACollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self, list_status: str = 'L') -> pd.DataFrame:
+    def _collect_from_akshare(self, list_status: str = 'L', **kwargs) -> pd.DataFrame:
         """从AkShare获取A股列表"""
         import akshare as ak
         
@@ -235,7 +252,7 @@ class StockListACollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_baostock(self) -> pd.DataFrame:
+    def _collect_from_baostock(self, **kwargs) -> pd.DataFrame:
         """从BaoStock获取A股列表"""
         import baostock as bs
         
@@ -243,11 +260,13 @@ class StockListACollector(BaseCollector):
         if not self.source_manager.ensure_baostock_login():
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        # 获取当天日期
-        today = datetime.now().strftime('%Y-%m-%d')
-        
+        # 获取基准日期
+        target_date = kwargs.get('end_date') or datetime.now().strftime('%Y-%m-%d')
+        if len(target_date.replace('-', '')) == 8:
+            target_date = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:8]}"
+            
         # BaoStock需要按日期查询
-        rs = bs.query_all_stock(day=today)
+        rs = bs.query_all_stock(day=target_date)
         
         data_list = []
         while (rs.error_code == '0') and rs.next():
@@ -338,6 +357,8 @@ class StockListHKCollector(BaseCollector):
     def collect(
         self,
         list_status: str = 'L',
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -345,13 +366,19 @@ class StockListHKCollector(BaseCollector):
         
         Args:
             list_status: 上市状态，可选值：L(上市)/D(退市)
+            start_date: 开始日期
+            end_date: 结束日期
         
         Returns:
             DataFrame: 标准化的港股列表数据
         """
+        # 优先从 kwargs 提取日期，若无则使用显式参数
+        s_date = start_date or kwargs.get('start_date')
+        e_date = end_date or kwargs.get('end_date')
+        
         # 优先使用Tushare
         try:
-            df = self._collect_from_tushare(list_status)
+            df = self._collect_from_tushare(list_status, s_date, e_date)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条港股数据")
                 return df
@@ -360,7 +387,7 @@ class StockListHKCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare()
+            df = self._collect_from_akshare(**kwargs)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条港股数据")
                 return df
@@ -371,7 +398,12 @@ class StockListHKCollector(BaseCollector):
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)
-    def _collect_from_tushare(self, list_status: str) -> pd.DataFrame:
+    def _collect_from_tushare(
+        self,
+        list_status: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> pd.DataFrame:
         """从Tushare获取港股列表"""
         pro = self.tushare_api
         
@@ -379,6 +411,13 @@ class StockListHKCollector(BaseCollector):
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        
+        # 标准化日期格式
+        df = self._convert_date_format(df, ['list_date', 'delist_date'])
+        
+        # 动态过滤：上市日期不得晚于 end_date
+        if not df.empty and end_date and 'list_date' in df.columns:
+            df = df[df['list_date'] <= str(end_date)]
         
         # 添加symbol字段
         if 'ts_code' in df.columns:
@@ -397,7 +436,7 @@ class StockListHKCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self) -> pd.DataFrame:
+    def _collect_from_akshare(self, list_status: str = 'L', **kwargs) -> pd.DataFrame:
         """从AkShare获取港股列表"""
         import akshare as ak
         
@@ -413,9 +452,8 @@ class StockListHKCollector(BaseCollector):
         
         # AkShare字段标准化映射
         column_mapping = {
-            'symbol': 'symbol',
-            'name': 'name',
-            'engname': 'enname',
+            '代码': 'symbol',
+            '中文名称': 'name',
         }
         df = self._standardize_columns(df, column_mapping)
         
@@ -461,6 +499,8 @@ class StockListUSCollector(BaseCollector):
     def collect(
         self,
         exchange: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -468,13 +508,18 @@ class StockListUSCollector(BaseCollector):
         
         Args:
             exchange: 交易所代码，可选值：NYSE/NASDAQ/AMEX
+            start_date: 开始日期
+            end_date: 结束日期
         
         Returns:
             DataFrame: 标准化的美股列表数据
         """
+        # 优先从 kwargs 提取日期，若无则使用显式参数
+        e_date = end_date or kwargs.get('end_date')
+        
         # 优先使用AkShare（Tushare美股接口需要更高积分）
         try:
-            df = self._collect_from_akshare(exchange)
+            df = self._collect_from_akshare(exchange, end_date=e_date, **kwargs)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条美股数据")
                 return df
@@ -484,7 +529,7 @@ class StockListUSCollector(BaseCollector):
         logger.error("无法获取美股列表数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
-    def _collect_from_akshare(self, exchange: Optional[str] = None) -> pd.DataFrame:
+    def _collect_from_akshare(self, exchange: Optional[str] = None, end_date: Optional[str] = None, **kwargs) -> pd.DataFrame:
         """从AkShare获取美股列表"""
         import akshare as ak
         
@@ -493,6 +538,9 @@ class StockListUSCollector(BaseCollector):
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+        # 注意：美股行情接口通常不含上市日期，若有 end_date 需求，需结合基础信息库
+        # 此处仅保留参数占位以维持架构统一
         
         # AkShare字段标准化映射
         column_mapping = {
@@ -608,6 +656,10 @@ class NameChangeCollector(BaseCollector):
         # 标准化日期格式
         df = self._convert_date_format(df, ['start_date', 'end_date', 'ann_date'])
         
+        # 动态过滤：仅包含在 end_date 之前的记录
+        if not df.empty and end_date and 'start_date' in df.columns:
+            df = df[df['start_date'] <= end_date]
+        
         # 确保包含所有字段
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -656,7 +708,7 @@ class STStatusCollector(BaseCollector):
         """
         # 首先获取股票曾用名数据
         name_change_collector = NameChangeCollector()
-        name_df = name_change_collector.collect(ts_code=ts_code)
+        name_df = name_change_collector.collect(ts_code=ts_code, **kwargs)
         
         if name_df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -668,8 +720,12 @@ class STStatusCollector(BaseCollector):
             name = str(row.get('name', ''))
             is_st = any(name.startswith(kw) for kw in ['ST', 'SST'])
             is_star_st = '*ST' in name or 'S*ST' in name
-            
             if is_st or is_star_st:
+                # 动态过滤：排除晚于传入结束日期的 ST 记录
+                target_end = kwargs.get('end_date')
+                if row.get('start_date') and target_end and str(row.get('start_date')) > str(target_end):
+                    continue
+                    
                 st_records.append({
                     'ts_code': row.get('ts_code'),
                     'name': name,
@@ -718,9 +774,9 @@ class AHStockCollector(BaseCollector):
         """
         # 获取A股列表（标记沪港通/深港通标的）
         a_collector = StockListACollector()
-        a_df = a_collector.collect(is_hs='H')  # 沪股通标的
+        a_df = a_collector.collect(is_hs='H', **kwargs)  # 沪股通标的
         
-        a_df_s = a_collector.collect(is_hs='S')  # 深股通标的
+        a_df_s = a_collector.collect(is_hs='S', **kwargs)  # 深股通标的
         a_df = pd.concat([a_df, a_df_s], ignore_index=True).drop_duplicates(subset=['ts_code'])
         
         if a_df.empty:
@@ -746,7 +802,8 @@ def get_stock_list_a(
     market: Optional[str] = None,
     exchange: Optional[str] = None,
     list_status: str = 'L',
-    is_hs: Optional[str] = None
+    is_hs: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取A股股票列表
@@ -766,10 +823,10 @@ def get_stock_list_a(
     """
     collector = StockListACollector()
     return collector.collect(market=market, exchange=exchange, 
-                            list_status=list_status, is_hs=is_hs)
+                            list_status=list_status, is_hs=is_hs, **kwargs)
 
 
-def get_stock_list_hk(list_status: str = 'L') -> pd.DataFrame:
+def get_stock_list_hk(list_status: str = 'L', **kwargs) -> pd.DataFrame:
     """
     获取港股股票列表
     
@@ -780,10 +837,10 @@ def get_stock_list_hk(list_status: str = 'L') -> pd.DataFrame:
         DataFrame: 港股股票列表
     """
     collector = StockListHKCollector()
-    return collector.collect(list_status=list_status)
+    return collector.collect(list_status=list_status, **kwargs)
 
 
-def get_stock_list_us(exchange: Optional[str] = None) -> pd.DataFrame:
+def get_stock_list_us(exchange: Optional[str] = None, **kwargs) -> pd.DataFrame:
     """
     获取美股股票列表
     
@@ -794,13 +851,14 @@ def get_stock_list_us(exchange: Optional[str] = None) -> pd.DataFrame:
         DataFrame: 美股股票列表
     """
     collector = StockListUSCollector()
-    return collector.collect(exchange=exchange)
+    return collector.collect(exchange=exchange, **kwargs)
 
 
 def get_name_change(
     ts_code: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取股票曾用名记录
@@ -817,12 +875,13 @@ def get_name_change(
         >>> df = get_name_change(ts_code='600848.SH')
     """
     collector = NameChangeCollector()
-    return collector.collect(ts_code=ts_code, start_date=start_date, end_date=end_date)
+    return collector.collect(ts_code=ts_code, start_date=start_date, end_date=end_date, **kwargs)
 
 
 def get_st_status(
     ts_code: Optional[str] = None,
-    include_history: bool = True
+    include_history: bool = True,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取股票ST标识状态
@@ -835,15 +894,15 @@ def get_st_status(
         DataFrame: ST状态记录
     """
     collector = STStatusCollector()
-    return collector.collect(ts_code=ts_code, include_history=include_history)
+    return collector.collect(ts_code=ts_code, include_history=include_history, **kwargs)
 
 
-def get_ah_stock() -> pd.DataFrame:
+def get_ah_stock(**kwargs) -> pd.DataFrame:
     """
-    获取A+H股票列表
+    获取A+H股票对照表
     
     Returns:
-        DataFrame: A+H股票对照数据
+        DataFrame: A+H股票对照表
     """
     collector = AHStockCollector()
-    return collector.collect()
+    return collector.collect(**kwargs)

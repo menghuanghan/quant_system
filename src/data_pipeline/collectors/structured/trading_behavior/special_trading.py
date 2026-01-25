@@ -297,9 +297,6 @@ class TopInstCollector(BaseCollector):
                 
                 if all_dfs:
                     full_df = pd.concat(all_dfs, ignore_index=True)
-                    # 执行分文件存储逻辑
-                    self._split_and_save_top_inst(full_df)
-                    # 返回聚合后的全量数据（供调度器存一份总档或统计，由于调度器config那边指定了存总档，这里就返回全量）
                     return full_df
             else:
                 # 给定了 ts_code，只为该 code 循环获取历史
@@ -316,22 +313,6 @@ class TopInstCollector(BaseCollector):
                     
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
 
-    def _split_and_save_top_inst(self, df: pd.DataFrame):
-        """将聚合的龙虎榜详情按 ts_code 拆分并保存"""
-        if df.empty or 'ts_code' not in df.columns:
-            return
-            
-        output_base = Path("data/raw/structured/trading_behavior/top_inst")
-        output_base.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"正在拆分龙虎榜详情，涉及 {len(df['ts_code'].unique())} 个标的...")
-        
-        for code, group in df.groupby('ts_code'):
-            file_path = output_base / f"{code.replace('.', '_')}.parquet"
-            # 采用追加或覆盖模式？考虑到是全量采集，直接覆盖更干净
-            group.to_parquet(file_path, index=False, compression='snappy')
-        
-        logger.info("龙虎榜详情拆分保存完成")
     
     def _collect_from_akshare(self) -> pd.DataFrame:
         """从AkShare获取营业部明细"""
@@ -617,7 +598,7 @@ def get_block_trade(
         DataFrame: 大宗交易数据
     
     Example:
-        >>> df = get_block_trade(start_date='20240101')
+        >>> df = get_block_trade(trade_date='20240115')
     """
     collector = BlockTradeCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,

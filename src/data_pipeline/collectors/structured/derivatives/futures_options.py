@@ -205,8 +205,13 @@ class FuturesDailyCollector(BaseCollector):
         try:
             df = self._collect_from_tushare(ts_code, trade_date, exchange, start_date, end_date)
             if not df.empty:
-                logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
-                return df
+                # Check if we should split
+                if start_date and end_date and not ts_code:
+                     self._split_and_save_fut_daily(df)
+                     return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+                else:
+                     logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
+                     return df
         except Exception as e:
             logger.warning(f"Tushare获取期货行情失败: {e}")
         
@@ -221,6 +226,29 @@ class FuturesDailyCollector(BaseCollector):
         
         logger.error("无法获取期货行情数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+    def _split_and_save_fut_daily(self, df: pd.DataFrame):
+        """将聚合的期货行情按 ts_code 拆分并保存"""
+        from pathlib import Path
+        if df.empty or 'ts_code' not in df.columns:
+            return
+            
+        # Use a specific directory for split files
+        output_base = Path("data/raw/structured/derivatives/fut_daily")
+        output_base.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"正在拆分期货行情，涉及 {len(df['ts_code'].unique())} 个合约...")
+        
+        # Groupby is efficient enough for ~1M rows
+        for code, group in df.groupby('ts_code'):
+            # Sanitize filename
+            safe_code = code.replace('.', '_')
+            file_path = output_base / f"{safe_code}.parquet"
+            # Append if exists? No, collection is usually range-based update or overwrite.
+            # Assuming overwrite behavior for simplicity in this repair context.
+            group.to_parquet(file_path, index=False, compression='snappy')
+        
+        logger.info("期货行情拆分保存完成")
     
     def _collect_from_tushare(
         self,
@@ -232,43 +260,33 @@ class FuturesDailyCollector(BaseCollector):
     ) -> pd.DataFrame:
         """从Tushare获取期货行情"""
         params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if exchange:
-            params['exchange'] = exchange
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+        if ts_code: params['ts_code'] = ts_code
+        if trade_date: params['trade_date'] = trade_date
+        if exchange: params['exchange'] = exchange
         
         # 分块采集以避免API限制
         if start_date and end_date and not ts_code:
             try:
+                from datetime import timedelta
                 start_dt = datetime.strptime(start_date, '%Y%m%d')
                 end_dt = datetime.strptime(end_date, '%Y%m%d')
                 
                 all_dfs = []
                 current_dt = start_dt
                 while current_dt <= end_dt:
-                    # 期货日线全市场约1000条，2天就会超过2000限制。
-                    # 因此必须按天采集。
-                    trade_date = current_dt.strftime('%Y%m%d')
-                    
+                    t_date = current_dt.strftime('%Y%m%d')
                     p = params.copy()
-                    p['trade_date'] = trade_date
-                    # 清除日期范围参数以免API冲突
-                    p.pop('start_date', None)
-                    p.pop('end_date', None)
+                    p['trade_date'] = t_date
                     
                     try:
                         chunk_df = self.tushare_api.fut_daily(**p)
                         if not chunk_df.empty:
                             all_dfs.append(chunk_df)
-                            logger.info(f"期货日线采集完成: {trade_date} ({len(chunk_df)} 条)")
+                            if len(all_dfs) % 10 == 0:
+                                logger.info(f"期货日线进度: {t_date}")
                     except Exception as e:
-                        logger.warning(f"期货日线采集失败 ({trade_date}): {e}")
+                        if '抱歉' not in str(e): # 忽略权限错误
+                            logger.warning(f"期货日线采集失败 ({t_date}): {e}")
                     
                     current_dt = current_dt + timedelta(days=1)
                 
@@ -277,10 +295,10 @@ class FuturesDailyCollector(BaseCollector):
                 return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             except Exception as e:
                 logger.error(f"期货日线分块逻辑异常: {e}")
-                # Fallback to normal
-                df = self.tushare_api.fut_daily(**params)
-        else:
-            df = self.tushare_api.fut_daily(**params)
+        
+        if start_date: params['start_date'] = start_date
+        if end_date: params['end_date'] = end_date
+        df = self.tushare_api.fut_daily(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)

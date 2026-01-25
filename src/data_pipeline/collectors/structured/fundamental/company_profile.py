@@ -206,7 +206,7 @@ class IndustryClassCollector(BaseCollector):
         """
         # 优先使用Tushare
         try:
-            df = self._collect_from_tushare(ts_code, src)
+            df = self._collect_from_tushare(ts_code, src, **kwargs)
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条行业分类数据")
                 return df
@@ -215,7 +215,7 @@ class IndustryClassCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare()
+            df = self._collect_from_akshare(**kwargs)
             if not df.empty:
                 if ts_code:
                     df = df[df['ts_code'] == ts_code]
@@ -231,7 +231,8 @@ class IndustryClassCollector(BaseCollector):
     def _collect_from_tushare(
         self,
         ts_code: Optional[str],
-        src: str
+        src: str,
+        **kwargs
     ) -> pd.DataFrame:
         """从Tushare获取行业分类"""
         pro = self.tushare_api
@@ -262,7 +263,11 @@ class IndustryClassCollector(BaseCollector):
         except Exception as e:
             logger.debug(f"获取申万行业分类失败: {e}")
         
-        df['update_date'] = datetime.now().strftime('%Y-%m-%d')
+        # 设置更新日期：优先使用传入的 end_date，否则使用当前
+        eff_date = kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
+        if len(eff_date.replace('-', '')) == 8:
+            eff_date = f"{eff_date[:4]}-{eff_date[4:6]}-{eff_date[6:8]}"
+        df['update_date'] = eff_date
         
         # 确保包含所有字段
         for col in self.OUTPUT_FIELDS:
@@ -271,9 +276,15 @@ class IndustryClassCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self) -> pd.DataFrame:
+    def _collect_from_akshare(self, **kwargs) -> pd.DataFrame:
         """从AkShare获取行业分类（巨潮资讯）"""
         import akshare as ak
+        
+        # 获取上下文日期
+        end_date = kwargs.get('end_date') or datetime.now().strftime('%Y%m%d')
+        update_date = end_date
+        if len(update_date.replace('-', '')) == 8:
+            update_date = f"{update_date[:4]}-{update_date[4:6]}-{update_date[6:8]}"
         
         try:
             # 使用巨潮资讯的行业分类数据
@@ -301,7 +312,7 @@ class IndustryClassCollector(BaseCollector):
                     industry_df = ak.stock_industry_change_cninfo(
                         symbol=symbol,
                         start_date="20200101",
-                        end_date=datetime.now().strftime('%Y%m%d')
+                        end_date=end_date.replace('-', '')
                     )
                     
                     if not industry_df.empty:
@@ -313,7 +324,7 @@ class IndustryClassCollector(BaseCollector):
                             'industry': latest.get('行业大类'),
                             'jc_l1': latest.get('行业大类'),
                             'jc_l2': latest.get('行业中类'),
-                            'update_date': datetime.now().strftime('%Y-%m-%d')
+                            'update_date': update_date
                         })
                 except Exception as e:
                     logger.debug(f"获取{symbol}行业分类失败: {e}")
@@ -396,7 +407,8 @@ class MainBusinessCollector(BaseCollector):
         self,
         ts_code: str,
         period: Optional[str],
-        type: str
+        type: str,
+        **kwargs
     ) -> pd.DataFrame:
         """从Tushare获取主营业务"""
         pro = self.tushare_api
@@ -556,7 +568,8 @@ class ManagementCollector(BaseCollector):
 
 def get_company_info(
     ts_code: Optional[str] = None,
-    exchange: Optional[str] = None
+    exchange: Optional[str] = None,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取上市公司基本信息
@@ -572,12 +585,13 @@ def get_company_info(
         >>> df = get_company_info(ts_code='000001.SZ')
     """
     collector = CompanyInfoCollector()
-    return collector.collect(ts_code=ts_code, exchange=exchange)
+    return collector.collect(ts_code=ts_code, exchange=exchange, **kwargs)
 
 
 def get_industry_class(
     ts_code: Optional[str] = None,
-    src: str = 'SW2021'
+    src: str = 'SW2021',
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取行业分类数据
@@ -593,13 +607,14 @@ def get_industry_class(
         >>> df = get_industry_class(ts_code='000001.SZ')
     """
     collector = IndustryClassCollector()
-    return collector.collect(ts_code=ts_code, src=src)
+    return collector.collect(ts_code=ts_code, src=src, **kwargs)
 
 
 def get_main_business(
     ts_code: str,
     period: Optional[str] = None,
-    type: str = 'P'
+    type: str = 'P',
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取主营业务数据
@@ -616,7 +631,7 @@ def get_main_business(
         >>> df = get_main_business(ts_code='000001.SZ')
     """
     collector = MainBusinessCollector()
-    return collector.collect(ts_code=ts_code, period=period, type=type)
+    return collector.collect(ts_code=ts_code, period=period, type=type, **kwargs)
 
 
 def get_management(

@@ -897,7 +897,7 @@ class SocialFinanceCollector(BaseCollector):
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare()
+            df = self._collect_from_akshare(start_m=start_m, end_m=end_m, **kwargs)
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条社融数据")
                 return df
@@ -939,7 +939,7 @@ class SocialFinanceCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self) -> pd.DataFrame:
+    def _collect_from_akshare(self, start_m: Optional[str] = None, end_m: Optional[str] = None, **kwargs) -> pd.DataFrame:
         """从AkShare获取社融"""
         import akshare as ak
         

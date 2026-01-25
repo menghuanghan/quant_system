@@ -23,6 +23,10 @@ import argparse
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+import ssl
+
+# 忽略SSL证书验证（解决MOFCOM等网站及AkShare的SSL握手报错）
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent

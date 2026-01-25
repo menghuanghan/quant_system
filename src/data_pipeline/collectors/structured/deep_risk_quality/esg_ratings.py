@@ -99,11 +99,11 @@ class MSCIESGCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['股票代码', 'ESG评分', '环境总评', '社会责任总评', '治理总评', '评级日期', '交易市场']
+        # AkShare实际返回: ['股票代码', 'ESG评分', '环境总评', '社会责任总评', '治理总评', '评级日期', '交易市场']
         column_mapping = {
             '股票代码': 'ts_code',
             'ESG评分': 'esg_rating',
-            '环境总评': 'environment_score',
+            '环境总评': 'env_score',
             '社会责任总评': 'social_score',
             '治理总评': 'governance_score',
             '评级日期': 'rating_date',
@@ -111,10 +111,16 @@ class MSCIESGCollector(BaseCollector):
         }
         df = self._standardize_columns(df, column_mapping)
         
-        # 股票代码过滤
-        if ts_code:
+        # 兼容性处理：有时AkShare返回的字段名可能略有不同
+        if 'rating_date' not in df.columns:
+            for col in df.columns:
+                if '日期' in col or 'date' in col.lower():
+                    df = df.rename(columns={col: 'rating_date'})
+                    break
+
+        if 'ts_code' in df.columns and ts_code:
             code = ts_code.split('.')[0]
-            df = df[df['ts_code'] == code]
+            df = df[df['ts_code'].astype(str).str.contains(code)]
         
         return df
 
@@ -197,7 +203,7 @@ class HZESGCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # 标准化列名 - AkShare实际返回: ['日期', '股票代码', '交易市场', '股票名称', 'ESG评分', 'ESG等级', '环境', '环境等级', '社会', '社会等级', '公司治理', '公司治理等级']
+        # AkShare实际返回: ['日期', '股票代码', '交易市场', '股票名称', 'ESG评分', 'ESG等级', '环境', '环境等级', '社会', '社会等级', '公司治理', '公司治理等级']
         column_mapping = {
             '股票代码': 'ts_code',
             '股票名称': 'stock_name',
@@ -214,10 +220,14 @@ class HZESGCollector(BaseCollector):
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 兼容性处理：如果date全为NaT，尝试填充
+        if 'date' in df.columns and df['date'].isna().all():
+            df['date'] = datetime.now().strftime('%Y-%m-%d')
+
         # 股票代码过滤
-        if ts_code:
+        if 'ts_code' in df.columns and ts_code:
             code = ts_code.split('.')[0]
-            df = df[df['ts_code'] == code]
+            df = df[df['ts_code'].astype(str).str.contains(code)]
         
         return df
 
@@ -300,28 +310,34 @@ class RefinitivESGCollector(BaseCollector):
         if df.empty:
             return pd.DataFrame()
         
-        # AkShare实际返回: ['日期', '股票代码', '交易市场', '股票名称', 'ESG评分', 'ESG等级', '环境', '环境等级', '社会', '社会等级', '公司治理', '公司治理等级']
+        # AkShare实际返回: ['股票代码', 'ESG评分', 'ESG评分日期', '环境总评', '环境总评日期', '社会责任总评', '社会责任总评日期', '治理总评', '治理总评日期', '争议总评', '争议总评日期', '行业', '交易所']
         column_mapping = {
             '股票代码': 'ts_code',
             '股票名称': 'stock_name',
-            '日期': 'date',
+            'ESG评分日期': 'date',
             'ESG评分': 'esg_score',
             'ESG等级': 'esg_grade',
-            '环境': 'e_score',
-            '环境等级': 'e_grade',
-            '社会': 's_score',
-            '社会等级': 's_grade',
-            '公司治理': 'g_score',
-            '公司治理等级': 'g_grade',
-            '交易市场': 'market',
+            '环境总评': 'e_score',
+            '环境总评日期': 'e_date',
+            '社会责任总评': 's_score',
+            '社会责任总评日期': 's_date',
+            '治理总评': 'g_score',
+            '治理总评日期': 'g_date',
+            '交易所': 'market',
         }
         df = self._standardize_columns(df, column_mapping)
         
+        # 如果没有'date'，寻找替代
+        if 'date' not in df.columns:
+            for col in df.columns:
+                if '日期' in col:
+                    df = df.rename(columns={col: 'date'})
+                    break
+
         # 股票代码过滤
-        if ts_code:
+        if 'ts_code' in df.columns and ts_code:
             code = ts_code.split('.')[0]
-            if 'ts_code' in df.columns:
-                df = df[df['ts_code'].astype(str) == code]
+            df = df[df['ts_code'].astype(str).str.contains(code)]
         
         return df
 

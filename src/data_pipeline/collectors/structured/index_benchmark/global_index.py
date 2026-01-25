@@ -36,8 +36,30 @@ class GlobalIndexCollector(BaseCollector):
     
     OUTPUT_FIELDS = [
         'trade_date',           # 交易日期
-        # 注意：历史行情数据需要Tushare 2000积分
-        # AkShare只提供实时快照，不包含历史OHLC数据
+        'ts_code',              # 代码
+        'open',                 # 开盘价
+        'close',                # 收盘价
+        'high',                 # 最高价
+        'low',                  # 最低价
+        'pre_close',            # 昨收价
+        'change',               # 涨跌额
+        'pct_chg',              # 涨跌幅
+        'swing',                # 振幅
+        'vol',                  # 成交量
+        'amount',               # 成交额
+    ]
+    
+    # 默认采集的主要全球指数
+    DEFAULT_INDICES = [
+        'SPX.GI',   # 标普500
+        'DJI.GI',   # 道琼斯
+        'IXIC.GI',  # 纳斯达克
+        'HSI.HI',   # 恒生指数
+        'N225.GI',  # 日经225
+        'FTSE.GI',  # 英国富时100
+        'GDAXI.GI', # 德国DAX
+        'FCHI.GI',  # 法国CAC40
+        'KS11.GI',  # 韩国KOSPI
     ]
     
     def collect(
@@ -50,15 +72,6 @@ class GlobalIndexCollector(BaseCollector):
     ) -> pd.DataFrame:
         """
         采集全球指数行情数据
-        
-        Args:
-            ts_code: 指数代码（如XIN9.FT、SPX.GI、IXIC.GI、DJI.GI）
-            trade_date: 交易日期
-            start_date: 开始日期
-            end_date: 结束日期
-        
-        Returns:
-            DataFrame: 标准化的全球指数行情数据
         """
         # 优先使用Tushare
         try:
@@ -92,27 +105,41 @@ class GlobalIndexCollector(BaseCollector):
         """从Tushare获取全球指数"""
         pro = self.tushare_api
         
-        params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+        codes = [ts_code] if ts_code else self.DEFAULT_INDICES
         
-        df = pro.index_global(**params)
+        all_dfs = []
+        for code in codes:
+            params = {'ts_code': code}
+            if trade_date:
+                params['trade_date'] = trade_date
+            if start_date:
+                params['start_date'] = start_date
+            if end_date:
+                params['end_date'] = end_date
+            
+            try:
+                # 显式加延时防限流
+                import time
+                time.sleep(0.1) 
+                
+                df = pro.index_global(**params)
+                if not df.empty:
+                    all_dfs.append(df)
+            except Exception as e:
+                logger.debug(f"获取指数 {code} 失败: {e}")
         
-        if df.empty:
+        if not all_dfs:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
+            
+        df = pd.concat(all_dfs, ignore_index=True)
+        # 转换日期格式
         df = self._convert_date_format(df, ['trade_date'])
         
+        # 自动补全缺失字段
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
                 df[col] = None
-        
+                
         return df[self.OUTPUT_FIELDS]
     
     def _collect_from_akshare(
