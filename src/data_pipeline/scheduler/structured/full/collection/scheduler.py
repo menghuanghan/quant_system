@@ -231,6 +231,7 @@ class FullCollectionScheduler:
                 get_index_daily, get_etf_daily,
                 get_daily_basic, get_stk_factor,
                 get_realtime_quote, get_top_list as get_top_list_realtime,
+                get_adj_factor,
             )
             self._collector_funcs.update({
                 "get_stock_daily": get_stock_daily,
@@ -241,6 +242,7 @@ class FullCollectionScheduler:
                 "get_daily_basic": get_daily_basic,
                 "get_stk_factor": get_stk_factor,
                 "get_realtime_quote": get_realtime_quote,
+                "get_adj_factor": get_adj_factor,
             })
         except ImportError as e:
             logger.warning(f"市场行情域采集器导入失败: {e}")
@@ -335,6 +337,7 @@ class FullCollectionScheduler:
             from src.data_pipeline.collectors.structured.derivatives import (
                 get_fund_basic, get_fund_daily, get_fund_nav,
                 get_fund_portfolio, get_fund_share,
+                get_fund_adj,
                 get_fut_basic, get_fut_daily, get_fut_holding, get_fut_wsr,
                 get_opt_basic, get_opt_daily,
                 get_yield_curve, get_cb_basic, get_cb_daily, 
@@ -346,6 +349,7 @@ class FullCollectionScheduler:
                 "get_fund_nav": get_fund_nav,
                 "get_fund_portfolio": get_fund_portfolio,
                 "get_fund_share": get_fund_share,
+                "get_fund_adj": get_fund_adj,
                 "get_fut_basic": get_fut_basic,
                 "get_fut_daily": get_fut_daily,
                 "get_fut_holding": get_fut_holding,

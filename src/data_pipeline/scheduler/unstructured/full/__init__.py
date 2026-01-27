@@ -1,12 +1,10 @@
 """
-非结构化数据调度器模块
+非结构化数据全量调度器模块
 
-提供非结构化数据的采集调度：
-- full: 全量采集调度器
-- increment: 增量采集调度器（待实现）
+提供原始数据采集调度器
 """
 
-from .full import (
+from .collection import (
     UnstructuredFullCollectionScheduler,
     TaskStatus,
     TaskResult,

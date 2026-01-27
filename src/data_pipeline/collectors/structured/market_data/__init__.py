@@ -18,6 +18,9 @@
    - 每日基本指标（市盈率/市净率/换手率等）
    - 创新高/连续涨跌/放量缩量
 
+4. 复权因子（Adjustment Factor）：
+   - 股票复权因子（用于计算前复权/后复权价格）
+
 数据源优先级：Tushare > AkShare > BaoStock
 """
 
@@ -71,6 +74,14 @@ from .technical import (
     get_stk_factor,
 )
 
+# 复权因子采集器
+from .adj_factor import (
+    # 采集器类
+    AdjFactorCollector,
+    # 便捷函数
+    get_adj_factor,
+)
+
 
 __all__ = [
     # 基类和工具
@@ -114,6 +125,12 @@ __all__ = [
     'get_daily_basic',
     'get_technical_indicator',
     'get_stk_factor',
+    
+    # 复权因子采集器类
+    'AdjFactorCollector',
+    
+    # 复权因子便捷函数
+    'get_adj_factor',
 ]
 
 

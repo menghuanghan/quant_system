@@ -199,7 +199,7 @@ MARKET_DATA_TASKS = [
     # K线与价格序列（时间相关）
     CollectionTask(
         name="stock_daily",
-        description="股票日K线（前复权）",
+        description="股票日K线（不复权）",
         domain="market_data",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_stock_daily",
@@ -208,11 +208,11 @@ MARKET_DATA_TASKS = [
         priority=5,
         output_file="stock_daily/{ts_code}.parquet",
         batch_size=50,
-        params={"adj": "qfq"},
+        params={"adj": None},
     ),
     CollectionTask(
         name="stock_weekly",
-        description="股票周K线",
+        description="股票周K线（不复权）",
         domain="market_data",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_stock_weekly",
@@ -221,10 +221,11 @@ MARKET_DATA_TASKS = [
         priority=6,
         output_file="stock_weekly/{ts_code}.parquet",
         batch_size=100,
+        params={"adj": None},
     ),
     CollectionTask(
         name="stock_monthly",
-        description="股票月K线",
+        description="股票月K线（不复权）",
         domain="market_data",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_stock_monthly",
@@ -233,6 +234,7 @@ MARKET_DATA_TASKS = [
         priority=6,
         output_file="stock_monthly/{ts_code}.parquet",
         batch_size=100,
+        params={"adj": None},
     ),
     CollectionTask(
         name="index_daily",
@@ -280,6 +282,20 @@ MARKET_DATA_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=7,
         output_file="stk_factor/{ts_code}.parquet",
+        batch_size=50,
+    ),
+    
+    # 复权因子（时间相关）
+    CollectionTask(
+        name="adj_factor",
+        description="股票复权因子",
+        domain="market_data",
+        category=DataCategory.TIME_DEPENDENT,
+        collector_func="get_adj_factor",
+        stock_scope=StockScope.ALL_A,
+        frequency=CollectionFrequency.DAILY,
+        priority=6,
+        output_file="adj_factor/{ts_code}.parquet",
         batch_size=50,
     ),
     
@@ -860,6 +876,20 @@ DERIVATIVES_TASKS = [
         priority=6,
         output_file="fund_share/{ts_code}.parquet",
         date_field="trade_date",
+    ),
+    
+    # 基金复权因子（时间相关）
+    CollectionTask(
+        name="fund_adj",
+        description="基金复权因子",
+        domain="derivatives",
+        category=DataCategory.TIME_DEPENDENT,
+        collector_func="get_fund_adj",
+        stock_scope=StockScope.ALL_FUND,
+        frequency=CollectionFrequency.DAILY,
+        priority=6,
+        output_file="fund_adj/{ts_code}.parquet",
+        batch_size=50,
     ),
     
     # 期货与期权

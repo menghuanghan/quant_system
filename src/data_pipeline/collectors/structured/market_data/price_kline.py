@@ -59,7 +59,7 @@ class StockDailyCollector(BaseCollector):
         trade_date: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        adj: AdjustType = 'qfq',
+        adj: AdjustType = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -372,7 +372,7 @@ class StockWeeklyCollector(BaseCollector):
         trade_date: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        adj: AdjustType = 'qfq',
+        adj: AdjustType = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -631,7 +631,7 @@ class StockMonthlyCollector(BaseCollector):
         trade_date: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        adj: AdjustType = 'qfq',
+        adj: AdjustType = None,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -1150,7 +1150,7 @@ class ETFDailyCollector(BaseCollector):
                 period='daily',
                 start_date=start_date if start_date else '19900101',
                 end_date=end_date if end_date else datetime.now().strftime('%Y%m%d'),
-                adjust='qfq'
+                adjust=None
             )
         except Exception as e:
             logger.warning(f"AkShare获取ETF日K线失败: {e}")
@@ -1188,7 +1188,7 @@ def get_stock_daily(
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    adj: AdjustType = 'qfq'
+    adj: AdjustType = None
 ) -> pd.DataFrame:
     """
     获取股票日K线数据
@@ -1217,7 +1217,7 @@ def get_stock_weekly(
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    adj: AdjustType = 'qfq'
+    adj: AdjustType = None
 ) -> pd.DataFrame:
     """
     获取股票周K线数据
@@ -1242,7 +1242,7 @@ def get_stock_monthly(
     trade_date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    adj: AdjustType = 'qfq'
+    adj: AdjustType = None
 ) -> pd.DataFrame:
     """
     获取股票月K线数据

@@ -809,3 +809,235 @@ def get_fund_share(
     collector = FundShareCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,
                             start_date=start_date, end_date=end_date, **kwargs)
+
+
+@CollectorRegistry.register("fund_adj")
+class FundAdjCollector(BaseCollector):
+    """
+    基金复权因子采集器
+    
+    采集基金（ETF）复权因子数据，用于计算基金复权行情。
+    主数据源：Tushare (fund_adj, 600积分)
+    
+    Tushare接口说明：
+    - 接口：fund_adj
+    - 积分要求：600积分起，5000以上频次相对较高
+    - 单次最大提取：2000行记录，可循环提取
+    """
+    
+    OUTPUT_FIELDS = [
+        'ts_code',          # TS基金代码
+        'trade_date',       # 交易日期
+        'adj_factor',       # 复权因子
+    ]
+    
+    # API调用频率控制（单位：秒）
+    # Tushare fund_adj接口限制：5000积分以上频次相对较高
+    # 为了安全起见，设置适当的延迟
+    API_CALL_INTERVAL = 0.3  # 每次调用间隔0.3秒
+    
+    # 单次最大提取行数（Tushare限制）
+    MAX_LIMIT = 2000
+    
+    def collect(
+        self,
+        ts_code: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        **kwargs
+    ) -> pd.DataFrame:
+        """
+        采集基金复权因子数据
+        
+        Args:
+            ts_code: TS基金代码（支持多只基金输入，用逗号分隔）
+            trade_date: 交易日期（YYYYMMDD格式）
+            start_date: 开始日期（YYYYMMDD格式）
+            end_date: 结束日期（YYYYMMDD格式）
+        
+        Returns:
+            DataFrame: 标准化的基金复权因子数据
+            
+        输出字段:
+            - ts_code: TS基金代码
+            - trade_date: 交易日期
+            - adj_factor: 复权因子
+        
+        使用示例:
+            # 获取单只基金复权因子
+            df = collector.collect(ts_code='513100.SH', start_date='20210101', end_date='20251231')
+            
+            # 获取某日全市场基金复权因子
+            df = collector.collect(trade_date='20240115')
+        """
+        # 优先使用Tushare（唯一数据源）
+        try:
+            df = self._collect_from_tushare(ts_code, trade_date, start_date, end_date)
+            if not df.empty:
+                logger.info(f"从Tushare成功获取 {len(df)} 条基金复权因子数据")
+                return df
+        except Exception as e:
+            logger.error(f"Tushare获取基金复权因子失败: {e}")
+        
+        logger.error("无法获取基金复权因子数据")
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+    
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def _collect_from_tushare(
+        self,
+        ts_code: Optional[str],
+        trade_date: Optional[str],
+        start_date: Optional[str],
+        end_date: Optional[str]
+    ) -> pd.DataFrame:
+        """从Tushare获取基金复权因子
+        
+        Args:
+            ts_code: TS基金代码
+            trade_date: 交易日期
+            start_date: 开始日期
+            end_date: 结束日期
+        
+        Returns:
+            DataFrame: 基金复权因子数据
+        """
+        import time
+        
+        pro = self.tushare_api
+        all_data = []
+        offset = 0
+        
+        while True:
+            # 构建请求参数
+            params = {
+                'offset': offset,
+                'limit': self.MAX_LIMIT
+            }
+            if ts_code:
+                params['ts_code'] = ts_code
+            if trade_date:
+                params['trade_date'] = trade_date
+            if start_date:
+                params['start_date'] = start_date
+            if end_date:
+                params['end_date'] = end_date
+            
+            # 调用API
+            df = pro.fund_adj(**params)
+            
+            if df is None or df.empty:
+                break
+            
+            all_data.append(df)
+            
+            # 如果返回数据少于限制数，说明已经取完
+            if len(df) < self.MAX_LIMIT:
+                break
+            
+            # 继续取下一批
+            offset += self.MAX_LIMIT
+            time.sleep(self.API_CALL_INTERVAL)  # 频率控制
+        
+        if not all_data:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        
+        # 合并所有数据
+        result = pd.concat(all_data, ignore_index=True)
+        
+        # 确保包含所有输出字段
+        for col in self.OUTPUT_FIELDS:
+            if col not in result.columns:
+                result[col] = None
+        
+        # 去重
+        result = result.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
+        
+        # 按日期排序（升序）
+        result = result.sort_values('trade_date', ascending=True)
+        
+        return result[self.OUTPUT_FIELDS]
+    
+    def collect_batch_by_fund(
+        self,
+        ts_codes: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        delay: float = None
+    ) -> pd.DataFrame:
+        """批量按基金代码采集复权因子
+        
+        Args:
+            ts_codes: 基金代码列表
+            start_date: 开始日期（YYYYMMDD格式）
+            end_date: 结束日期（YYYYMMDD格式）
+            delay: 每次调用间隔（秒），默认使用API_CALL_INTERVAL
+        
+        Returns:
+            DataFrame: 合并后的基金复权因子数据
+        """
+        import time
+        
+        if delay is None:
+            delay = self.API_CALL_INTERVAL
+        
+        all_data = []
+        for i, ts_code in enumerate(ts_codes):
+            try:
+                df = self.collect(
+                    ts_code=ts_code,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                if not df.empty:
+                    all_data.append(df)
+                    logger.info(f"[{i+1}/{len(ts_codes)}] 采集基金 {ts_code} 复权因子: {len(df)} 条")
+            except Exception as e:
+                logger.warning(f"采集基金 {ts_code} 复权因子失败: {e}")
+            
+            # 频率控制
+            if i < len(ts_codes) - 1:
+                time.sleep(delay)
+        
+        if all_data:
+            result = pd.concat(all_data, ignore_index=True)
+            return result.sort_values(['ts_code', 'trade_date'])
+        
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+
+def get_fund_adj(
+    ts_code: Optional[str] = None,
+    trade_date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **kwargs
+) -> pd.DataFrame:
+    """
+    获取基金复权因子
+    
+    Args:
+        ts_code: TS基金代码（支持多只基金输入）
+        trade_date: 交易日期（YYYYMMDD格式）
+        start_date: 开始日期（YYYYMMDD格式）
+        end_date: 结束日期（YYYYMMDD格式）
+    
+    Returns:
+        DataFrame: 基金复权因子数据
+        
+    示例:
+        # 获取单只基金复权因子
+        >>> df = get_fund_adj(ts_code='513100.SH', start_date='20210101', end_date='20251231')
+        
+        # 获取某日全市场基金复权因子
+        >>> df = get_fund_adj(trade_date='20240115')
+    """
+    collector = FundAdjCollector()
+    return collector.collect(
+        ts_code=ts_code,
+        trade_date=trade_date,
+        start_date=start_date,
+        end_date=end_date,
+        **kwargs
+    )
+

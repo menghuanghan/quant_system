@@ -33,36 +33,99 @@ logger = logging.getLogger(__name__)
 EVENT_CATEGORIES = {
     # === 极高价值 (Alpha 核心) ===
     EventType.MERGER.value: {
-        'id': 'category_scgk_szsh;category_bcgz_szsh;',  # 收购兼并 + 并购重组
-        'keywords': [],  # 空列表 = 不进行关键词过滤
+        'id': 'category_scgk_szsh;category_bcgz_szsh;',
+        'keywords': [
+            '收购', '出售', '重组', '合并', '吸收', '置换', '购买资产',
+            '交易预案', '交易草案', '交易报告书', '重组预案', '重组草案', '重组报告书',
+            '发行股份', '资产置换', '要约收购', '股权转让', '标的资产', '过户'
+        ],
+        'excludes': [
+            '取消', '终止', '说明会', '核查意见', '法律意见', '回复', '反馈', '摘要'
+        ],
         'name': '并购重组'
     },
     EventType.PENALTY.value: {
-        'id': 'category_jggz_szsh;',  # 监管关注（包含处罚、警示函等）
-        'keywords': [],  # 处罚类全要
+        'id': 'category_jggz_szsh;',
+        'keywords': [
+            '行政处罚', '立案调查', '立案告知', '市场禁入', '公开谴责', '通报批评',
+            '罚款', '违规行为', '纪律处分', '监管措施', '刑事强制措施', '逮捕', '拘留',
+            '认定为不适当人选'
+        ],
+        'excludes': [
+            '监管函', '关注函', '问询函', '回复', '核查意见', '整改报告', 
+            '风险提示', '说明', '意见书', '复核'
+        ],
         'name': '违规处罚'
     },
     EventType.EQUITY_CHANGE.value: {
-        'id': 'category_gqbd_szsh;',  # 股权变动
-        'keywords': [],  # 空列表 = 不进行关键词过滤
+        'id': 'category_gqbd_szsh;',
+        'keywords': [
+            '权益变动', '股份变动', '增持', '减持', '持股变动',
+            '简式权益变动', '详式权益变动', '举牌', '大宗交易', '集中竞价',
+            '股份转让', '增持计划', '减持计划', '增持结果', '减持结果'
+        ],
+        'excludes': [
+            '质押', '解押', '解除质押', '回购', '注销', '激励', '员工持股',
+            '核查意见', '法律意见', '进展'
+        ],
         'name': '权益变动'
     },
     EventType.CONTROL_CHANGE.value: {
-        'id': 'category_gqbd_szsh;',  # 股权变动（子集）
-        'keywords': [],  # 空列表 = 不进行关键词过滤
+        'id': 'category_gqbd_szsh;',
+        'keywords': [
+            '实际控制人', '控股股东', '控制权', '变更', '易主',
+            '一致行动', '表决权', '无实际控制人'
+        ],
+        'excludes': [
+            '未变更', '不发生变更', '稳定', '说明', '回复', '核查意见'
+        ],
         'name': '实控人变更'
     },
     
     # === 中等价值 ===
     EventType.MAJOR_CONTRACT.value: {
-        'id': 'category_rcjy_szsh;',  # 日常经营
-        'keywords': [],  # 空列表 = 不进行关键词过滤
+        'id': 'category_rcjy_szsh;',
+        'keywords': [
+            '合同', '协议', '中标', '订单', '战略合作', '承接',
+            '销售合同', '采购合同', '工程合同', '项目合同', '经营合同',
+            '框架协议', '备忘录', '意向书', '达成合作'
+        ],
+        'excludes': [
+            '解除', '终止', '日常关联交易', '补充协议', '进展'
+        ],
         'name': '重大合同'
     },
     EventType.LITIGATION.value: {
-        'id': 'category_sszdsx_szsh;',  # 诉讼仲裁
-        'keywords': [],  # 空列表 = 不进行关键词过滤
+        'id': 'category_sszdsx_szsh;',
+        'keywords': [
+            '诉讼', '仲裁', '起诉', '判决', '裁决', '应诉', '执行',
+            '法院', '原告', '被告', '立案', '撤诉', '和解', '法律文书'
+        ],
+        'excludes': [
+            '进展', '以前年度', '累计'
+        ],
         'name': '诉讼仲裁'
+    },
+    EventType.BANKRUPTCY.value: {
+        'id': 'category_pccz_szsh;', 
+        'keywords': [
+            '破产', '重整', '预重整', '清算', '债权人会议', '管理人',
+            '重整计划', '被申请破产', '招募'
+        ],
+        'excludes': [
+            '进展', '风险提示'
+        ],
+        'name': '破产重整'
+    },
+    EventType.SUSPENSION.value: {
+        'id': 'category_tfptzb_szsh;',
+        'keywords': [
+            '停牌', '复牌', '暂停上市', '恢复上市', '临时停牌'
+        ],
+        'excludes': [
+            '进展', '可能'
+        ],
+        'name': '停复牌'
     },
 }
 
@@ -120,8 +183,12 @@ class CninfoEventCollector(BaseEventCollector):
             event_types = [
                 EventType.MERGER.value,
                 EventType.PENALTY.value,
+                EventType.EQUITY_CHANGE.value,
                 EventType.CONTROL_CHANGE.value,
                 EventType.MAJOR_CONTRACT.value,
+                EventType.LITIGATION.value,
+                EventType.BANKRUPTCY.value,
+                EventType.SUSPENSION.value,
             ]
         
         # 使用内存set去重
@@ -141,6 +208,7 @@ class CninfoEventCollector(BaseEventCollector):
                 event_type=event_type,
                 category_id=config['id'],
                 keywords=config['keywords'],
+                excludes=config['excludes'],
                 start_date=start_date,
                 end_date=end_date,
                 stock_codes=stock_codes,
@@ -160,6 +228,7 @@ class CninfoEventCollector(BaseEventCollector):
         event_type: str,
         category_id: str,
         keywords: List[str],
+        excludes: List[str],
         start_date: str,
         end_date: str,
         stock_codes: Optional[List[str]],
@@ -210,6 +279,7 @@ class CninfoEventCollector(BaseEventCollector):
                     ann,
                     event_type=event_type,
                     keywords=keywords,
+                    excludes=excludes,
                     existing_ids=existing_ids
                 )
                 
@@ -267,6 +337,7 @@ class CninfoEventCollector(BaseEventCollector):
         ann: Dict,
         event_type: str,
         keywords: List[str],
+        excludes: List[str],
         existing_ids: set
     ) -> Optional[EventDocument]:
         """解析单条公告"""
@@ -296,6 +367,11 @@ class CninfoEventCollector(BaseEventCollector):
             # 关键词过滤
             if keywords:
                 if not any(kw in title for kw in keywords):
+                    return None
+
+            # 排除词过滤
+            if excludes:
+                if any(ex in title for ex in excludes):
                     return None
             
             # 生成ts_code
@@ -364,7 +440,7 @@ def get_cninfo_events(
     end_date: str,
     event_types: Optional[List[str]] = None,
     stock_codes: Optional[List[str]] = None,
-    max_pages: int = 100
+    max_pages: int = 200
 ) -> pd.DataFrame:
     """
     采集巨潮事件数据

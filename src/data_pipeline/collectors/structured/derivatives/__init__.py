@@ -6,6 +6,7 @@
    - ETF基本信息
    - ETF/LOF行情
    - 基金净值/持仓/规模
+   - 基金复权因子
 
 2. 期货与期权：
    - 期货合约信息
@@ -27,6 +28,7 @@
         get_fund_nav,
         get_fund_portfolio,
         get_fund_share,
+        get_fund_adj,
         
         # 期货与期权
         get_fut_basic,
@@ -52,11 +54,13 @@ from .etf_fund import (
     FundNavCollector,
     FundPortfolioCollector,
     FundShareCollector,
+    FundAdjCollector,
     get_fund_basic,
     get_fund_daily,
     get_fund_nav,
     get_fund_portfolio,
     get_fund_share,
+    get_fund_adj,
 )
 
 # 期货与期权采集器
@@ -96,8 +100,10 @@ __all__ = [
     'FundNavCollector',
     'FundPortfolioCollector',
     'FundShareCollector',
+    'FundAdjCollector',
     # ETF与基金便捷函数
     'get_fund_basic',
+    'get_fund_adj',
     'get_fund_daily',
     'get_fund_nav',
     'get_fund_portfolio',
