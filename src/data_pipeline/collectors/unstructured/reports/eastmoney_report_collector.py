@@ -10,6 +10,7 @@ import socket
 import os
 from typing import Optional, List
 from datetime import datetime
+import time
 
 import pandas as pd
 
@@ -22,7 +23,11 @@ socket.setdefaulttimeout(30)
 
 # 禁用代理（如果有问题）
 os.environ['no_proxy'] = '*'
+# 禁用代理（如果有问题）
+os.environ['no_proxy'] = '*'
 os.environ['NO_PROXY'] = '*'
+
+from ..request_utils import safe_request
 
 
 class ReportRating:
@@ -110,14 +115,15 @@ class EastMoneyReportCollector(UnstructuredCollector):
         Args:
             start_date: 开始日期
             end_date: 结束日期
-            stock_codes: 股票代码列表（可选，为空则需要指定）
+            stock_codes: 股票代码列表（可选，为空则采集全市场）
         
         Returns:
             研报数据DataFrame
         """
+        # 如果未指定股票代码，则使用全市场批量采集模式
         if not stock_codes:
-            logger.warning("未指定股票代码，请提供stock_codes参数")
-            return pd.DataFrame(columns=self.REPORT_FIELDS)
+            logger.info("未指定股票代码，使用全市场按日期批量采集模式")
+            return self._collect_market_reports_by_date(start_date, end_date)
         
         all_data = []
         
@@ -142,6 +148,128 @@ class EastMoneyReportCollector(UnstructuredCollector):
         result = result.drop_duplicates(subset=['report_id'], keep='first')
         
         return self._standardize_output(result)
+
+    def _collect_market_reports_by_date(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        按日期范围采集全市场研报（批量接口）
+        """
+        import requests
+        
+        url = "https://reportapi.eastmoney.com/report/list"
+        all_records = []
+        
+        # 将日期转换为API所需格式 (YYYY-MM-DD)
+        # 支持按天遍历以避免单次请求数据量过大
+        from ..base import DateRangeIterator
+        
+        date_iter = DateRangeIterator(start_date, end_date, chunk_days=5) # 5天一批
+        
+        for chunk_start, chunk_end in date_iter:
+            logger.info(f"采集研报数据: {chunk_start} ~ {chunk_end}")
+            page_num = 1
+            max_pages = 1000 # 安全限制
+            
+            while page_num <= max_pages:
+                params = {
+                    'industryCode': '*',
+                    'pageSize': '100',
+                    'industry': '*',
+                    'rating': '*',
+                    'ratingChange': '*',
+                    'beginTime': chunk_start,
+                    'endTime': chunk_end,
+                    'pageNo': str(page_num),
+                    'fields': '',
+                    'qType': '0', # 个股研报
+                }
+                
+                # 使用 request_utils 中的 safe_request (需要添加 headers)
+                # 但由于该API对header敏感，我们构造特定的header
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                try:
+                    # 直接使用 requests，因为 safe_request 默认的 header 可能不适用此API
+                    # 或者我们可以尝试集成
+                    response = requests.get(url, params=params, headers=headers, timeout=15)
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"请求失败: {response.status_code}")
+                        break
+                        
+                    data = response.json()
+                    items = data.get('data', [])
+                    
+                    if not items:
+                        break
+                        
+                    for item in items:
+                        record = self._parse_api_item(item)
+                        if record:
+                            all_records.append(record)
+                    
+                    total_pages = data.get('TotalPage', 0)
+                    if page_num >= total_pages:
+                        break
+                        
+                    page_num += 1
+                    time.sleep(0.5) # 限速
+                    
+                except Exception as e:
+                    logger.error(f"采集出错 ({chunk_start}): {e}")
+                    break
+                    
+        if not all_records:
+            return pd.DataFrame(columns=self.REPORT_FIELDS)
+            
+        result = pd.DataFrame(all_records)
+        result = result.drop_duplicates(subset=['report_id'], keep='first')
+        return self._standardize_output(result)
+
+    def _parse_api_item(self, item: dict) -> Optional[dict]:
+        """解析API返回的单条数据"""
+        try:
+            title = item.get('title', '')
+            stock_code = item.get('stockCode', '')
+            stock_name = item.get('stockName', '')
+            broker = item.get('orgSName') or item.get('orgName', '')
+            date_str = item.get('publishDate', '')
+            info_code = item.get('infoCode', '')
+            analyst = item.get('researcher', '')
+            
+            # 解析日期
+            publish_date = self._parse_date(date_str)
+            
+            # 构造PDF链接
+            # 通用格式: https://pdf.dfcfw.com/pdf/H3_{infoCode}_1.pdf
+            pdf_url = f"https://pdf.dfcfw.com/pdf/H3_{info_code}_1.pdf" if info_code else ""
+            
+            # 生成ID
+            report_id = self._generate_id(title, broker, publish_date)
+            
+            # 评级
+            rating = self._normalize_rating(item.get('emRatingName', ''))
+            
+            return {
+                'report_id': report_id,
+                'title': title,
+                'stock_code': stock_code,
+                'stock_name': stock_name,
+                'broker': broker,
+                'analyst': analyst,
+                'rating': rating,
+                'rating_change': '', # API返回的是数字，暂不解析
+                'target_price': None,
+                'target_price_low': None,
+                'target_price_high': None,
+                'date': publish_date,
+                'pdf_url': pdf_url,
+                'source': 'eastmoney_api'
+            }
+        except Exception as e:
+            logger.debug(f"解析条目失败: {e}")
+            return None
     
     def _collect_by_stock(self, stock_code: str) -> pd.DataFrame:
         """
