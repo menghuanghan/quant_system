@@ -1,63 +1,42 @@
-# Copilot Instructions - 量化交易系统
+# Copilot Instructions — 量化交易系统（AI 编码指南）
 
-## 系统架构概览
+目标：让 AI 编码代理能快速上手本仓库的关键模式、运行方式与扩展点。
 
-这是一个模块化的A股量化交易系统，采用**数据域驱动架构（Data Domain Architecture）**组织代码，包含：
+核心概览
+- 数据域驱动：采集器在 `src/data_pipeline/collectors/structured/*`（如 `market_data/`,`fundamental/` 等），非结构化在 `src/data_pipeline/collectors/unstructured`。
+- 统一调度：主入口 `scripts/run_full_collection.py`（基于 `FullCollectionScheduler`，调度实现见 `src/data_pipeline/scheduler/structured/full/collection/scheduler.py`）。
+- 输出与断点：所有原始产物写入 `data/raw/structured/{domain}/`（parquet，压缩 snappy）；断点/元信息在 `data/checkpoints` 与 `data/state`。
 
-- **数据管道层** (`src/data_pipeline/collectors/structured/`): 按8个数据域采集原始数据
-# Copilot Instructions — 量化交易系统（精简版）
+关键约定（必须遵守）
+- 采集器类继承 `BaseCollector`（`src/data_pipeline/collectors/structured/base.py`），并通过 `@CollectorRegistry.register("domain/name")` 注册。
+- 每个采集器应暴露可被调度器调用的函数（例如 `get_stock_daily`），并声明 `OUTPUT_FIELDS` 或通过 `_ensure_columns()` 填充缺失列。
+- 输入/输出日期统一：外部参数使用 `YYYYMMDD`；内部或调用 Baostock 时可用 `_convert_date_format()` 转为 `YYYY-MM-DD`。
+- 数据源顺序：默认优先级 `TUSHARE -> AKSHARE -> BAOSTOCK`（`DataSourcePriority.DEFAULT_ORDER`）；使用 `retry_on_failure` 与 `fallback_on_error` 装饰器实现稳健调用。
 
-**目的**：让 AI 编码代理快速上手仓库，定位关键约定、开发命令与示例文件。
+运行与调度要点
+- 启动依赖服务：
+  docker-compose -f docker/docker-compose.yml up -d
+- 列任务/运行示例：
+  python scripts/run_full_collection.py --list-domains
+  python scripts/run_full_collection.py --list-tasks
+  python scripts/run_full_collection.py --start-date 20210101 --end-date 20251231 --domains market_data --skip-existing
+- 并发与限速：调度器默认序列执行（`max_workers` 建议 1）以避免 API 限流；任务内部有 sleep（约 0.3s）与重试逻辑。
 
-**一目了然的模块**
-- 数据采集：src/data_pipeline/collectors/structured/（按“数据域”组织，见 metadata/ market_data/ fundamental/ trading_behavior/ 等）
-- 特征工程：src/feature_engineering/（`registry.py`、fusion 子模块）
-- 模型：src/models/（ML/DL/RL 分层）
-- 回测：src/backtesting/（引擎 + analysis + visualizer）
-- 执行/风控/组合：src/execution/, src/risk_management/, src/portfolio/
+调试与数据格式细节
+- 采集器返回的 DataFrame 若包含日期字段，会被调度器按 `start_date/end_date` 过滤（通常 `trade_date` 或任务 `date_field`）。
+- 输出文件模板可包含 `{ts_code}` 或其它占位符，调度器会替换并按实体拆分保存（见 scheduler 的 `split_by` 逻辑）。
+- 采集报告保存在 `data/raw/structured/collection_report.parquet` 与 CSV，日志写入 `logs/full_collection.log`。
 
-**关键约定（必须遵守）**
-- 采集器继承 `BaseCollector` 并通过 `CollectorRegistry.register()` 注册（参见 [src/data_pipeline/collectors/structured/base.py](src/data_pipeline/collectors/structured/base.py)）。
-- 每个采集器定义 `OUTPUT_FIELDS` 并保证返回包含这些列的 `pd.DataFrame`。
-- 日期参数外部使用 `YYYYMMDD`（内部用 `pd.to_datetime()`），BaoStock 例外需 `YYYY-MM-DD`（见 `_convert_date_format()`）。
-- 数据源优先级：Tushare → AkShare → BaoStock；使用 `@retry_on_failure` + `DataSourceManager` 进行降级和重试处理。
+常见修改场景（快速上手）
+- 添加采集器：在对应域目录新增文件，继承 `BaseCollector` 或导出函数并用 `CollectorRegistry.register` 注册；更新对应 README：`src/data_pipeline/collectors/structured/<domain>/README.md`。
+- 增加任务：编辑 `src/data_pipeline/scheduler/structured/full/collection/config.py`（修改 `TASKS_BY_DOMAIN` / `CollectionTask`），确保 `collector_func` 名称与采集器一致。
 
-**常用开发命令（Windows 开发者示例）**
-- 启用虚拟环境（PowerShell）:
-```powershell
-& .venv\Scripts\Activate.ps1
-```
-- 启动依赖服务（TimescaleDB、Mongo、Redis）:
-```bash
-docker-compose -f docker/docker-compose.yml up -d
-```
-- 运行示例采集脚本:
-```bash
-python scripts/collect_metadata.py
-```
-- 运行 tests 目录的简单测试:
-```bash
-python tests/test_metadata_collectors.py
-```
-
-**重要文件示例（定位问题与扩展时请参考）**
+重要文件参考
 - 采集器基类：src/data_pipeline/collectors/structured/base.py
-- 示例采集器：src/data_pipeline/collectors/structured/market_data/price_kline.py
-- 脚本入口：scripts/run_full_collection.py 和 scripts/collect_*.py
-- 特征注册：src/feature_engineering/registry.py
+- 调度器实现：src/data_pipeline/scheduler/structured/full/collection/scheduler.py
+- 任务配置：src/data_pipeline/scheduler/structured/full/collection/config.py
+- 入口脚本：scripts/run_full_collection.py
+- 各域说明：src/data_pipeline/collectors/structured/*/README.md
 
-**集成与运行时注意事项**
-- 在仓库根目录放置 `.env`（包含 `TUSHARE_TOKEN`、DB 连接等），缺少令牌时会触发数据源降级。
-- 切勿直接修改 `data/raw/`：这些文件由采集器生成，所有变更应通过采集器代码实现。
-- 本地 Mongo 映射到容器端口 `27600`（和默认 `27017` 不同），注意避免端口冲突。
-
-**快速任务指南（添加新采集器）**
-1. 在对应数据域目录新增类，继承 `BaseCollector`。
-2. 指定 `OUTPUT_FIELDS`，实现 `collect()`。
-3. 实现或调用 `_collect_from_tushare/_collect_from_akshare/_collect_from_baostock()`。
-4. 在模块 `__init__.py` 提供便捷函数（如 `get_stock_daily()`）。
-5. 更新该数据域的 `README.md`（目录下已有模板）。
-
-如需扩展：优先阅读上述示例文件以复用已有模式；遇到数据源或格式差异时，搜索 `_standardize_columns`、`_convert_date_format` 相关实现。
-
-请求反馈：如果需要，我可以把这份精简版合并回更详尽的原稿或把某个数据域展开成单独的 AI 指南。
+反馈
+请指出需补充的具体示例（采集器模板、config 片段、或某域详细流程），我会继续迭代该文件。

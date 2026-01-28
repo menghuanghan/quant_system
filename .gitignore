@@ -165,3 +165,5 @@ logs/
 # Local GitHub configs and continuation marker
 .github/
 .continue
+
+temp/
