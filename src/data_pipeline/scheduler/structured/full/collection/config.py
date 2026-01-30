@@ -447,7 +447,7 @@ FUNDAMENTAL_TASKS = [
         name="pledge",
         description="股权质押",
         domain="fundamental",
-        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
+        category=DataCategory.TIME_DEPENDENT,  # 接受end_date参数
         collector_func="get_pledge",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.DAILY,
@@ -914,6 +914,7 @@ DERIVATIVES_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="fut_daily/{ts_code}.parquet",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="fut_holding",
@@ -1008,6 +1009,7 @@ DERIVATIVES_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="repo_daily/{ts_code}.parquet",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="cb_premium",
