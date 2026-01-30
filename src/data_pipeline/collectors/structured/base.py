@@ -17,6 +17,13 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+# 强制禁用代理环境，避免由于系统代理配置错误导致某些接口（如AkShare）连接失败
+import os
+for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
+    if key in os.environ:
+        del os.environ[key]
+os.environ['NO_PROXY'] = '*'
+
 # 配置日志
 logger = logging.getLogger(__name__)
 

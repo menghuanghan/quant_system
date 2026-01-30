@@ -102,14 +102,17 @@ class DailyBasicCollector(BaseCollector):
         except Exception as e:
             logger.warning(f"Tushare获取每日基本指标失败: {e}")
         
-        # 降级到AkShare
-        try:
-            df = self._collect_from_akshare(ts_code, trade_date)
-            if not df.empty:
-                logger.info(f"从AkShare成功获取 {len(df)} 条每日基本指标数据")
-                return df
-        except Exception as e:
-            logger.error(f"AkShare获取每日基本指标失败: {e}")
+        # 降级到AkShare (仅当未指定历史范围采样时，AkShare的spot接口才有效)
+        if not start_date and not end_date:
+            try:
+                df = self._collect_from_akshare(ts_code, trade_date)
+                if not df.empty:
+                    logger.info(f"从AkShare成功获取 {len(df)} 条每日基本指标数据")
+                    return df
+            except Exception as e:
+                logger.error(f"AkShare获取每日基本指标失败: {e}")
+        else:
+            logger.debug("历史数据模式下跳过AkShare实时接口降级")
         
         logger.error("所有数据源均无法获取每日基本指标数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
