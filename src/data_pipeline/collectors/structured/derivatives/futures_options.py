@@ -205,13 +205,8 @@ class FuturesDailyCollector(BaseCollector):
         try:
             df = self._collect_from_tushare(ts_code, trade_date, exchange, start_date, end_date)
             if not df.empty:
-                # Check if we should split
-                if start_date and end_date and not ts_code:
-                     self._split_and_save_fut_daily(df)
-                     return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-                else:
-                     logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
-                     return df
+                logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
+                return df
         except Exception as e:
             logger.warning(f"Tushare获取期货行情失败: {e}")
         
@@ -227,28 +222,7 @@ class FuturesDailyCollector(BaseCollector):
         logger.error("无法获取期货行情数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
 
-    def _split_and_save_fut_daily(self, df: pd.DataFrame):
-        """将聚合的期货行情按 ts_code 拆分并保存"""
-        from pathlib import Path
-        if df.empty or 'ts_code' not in df.columns:
-            return
-            
-        # Use a specific directory for split files
-        output_base = Path("data/raw/structured/derivatives/fut_daily")
-        output_base.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"正在拆分期货行情，涉及 {len(df['ts_code'].unique())} 个合约...")
-        
-        # Groupby is efficient enough for ~1M rows
-        for code, group in df.groupby('ts_code'):
-            # Sanitize filename
-            safe_code = code.replace('.', '_')
-            file_path = output_base / f"{safe_code}.parquet"
-            # Append if exists? No, collection is usually range-based update or overwrite.
-            # Assuming overwrite behavior for simplicity in this repair context.
-            group.to_parquet(file_path, index=False, compression='snappy')
-        
-        logger.info("期货行情拆分保存完成")
+
     
     def _collect_from_tushare(
         self,
@@ -273,6 +247,7 @@ class FuturesDailyCollector(BaseCollector):
                 
                 all_dfs = []
                 current_dt = start_dt
+                import time
                 while current_dt <= end_dt:
                     t_date = current_dt.strftime('%Y%m%d')
                     p = params.copy()
@@ -284,9 +259,13 @@ class FuturesDailyCollector(BaseCollector):
                             all_dfs.append(chunk_df)
                             if len(all_dfs) % 10 == 0:
                                 logger.info(f"期货日线进度: {t_date}")
+                        # 增加短暂休眠，避免频控
+                        time.sleep(0.4)
                     except Exception as e:
-                        if '抱歉' not in str(e): # 忽略权限错误
-                            logger.warning(f"期货日线采集失败 ({t_date}): {e}")
+                        logger.warning(f"期货日线采集失败 ({t_date}): {e}")
+                        # 如果出现频控，增加休眠时间
+                        if '抱歉' in str(e):
+                            time.sleep(2.0)
                     
                     current_dt = current_dt + timedelta(days=1)
                 

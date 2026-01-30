@@ -654,6 +654,7 @@ class RepoDailyCollector(BaseCollector):
                 
                 all_dfs = []
                 current_dt = start_dt
+                import time
                 while current_dt <= end_dt:
                     # 每次采集一个月
                     next_month = current_dt.replace(day=28) + timedelta(days=4)
@@ -668,48 +669,27 @@ class RepoDailyCollector(BaseCollector):
                         chunk_df = self.tushare_api.repo_daily(**p)
                         if not chunk_df.empty:
                             all_dfs.append(chunk_df)
+                        time.sleep(0.5)
                     except Exception as e:
                         logger.warning(f"回购行情分块采集失败 ({p['start_date']}-{p['end_date']}): {e}")
+                        if '抱歉' in str(e):
+                            time.sleep(2.0)
                     
                     current_dt = chunk_end_dt + timedelta(days=1)
                 
                 if all_dfs:
-                    df = pd.concat(all_dfs, ignore_index=True)
-                    # 执行分文件存储逻辑
-                    self._split_and_save_repo_daily(df)
+                    return pd.concat(all_dfs, ignore_index=True)
                 else:
-                    df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+                    return pd.DataFrame(columns=self.OUTPUT_FIELDS)
             except Exception as e:
                 logger.error(f"回购行情分块逻辑异常: {e}, 尝试直接采集")
                 if start_date: params['start_date'] = start_date
                 if end_date: params['end_date'] = end_date
-                df = self.tushare_api.repo_daily(**params)
-                self._split_and_save_repo_daily(df)
+                return self.tushare_api.repo_daily(**params)
         else:
             if start_date: params['start_date'] = start_date
             if end_date: params['end_date'] = end_date
-            df = self.tushare_api.repo_daily(**params)
-            self._split_and_save_repo_daily(df)
-        
-        # Return empty DataFrame because we handled saving internally
-        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-
-    def _split_and_save_repo_daily(self, df: pd.DataFrame):
-        """将聚合的回购行情按 ts_code 拆分并保存"""
-        from pathlib import Path
-        if df.empty or 'ts_code' not in df.columns:
-            return
-            
-        output_base = Path("data/raw/structured/derivatives/repo_daily")
-        output_base.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"正在拆分回购行情，涉及 {len(df['ts_code'].unique())} 个品种...")
-        
-        for code, group in df.groupby('ts_code'):
-            file_path = output_base / f"{code.replace('.', '_')}.parquet"
-            group.to_parquet(file_path, index=False, compression='snappy')
-        
-        logger.info("回购行情拆分保存完成")
+            return self.tushare_api.repo_daily(**params)
     
     def _collect_from_akshare(self, trade_date: Optional[str] = None) -> pd.DataFrame:
         """从AkShare获取回购行情"""

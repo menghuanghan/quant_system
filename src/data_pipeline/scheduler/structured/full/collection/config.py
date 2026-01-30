@@ -914,6 +914,7 @@ DERIVATIVES_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="fut_daily/{ts_code}.parquet",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="fut_holding",
@@ -1006,6 +1007,7 @@ DERIVATIVES_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="repo_daily/{ts_code}.parquet",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="cb_premium",
