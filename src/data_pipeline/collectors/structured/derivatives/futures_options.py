@@ -860,6 +860,7 @@ class OptionsDailyCollector(BaseCollector):
         logger.error("无法获取期权行情数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
+    @retry_on_failure(max_retries=3, delay=1.0)
     def _collect_from_tushare(
         self,
         ts_code: Optional[str],
@@ -869,28 +870,56 @@ class OptionsDailyCollector(BaseCollector):
         end_date: Optional[str]
     ) -> pd.DataFrame:
         """从Tushare获取期权行情"""
-        params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if exchange:
-            params['exchange'] = exchange
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+        pro = self.tushare_api
         
-        df = self.tushare_api.opt_daily(**params)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        # 1. 指定期权或单日查询
+        if ts_code or trade_date:
+            params = {}
+            if trade_date: params['trade_date'] = trade_date
+            if ts_code: params['ts_code'] = ts_code
+            if exchange: params['exchange'] = exchange
+            return pro.opt_daily(**params)
+            
+        # 2. 全市场历史范围查询 (优化：循环日期获取全市场)
+        if start_date and end_date:
+            try:
+                # 获取交易日历
+                cal = pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open='1')
+                dates = cal['cal_date'].tolist()
+            except Exception as e:
+                logger.warning(f"获取交易日历失败，尝试直接按日遍历: {e}")
+                dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
+            
+            all_dfs = []
+            total_dates = len(dates)
+            logger.info(f"开始批量获取期权日线行情 (共 {total_dates} 个交易日)...")
+            
+            for i, date in enumerate(dates):
+                try:
+                    # 频控 (Tushare opt_daily 限制较高)
+                    time.sleep(0.4)
+                    df = pro.opt_daily(trade_date=date)
+                    if not df.empty:
+                        all_dfs.append(df)
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f"期权日线批量采集进度: {i+1}/{total_dates} ({date})")
+                except Exception as e:
+                    if "最多访问" in str(e):
+                        logger.warning(f"触发流量限制，等待 30s... {date}")
+                        time.sleep(30.0)
+                        # 重试
+                        try:
+                            df = pro.opt_daily(trade_date=date)
+                            if not df.empty: all_dfs.append(df)
+                        except: pass
+                    else:
+                        logger.debug(f"{date} 采集失败: {e}")
+            
+            if all_dfs:
+                return pd.concat(all_dfs, ignore_index=True)
+                    
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     def _collect_from_akshare(
         self,

@@ -562,11 +562,11 @@ TRADING_BEHAVIOR_TASKS = [
         domain="trading_behavior",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_margin_detail",
-        stock_scope=StockScope.ALL_A,
+        stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
         priority=7,
         output_file="margin_detail/{ts_code}.parquet",
-        batch_size=100,
+        split_by="ts_code",
     ),
     CollectionTask(
         name="margin_target",
@@ -956,10 +956,12 @@ DERIVATIVES_TASKS = [
         domain="derivatives",
         category=DataCategory.TIME_DEPENDENT,
         collector_func="get_opt_daily",
-        stock_scope=StockScope.ALL_OPTION,
+        stock_scope=StockScope.NONE,
         frequency=CollectionFrequency.DAILY,
         priority=5,
         output_file="opt_daily/{ts_code}.parquet",
+        split_by="ts_code",
+        enabled=False,
     ),
     
     # 债券与可转债

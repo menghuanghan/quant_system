@@ -246,55 +246,103 @@ class MarginDetailCollector(BaseCollector):
         """从Tushare获取融资融券明细"""
         pro = self.tushare_api
         
-        params = {}
-        if trade_date:
-            params['trade_date'] = trade_date
-        if ts_code:
-            params['ts_code'] = ts_code
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        
-        df = pro.margin_detail(**params)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        df = self._convert_date_format(df, ['trade_date'])
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        # 1. 指定股票或单日查询
+        if ts_code or trade_date:
+            params = {}
+            if trade_date: params['trade_date'] = trade_date
+            if ts_code: params['ts_code'] = ts_code
+            return pro.margin_detail(**params)
+            
+        # 2. 全市场历史范围查询 (优化：循环日期获取全市场)
+        if start_date and end_date:
+            try:
+                # 获取交易日历
+                cal = pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open='1')
+                dates = cal['cal_date'].tolist()
+                # 默认降序，如果用户习惯从旧到新，可以加 [::-1]，但之前用户说“不用反转”
+            except Exception as e:
+                logger.warning(f"获取交易日历失败，尝试直接按日遍历: {e}")
+                dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
+            
+            all_dfs = []
+            total_dates = len(dates)
+            logger.info(f"开始批量获取融资融券明细 (共 {total_dates} 个交易日)...")
+            
+            for i, date in enumerate(dates):
+                try:
+                    # 频控 (Tushare margin_detail 限制较高，但出于安全设置 0.4s)
+                    time.sleep(0.4)
+                    df = pro.margin_detail(trade_date=date)
+                    if not df.empty:
+                        all_dfs.append(df)
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f"融资融券明细批量采集进度: {i+1}/{total_dates} ({date})")
+                except Exception as e:
+                    if "最多访问" in str(e):
+                        logger.warning(f"触发流量限制，等待 30s... {date}")
+                        time.sleep(30.0)
+                        # 重试一次本日期
+                        try:
+                            df = pro.margin_detail(trade_date=date)
+                            if not df.empty: all_dfs.append(df)
+                        except: pass
+                    else:
+                        logger.debug(f"{date} 采集失败: {e}")
+            
+            if all_dfs:
+                return pd.concat(all_dfs, ignore_index=True)
+                    
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
-    def _collect_from_akshare(self, ts_code: str) -> pd.DataFrame:
+    def _collect_from_akshare(self, ts_code: Optional[str] = None, trade_date: Optional[str] = None) -> pd.DataFrame:
         """从AkShare获取融资融券明细"""
         import akshare as ak
         
-        symbol = ts_code.split('.')[0]
+        # AkShare 接口需要日期，如果没有则取最新
+        date_str = ""
+        if trade_date:
+            try:
+                date_str = datetime.strptime(trade_date, '%Y%m%d').strftime('%Y%m%d')
+            except:
+                date_str = trade_date
         
+        # 上海市场明细
         try:
-            df = ak.stock_margin_detail_sse(date="")
-        except Exception as e:
-            logger.warning(f"AkShare获取融资融券明细失败: {e}")
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            df_sh = ak.stock_margin_detail_sse(date=date_str)
+        except:
+            df_sh = pd.DataFrame()
+            
+        # 深圳市场明细 (AkShare 目前针对深交所的日报明细接口可能不同，此处做兼容)
+        try:
+            df_sz = ak.stock_margin_detail_szse(date=date_str)
+        except:
+            df_sz = pd.DataFrame()
+            
+        df = pd.concat([df_sh, df_sz], ignore_index=True)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        # 筛选指定股票
-        if 'symbol' in df.columns:
-            df = df[df['symbol'] == symbol]
-        
+        # 标准化和筛选
         column_mapping = {
             '信用交易日期': 'trade_date',
+            '证券代码': 'symbol',
+            '证券简称': 'name',
             '融资余额': 'rzye',
             '融券余额': 'rqye',
         }
         df = self._standardize_columns(df, column_mapping)
-        df['ts_code'] = ts_code
+        
+        # 转换 ts_code
+        if 'symbol' in df.columns:
+            df['ts_code'] = df['symbol'].apply(
+                lambda x: f"{str(x).zfill(6)}.SH" if str(x).startswith(('6', '9'))
+                else f"{str(x).zfill(6)}.SZ"
+            )
+            
+        if ts_code:
+            df = df[df['ts_code'] == ts_code]
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
