@@ -62,6 +62,16 @@ from .scheduler import (
     process_all,
 )
 
+from .filter import (
+    AnnouncementFilter,
+    FilterConfig,
+    FilterResult,
+    TITLE_BLACKLIST_KEYWORDS,
+    filter_month as filter_announcements_month,
+    filter_year as filter_announcements_year,
+    filter_all as filter_announcements_all,
+)
+
 __all__ = [
     # ===== Content Extractor =====
     # 主接口
@@ -129,4 +139,16 @@ __all__ = [
     'process_month',
     'process_year',
     'process_all',
+    
+    # ===== Filter =====
+    # 主接口
+    'AnnouncementFilter',
+    # 数据结构
+    'FilterConfig',
+    'FilterResult',
+    'TITLE_BLACKLIST_KEYWORDS',
+    # 便捷函数
+    'filter_announcements_month',
+    'filter_announcements_year',
+    'filter_announcements_all',
 ]

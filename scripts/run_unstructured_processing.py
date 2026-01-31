@@ -4,6 +4,7 @@
 一键启动对 data/raw/unstructured 下所有非结构化原始数据的pipeline处理
 
 功能：
+- 公告数据过滤（GPU加速，过滤80%垃圾公告）
 - 处理全部数据或部分数据（按类型筛选）
 - 断点恢复（基于已处理的文件）
 - 进度跟踪和报告
@@ -20,6 +21,21 @@
     # 列出所有可处理的数据
     python scripts/run_unstructured_processing.py --list
     
+    # ===== 公告过滤功能 =====
+    # 过滤指定年份的公告（GPU加速）
+    python scripts/run_unstructured_processing.py --filter --year 2021
+    
+    # 过滤指定月份
+    python scripts/run_unstructured_processing.py --filter --year 2021 --month 1
+    
+    # 过滤所有年份
+    python scripts/run_unstructured_processing.py --filter --all-years
+    
+    # 只统计不执行（dry run）
+    python scripts/run_unstructured_processing.py --filter-stats
+    python scripts/run_unstructured_processing.py --filter-stats --year 2021
+    
+    # ===== 数据处理功能 =====
     # 处理所有数据
     python scripts/run_unstructured_processing.py --all --year 2021
     
@@ -52,6 +68,14 @@ from src.data_pipeline.processors.unstructured.scheduler import (
     UnstructuredScheduler,
     ProcessingConfig,
     DataCategory,
+)
+
+from src.data_pipeline.processors.unstructured.filter import (
+    AnnouncementFilter,
+    FilterConfig,
+    FilterResult,
+    get_filter_statistics,
+    print_filter_statistics,
 )
 
 
@@ -262,6 +286,126 @@ def parse_category(cat_str: str) -> Optional[DataCategory]:
     return category_map.get(cat_str.lower())
 
 
+# ========== 过滤功能 ==========
+
+def run_filter(
+    args,
+    logger: logging.Logger,
+    raw_data_dir: Path
+) -> int:
+    """运行公告过滤"""
+    from datetime import datetime
+    
+    # 创建过滤器配置
+    config = FilterConfig(
+        use_gpu=args.use_gpu if hasattr(args, 'use_gpu') else True,
+        raw_data_dir=str(raw_data_dir),
+        backup_original=args.backup if hasattr(args, 'backup') else False,
+    )
+    
+    filter_instance = AnnouncementFilter(config=config)
+    
+    all_results = []
+    start_time = datetime.now()
+    
+    # 确定要过滤的年份
+    if args.all_years:
+        # 自动发现所有年份
+        announcements_dir = raw_data_dir / "announcements"
+        years = []
+        for year_dir in announcements_dir.glob("*"):
+            if year_dir.is_dir() and year_dir.name.isdigit():
+                years.append(int(year_dir.name))
+        years.sort()
+    elif args.year:
+        years = [args.year]
+    else:
+        print("错误: 必须指定 --year 或 --all-years")
+        return 1
+    
+    # 确定月份范围
+    if args.month:
+        months = [args.month]
+    else:
+        months = list(range(args.start_month, args.end_month + 1))
+    
+    print("\n" + "=" * 80)
+    print("公告数据过滤")
+    print("=" * 80)
+    print(f"  年份: {years}")
+    print(f"  月份: {months}")
+    print(f"  GPU加速: {filter_instance._cudf_available}")
+    print(f"  模式: {'只统计' if args.dry_run else '执行过滤'}")
+    print("=" * 80)
+    
+    total_original = 0
+    total_final = 0
+    total_event_filtered = 0
+    total_title_filtered = 0
+    
+    for year in years:
+        print(f"\n📅 {year}年")
+        print("-" * 40)
+        
+        year_results = []
+        for month in months:
+            result = filter_instance.filter_month(year, month, dry_run=args.dry_run)
+            year_results.append(result)
+            all_results.append(result)
+            
+            if result.original_count > 0:
+                total_original += result.original_count
+                total_final += result.final_count
+                total_event_filtered += result.event_filtered_count
+                total_title_filtered += result.title_filtered_count
+                
+                status = "✅" if not args.dry_run else "📊"
+                print(f"  {status} {month:02d}月: {result.original_count:,} -> {result.final_count:,} "
+                      f"(过滤 {result.total_filtered_count:,}, {result.filter_rate:.1%}) "
+                      f"[{result.elapsed_time:.2f}s]")
+            else:
+                print(f"  ⏭️  {month:02d}月: 无数据")
+    
+    # 总结
+    total_time = (datetime.now() - start_time).total_seconds()
+    
+    print("\n" + "=" * 80)
+    print("过滤完成" if not args.dry_run else "统计完成")
+    print("=" * 80)
+    print(f"\n原始记录总数: {total_original:,}")
+    print(f"事件过滤: {total_event_filtered:,}")
+    print(f"标题过滤: {total_title_filtered:,}")
+    print(f"最终记录数: {total_final:,}")
+    print(f"总过滤数: {total_original - total_final:,}")
+    if total_original > 0:
+        print(f"过滤率: {(total_original - total_final) / total_original:.1%}")
+        print(f"预估处理时间: {total_final / 3600:.1f} 小时 ({total_final / 3600 / 24:.1f} 天)")
+    print(f"耗时: {total_time:.1f}s")
+    print("=" * 80)
+    
+    return 0
+
+
+def run_filter_stats(
+    args,
+    logger: logging.Logger,
+    raw_data_dir: Path
+) -> int:
+    """运行过滤统计"""
+    
+    # 确定要统计的年份
+    if args.year:
+        years = [args.year]
+    else:
+        years = None  # 自动发现
+    
+    print("\n正在统计...")
+    stats = get_filter_statistics(years=years, raw_data_dir=str(raw_data_dir))
+    print_filter_statistics(stats)
+    
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="非结构化数据处理启动器",
@@ -269,108 +413,151 @@ def main():
         epilog=__doc__
     )
     
-    # 数据选择
-    parser.add_argument(
+    # ===== 过滤功能 =====
+    filter_group = parser.add_argument_group('过滤功能')
+    filter_group.add_argument(
+        '--filter',
+        action='store_true',
+        help='过滤公告数据（去除垃圾公告）'
+    )
+    filter_group.add_argument(
+        '--filter-stats',
+        action='store_true',
+        help='只统计过滤效果，不执行过滤'
+    )
+    filter_group.add_argument(
+        '--all-years',
+        action='store_true',
+        help='过滤所有年份的数据'
+    )
+    filter_group.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='只统计不执行（dry run）'
+    )
+    filter_group.add_argument(
+        '--backup',
+        action='store_true',
+        help='过滤前备份原文件'
+    )
+    
+    # ===== 数据选择 =====
+    data_group = parser.add_argument_group('数据选择')
+    data_group.add_argument(
         '--list', '-l',
         action='store_true',
         help='列出所有可处理的数据'
     )
-    parser.add_argument(
+    data_group.add_argument(
         '--status', '-s',
         action='store_true',
         help='检查处理状态'
     )
-    parser.add_argument(
+    data_group.add_argument(
         '--categories', '-c',
         nargs='+',
         help='要处理的数据类别（可多选）：announcements, reports, events, news/exchange, news/cctv, policy/gov, policy/ndrc'
     )
-    parser.add_argument(
+    data_group.add_argument(
         '--all', '-a',
         action='store_true',
         help='处理所有类别'
     )
     
-    # 时间范围
-    parser.add_argument(
+    # ===== 时间范围 =====
+    time_group = parser.add_argument_group('时间范围')
+    time_group.add_argument(
         '--year', '-y',
         type=int,
         help='要处理的年份（必需，除非使用--list）'
     )
-    parser.add_argument(
+    time_group.add_argument(
         '--start-month',
         type=int,
         default=1,
         help='起始月份（默认：1）'
     )
-    parser.add_argument(
+    time_group.add_argument(
         '--end-month',
         type=int,
         default=12,
         help='结束月份（默认：12）'
     )
-    parser.add_argument(
+    time_group.add_argument(
         '--month', '-m',
         type=int,
         help='只处理指定月份'
     )
     
-    # 处理选项
-    parser.add_argument(
+    # ===== 处理选项 =====
+    process_group = parser.add_argument_group('处理选项')
+    process_group.add_argument(
         '--force', '-f',
         action='store_true',
         help='强制重新处理（忽略已存在的文件）'
     )
-    parser.add_argument(
+    process_group.add_argument(
         '--skip-existing',
         action='store_true',
         default=True,
         help='跳过已存在的输出文件（默认）'
     )
-    parser.add_argument(
+    process_group.add_argument(
         '--batch-size',
         type=int,
         default=32,
         help='批处理大小（默认：32）'
     )
-    parser.add_argument(
+    process_group.add_argument(
         '--use-gpu',
         action='store_true',
-        help='启用GPU加速（需要cuDF）'
+        default=True,
+        help='启用GPU加速（需要cuDF，默认启用）'
+    )
+    process_group.add_argument(
+        '--no-gpu',
+        action='store_true',
+        help='禁用GPU加速'
     )
     
-    # LLM配置
-    parser.add_argument(
+    # ===== LLM配置 =====
+    llm_group = parser.add_argument_group('LLM配置')
+    llm_group.add_argument(
         '--model',
         default='qwen2.5:7b-instruct',
         help='LLM模型名称（默认：qwen2.5:7b-instruct）'
     )
-    parser.add_argument(
+    llm_group.add_argument(
         '--ollama-host',
         default='http://localhost:11434',
         help='Ollama服务地址（默认：http://localhost:11434）'
     )
-    parser.add_argument(
+    llm_group.add_argument(
         '--timeout',
         type=float,
         default=60.0,
         help='LLM调用超时时间（秒，默认：60）'
     )
     
-    # 其他
-    parser.add_argument(
+    # ===== 其他 =====
+    other_group = parser.add_argument_group('其他')
+    other_group.add_argument(
         '--log-level',
         default='INFO',
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         help='日志级别（默认：INFO）'
     )
-    parser.add_argument(
+    other_group.add_argument(
         '--report',
         action='store_true',
         help='生成处理报告'
     )
     
     args = parser.parse_args()
+    
+    # 处理GPU选项
+    if args.no_gpu:
+        args.use_gpu = False
     
     # 设置日志
     logger = setup_logging(args.log_level)
@@ -379,6 +566,14 @@ def main():
     raw_data_dir = project_root / "data" / "raw" / "unstructured"
     processed_data_dir = project_root / "data" / "processed" / "unstructured"
     
+    # ===== 过滤功能 =====
+    if args.filter_stats:
+        return run_filter_stats(args, logger, raw_data_dir)
+    
+    if args.filter:
+        return run_filter(args, logger, raw_data_dir)
+    
+    # ===== 列出/状态功能 =====
     # 列出可用数据
     categories_info = list_available_data(raw_data_dir)
     
