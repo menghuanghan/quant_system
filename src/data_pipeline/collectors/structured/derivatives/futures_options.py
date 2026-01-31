@@ -205,13 +205,8 @@ class FuturesDailyCollector(BaseCollector):
         try:
             df = self._collect_from_tushare(ts_code, trade_date, exchange, start_date, end_date)
             if not df.empty:
-                # Check if we should split
-                if start_date and end_date and not ts_code:
-                     self._split_and_save_fut_daily(df)
-                     return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-                else:
-                     logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
-                     return df
+                logger.info(f"从Tushare成功获取 {len(df)} 条期货行情数据")
+                return df
         except Exception as e:
             logger.warning(f"Tushare获取期货行情失败: {e}")
         
@@ -227,28 +222,7 @@ class FuturesDailyCollector(BaseCollector):
         logger.error("无法获取期货行情数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
 
-    def _split_and_save_fut_daily(self, df: pd.DataFrame):
-        """将聚合的期货行情按 ts_code 拆分并保存"""
-        from pathlib import Path
-        if df.empty or 'ts_code' not in df.columns:
-            return
-            
-        # Use a specific directory for split files
-        output_base = Path("data/raw/structured/derivatives/fut_daily")
-        output_base.mkdir(parents=True, exist_ok=True)
-        
-        logger.info(f"正在拆分期货行情，涉及 {len(df['ts_code'].unique())} 个合约...")
-        
-        # Groupby is efficient enough for ~1M rows
-        for code, group in df.groupby('ts_code'):
-            # Sanitize filename
-            safe_code = code.replace('.', '_')
-            file_path = output_base / f"{safe_code}.parquet"
-            # Append if exists? No, collection is usually range-based update or overwrite.
-            # Assuming overwrite behavior for simplicity in this repair context.
-            group.to_parquet(file_path, index=False, compression='snappy')
-        
-        logger.info("期货行情拆分保存完成")
+
     
     def _collect_from_tushare(
         self,
@@ -273,6 +247,7 @@ class FuturesDailyCollector(BaseCollector):
                 
                 all_dfs = []
                 current_dt = start_dt
+                import time
                 while current_dt <= end_dt:
                     t_date = current_dt.strftime('%Y%m%d')
                     p = params.copy()
@@ -284,9 +259,13 @@ class FuturesDailyCollector(BaseCollector):
                             all_dfs.append(chunk_df)
                             if len(all_dfs) % 10 == 0:
                                 logger.info(f"期货日线进度: {t_date}")
+                        # 增加短暂休眠，避免频控
+                        time.sleep(0.4)
                     except Exception as e:
-                        if '抱歉' not in str(e): # 忽略权限错误
-                            logger.warning(f"期货日线采集失败 ({t_date}): {e}")
+                        logger.warning(f"期货日线采集失败 ({t_date}): {e}")
+                        # 如果出现频控，增加休眠时间
+                        if '抱歉' in str(e):
+                            time.sleep(2.0)
                     
                     current_dt = current_dt + timedelta(days=1)
                 
@@ -860,6 +839,7 @@ class OptionsDailyCollector(BaseCollector):
         logger.error("无法获取期权行情数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
+    @retry_on_failure(max_retries=3, delay=1.0)
     def _collect_from_tushare(
         self,
         ts_code: Optional[str],
@@ -869,28 +849,56 @@ class OptionsDailyCollector(BaseCollector):
         end_date: Optional[str]
     ) -> pd.DataFrame:
         """从Tushare获取期权行情"""
-        params = {}
-        if ts_code:
-            params['ts_code'] = ts_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if exchange:
-            params['exchange'] = exchange
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
+        pro = self.tushare_api
         
-        df = self.tushare_api.opt_daily(**params)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
+        # 1. 指定期权或单日查询
+        if ts_code or trade_date:
+            params = {}
+            if trade_date: params['trade_date'] = trade_date
+            if ts_code: params['ts_code'] = ts_code
+            if exchange: params['exchange'] = exchange
+            return pro.opt_daily(**params)
+            
+        # 2. 全市场历史范围查询 (优化：循环日期获取全市场)
+        if start_date and end_date:
+            try:
+                # 获取交易日历
+                cal = pro.trade_cal(exchange='', start_date=start_date, end_date=end_date, is_open='1')
+                dates = cal['cal_date'].tolist()
+            except Exception as e:
+                logger.warning(f"获取交易日历失败，尝试直接按日遍历: {e}")
+                dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
+            
+            all_dfs = []
+            total_dates = len(dates)
+            logger.info(f"开始批量获取期权日线行情 (共 {total_dates} 个交易日)...")
+            
+            for i, date in enumerate(dates):
+                try:
+                    # 频控 (Tushare opt_daily 限制较高)
+                    time.sleep(0.4)
+                    df = pro.opt_daily(trade_date=date)
+                    if not df.empty:
+                        all_dfs.append(df)
+                    
+                    if (i + 1) % 10 == 0:
+                        logger.info(f"期权日线批量采集进度: {i+1}/{total_dates} ({date})")
+                except Exception as e:
+                    if "最多访问" in str(e):
+                        logger.warning(f"触发流量限制，等待 30s... {date}")
+                        time.sleep(30.0)
+                        # 重试
+                        try:
+                            df = pro.opt_daily(trade_date=date)
+                            if not df.empty: all_dfs.append(df)
+                        except: pass
+                    else:
+                        logger.debug(f"{date} 采集失败: {e}")
+            
+            if all_dfs:
+                return pd.concat(all_dfs, ignore_index=True)
+                    
+        return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     def _collect_from_akshare(
         self,

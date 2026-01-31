@@ -125,17 +125,26 @@ class TopListCollector(BaseCollector):
                 dates = [d.strftime('%Y%m%d') for d in pd.date_range(start_date, end_date)]
             
             all_dfs = []
-            for date in dates:
+            total_dates = len(dates)
+            for i, date in enumerate(dates):
                 try:
+                    # 增加频控 (Tushare top_list 限制 200次/分钟)
+                    time.sleep(0.35)
                     params = {'trade_date': date}
                     if ts_code:
                         params['ts_code'] = ts_code
                     df = pro.top_list(**params)
                     if not df.empty:
                         all_dfs.append(df)
-                    # 避免请求过于频繁，简单限流（实际应由Token限制）
+                    
+                    if (i + 1) % 20 == 0:
+                        logger.info(f"龙虎榜数据采集进度: {i+1}/{total_dates} {date}")
                 except Exception as e:
-                    logger.debug(f"{date} 采集失败: {e}")
+                    if "最多访问" in str(e):
+                        logger.warning(f"触发流量限制，等待 15s... {date}")
+                        time.sleep(15.0)
+                    else:
+                        logger.debug(f"{date} 采集失败: {e}")
                     
             if all_dfs:
                 return pd.concat(all_dfs, ignore_index=True)
