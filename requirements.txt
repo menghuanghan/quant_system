@@ -1,14 +1,39 @@
-filelock==3.20.3
-fsspec==2026.1.0
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-mpmath==1.3.0
-networkx==3.6.1
-numpy==2.4.1
-pillow==12.1.0
-setuptools==80.10.1
-sympy==1.13.1
-torch==2.6.0+cu124
-torchaudio==2.6.0+cu124
-torchvision==0.21.0+cu124
-typing_extensions==4.15.0
+# --- 核心数据处理 ---
+pandas
+numpy
+scipy
+scikit-learn
+# 注意：cudf 已通过 mamba 安装，此处不需要列出
+
+# --- 网络请求与爬虫 ---
+requests
+urllib3
+trafilatura>=1.6.0
+readability-lxml
+beautifulsoup4
+fake-useragent
+retry
+
+# --- PDF 与文档处理 ---
+# pipreqs 识别成了 fitz，但现代安装包名为 PyMuPDF
+PyMuPDF>=1.23.0 
+# 如果需要处理 docx
+python-docx
+
+# --- 财经数据源 (根据你列表里出现的保留) ---
+tushare
+baostock
+# 如果有用 akshare 也加上，列表里有个奇怪的 akqmt 可能是误识别
+akshare
+
+# --- LLM 与 AI ---
+# ollama
+# 如果你用到了 OpenAI 格式的调用
+# openai
+
+# --- 系统与工具 ---
+pyyaml
+tqdm
+schedule
+loguru
+fire

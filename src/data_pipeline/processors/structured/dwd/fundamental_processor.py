@@ -317,6 +317,16 @@ class FundamentalProcessor(BaseProcessor):
         logger.info(f"PIT基本面数据准备完成，共 {len(fundamental)} 行")
         return fundamental
     
+    def _get_full_trade_dates(self) -> list:
+        """获取完整历史交易日（不限制 start_date，用于 ffill 需要历史数据的场景）"""
+        cal_df = cudf.read_parquet(str(DATA_SOURCE_PATHS.trade_calendar))
+        cal_df = cal_df[cal_df['is_open'] == 1]
+        cal_df = self.normalize_date_column(cal_df, 'cal_date')
+        # 只过滤 end_date，不过滤 start_date
+        cal_df = cal_df[cal_df['cal_date'] <= self.end_date]
+        trade_dates = sorted(cal_df['cal_date'].unique().to_arrow().to_pylist())
+        return trade_dates
+    
     def _resample_to_daily(
         self,
         fundamental: cudf.DataFrame,
@@ -326,11 +336,14 @@ class FundamentalProcessor(BaseProcessor):
         将季频财务数据重采样到日频（纯GPU操作）
         
         使用PIT原则：数据只能在公告日之后使用
+        
+        注意：使用完整历史交易日构建骨架表，确保ffill能正确填充历史数据，
+        输出日期范围的过滤在 process() 方法中进行。
         """
         logger.info("将财务数据重采样到日频...")
         
-        # 获取所有股票和交易日
-        trade_dates = self.get_trade_dates()
+        # 获取所有股票和完整历史交易日（不限制start_date）
+        trade_dates = self._get_full_trade_dates()
         stock_codes = fundamental['ts_code'].unique().to_arrow().to_pylist()
         
         logger.info(f"重采样: {len(stock_codes)} 只股票, {len(trade_dates)} 个交易日")
@@ -408,6 +421,11 @@ class FundamentalProcessor(BaseProcessor):
         existing_columns = [col for col in output_columns if col in df.columns]
         df = df[existing_columns]
         df = df.sort_values(['trade_date', 'ts_code'])
+        
+        # 5. 按 start_date 过滤输出（骨架表包含完整历史用于ffill，输出只保留目标日期范围）
+        logger.info(f"过滤输出日期范围: {self.start_date} ~ {self.end_date}")
+        df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        logger.info(f"过滤后数据行数: {len(df)}")
         
         return df
     

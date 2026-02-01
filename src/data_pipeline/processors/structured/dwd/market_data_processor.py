@@ -59,7 +59,9 @@ class MarketDataProcessor(BaseProcessor):
             raise ValueError("无法加载股票日线数据")
         
         df = self.normalize_date_column(df, 'trade_date')
-        df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        # 注意：这里不按日期过滤，保留全部历史数据用于计算 return_1d
+        # 最后输出时再按日期范围过滤
+        df = df[df['trade_date'] <= self.end_date]
         
         logger.info(f"加载股票日线数据完成，共 {len(df)} 行")
         return df
@@ -77,7 +79,8 @@ class MarketDataProcessor(BaseProcessor):
             raise ValueError("无法加载复权因子数据")
         
         df = self.normalize_date_column(df, 'trade_date')
-        df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        # 注意：这里不按日期过滤，保留全部历史数据用于计算后复权价格和 return_1d
+        df = df[df['trade_date'] <= self.end_date]
         
         logger.info(f"加载复权因子数据完成，共 {len(df)} 行")
         return df
@@ -119,8 +122,14 @@ class MarketDataProcessor(BaseProcessor):
         return df[['ts_code', 'trade_date', 'is_suspended']]
     
     def process(self) -> cudf.DataFrame:
-        """执行数据处理 - 纯GPU操作"""
-        # 1. 加载原始数据
+        """执行数据处理 - 纯GPU操作
+        
+        修复说明：
+        1. 加载全量历史数据（不截断 start_date）
+        2. 在全量数据上计算 return_1d（避免第一天缺少历史数据）
+        3. 最后按 start_date~end_date 过滤输出
+        """
+        # 1. 加载原始数据（包含 start_date 之前的历史数据）
         daily = self._load_stock_daily()
         adj_factor = self._load_adj_factor()
         daily_basic = self._load_daily_basic()
@@ -130,15 +139,10 @@ class MarketDataProcessor(BaseProcessor):
         stock_codes = daily['ts_code'].unique().to_arrow().to_pylist()
         logger.info(f"数据中包含 {len(stock_codes)} 只股票")
         
-        # 2. 构建骨架表
-        skeleton = self.build_skeleton_table(stock_codes=stock_codes)
-        
-        # 3. 合并数据（全部在GPU上）
+        # 2. 直接合并数据（不使用骨架表限制日期范围）
+        # 使用 daily 作为基础，保留全部历史数据用于计算 return_1d
         logger.info("合并数据...")
-        df = skeleton.merge(daily, on=['trade_date', 'ts_code'], how='left')
-        logger.info(f"合并日线数据后: {len(df)} 行")
-        
-        df = df.merge(adj_factor, on=['trade_date', 'ts_code'], how='left')
+        df = daily.merge(adj_factor, on=['trade_date', 'ts_code'], how='left')
         logger.info(f"合并复权因子后: {len(df)} 行")
         
         if len(daily_basic) > 0:
@@ -154,9 +158,9 @@ class MarketDataProcessor(BaseProcessor):
             logger.info(f"合并停牌信息后: {len(df)} 行")
         
         # 释放内存
-        del skeleton, daily, adj_factor, daily_basic, suspend_info
+        del daily, adj_factor, daily_basic, suspend_info
         
-        # 4. 填充缺失值（cuDF groupby ffill）
+        # 3. 填充缺失值（cuDF groupby ffill）
         logger.info("填充缺失值...")
         df = df.sort_values(['ts_code', 'trade_date'])
         
@@ -181,10 +185,10 @@ class MarketDataProcessor(BaseProcessor):
             df['is_suspended'] = df['is_suspended'].fillna(0)
         
         # 删除无数据的行（上市前）
-        df = df.dropna(subset=['close'])
+        df = df.dropna(subset=['close', 'adj_factor'])
         logger.info(f"填充缺失值后: {len(df)} 行")
         
-        # 5. 计算衍生字段（全部在GPU上）
+        # 4. 计算衍生字段（在全量数据上计算，包含历史数据）
         logger.info("计算衍生字段...")
         
         # 后复权价格
@@ -198,7 +202,7 @@ class MarketDataProcessor(BaseProcessor):
         df['vwap'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=None)
         df['vwap_hfq'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=adj)
         
-        # 日收益率（基于后复权价格）
+        # 日收益率（基于后复权价格）- 在全量数据上计算
         df = df.sort_values(['ts_code', 'trade_date'])
         df['pre_close_hfq'] = df.groupby('ts_code')['close_hfq'].shift(1)
         df['return_1d'] = (df['close_hfq'] - df['pre_close_hfq']) / df['pre_close_hfq']
@@ -222,6 +226,11 @@ class MarketDataProcessor(BaseProcessor):
         df['return_1d'] = df['return_1d'].where(df['is_trading'] == 1, 0)
         
         logger.info("计算衍生字段完成")
+        
+        # 5. 按输出日期范围过滤（关键修复点）
+        logger.info(f"按日期范围过滤: {self.start_date} 至 {self.end_date}")
+        df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        logger.info(f"过滤后: {len(df)} 行")
         
         # 6. 选择输出列
         output_columns = [
