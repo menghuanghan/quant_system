@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 # ============================================================================
 # 路径配置
 # ============================================================================
-BASE_DIR = Path(__file__).resolve().parents[4]  # 项目根目录
+BASE_DIR = Path(__file__).resolve().parents[5]  # 项目根目录
 RAW_DATA_DIR = BASE_DIR / "data" / "raw" / "structured"
 PROCESSED_DATA_DIR = BASE_DIR / "data" / "processed" / "structured"
 DWD_OUTPUT_DIR = PROCESSED_DATA_DIR / "dwd"

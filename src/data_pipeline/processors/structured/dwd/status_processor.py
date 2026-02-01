@@ -252,9 +252,11 @@ class StatusProcessor(BaseProcessor):
         else:
             df['is_suspended'] = 0
         
-        # is_trading = 非停牌 且 成交量>0
+        # is_trading 以量价表为准：有成交量就是交易日
+        # 修正：即使停牌信息显示停牌，但如果价格表有成交量(vol>0)，仍认为是交易日
+        # 这能消除下游数据对齐时的歧义
         if 'vol' in df.columns:
-            df['is_trading'] = ((df['is_suspended'] == 0) & (df['vol'] > 0)).astype('int32')
+            df['is_trading'] = (df['vol'] > 0).astype('int32')
         else:
             df['is_trading'] = (df['is_suspended'] == 0).astype('int32')
         

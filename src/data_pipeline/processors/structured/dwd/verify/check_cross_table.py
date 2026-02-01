@@ -266,9 +266,9 @@ class CrossTableChecker:
                 self.status_df['market'].isin(['北交所', 'bse', 'BSE'])
             ]['ts_code'].unique()
         else:
-            # 通过代码推断
+            # 通过代码推断：8开头、4开头、920开头的代码
             all_codes = self.status_df['ts_code'].unique()
-            bse_stocks = [c for c in all_codes if c[:1] in ['8', '4']]
+            bse_stocks = [c for c in all_codes if c[:1] in ['8', '4'] or c[:3] == '920']
         
         metrics['bse_stocks_count'] = len(bse_stocks)
         
@@ -285,9 +285,9 @@ class CrossTableChecker:
         # 验证代码规则
         invalid_codes = []
         for code in bse_stocks:
-            # 北交所代码：8开头（新三板精选层/北交所）或 4开头（老三板）
-            # 现在北交所主要是8开头的代码
-            if not (code.startswith('8') or code.startswith('4')):
+            # 北交所代码：8开头（新三板精选层/北交所）、4开头（老三板）、920开头（新北交所代码）
+            # 现在北交所主要是8开头和920开头的代码
+            if not (code.startswith('8') or code.startswith('4') or code.startswith('920')):
                 invalid_codes.append(code)
         
         metrics['invalid_bse_codes'] = invalid_codes
@@ -296,18 +296,19 @@ class CrossTableChecker:
         if invalid_codes:
             issues.append(f"发现 {len(invalid_codes)} 个北交所股票代码不符合规则")
         
-        # 反向检查：8开头的代码是否都被标记为北交所
+        # 反向检查：8开头或920开头的代码是否都被标记为北交所
         if 'market' in self.status_df.columns:
-            code_8_stocks = self.status_df[
-                self.status_df['ts_code'].str.startswith('8')
+            code_8_or_920_stocks = self.status_df[
+                (self.status_df['ts_code'].str.startswith('8')) | 
+                (self.status_df['ts_code'].str.startswith('920'))
             ]
-            non_bse_code_8 = code_8_stocks[
-                ~code_8_stocks['market'].isin(['北交所', 'bse', 'BSE'])
+            non_bse_code_8 = code_8_or_920_stocks[
+                ~code_8_or_920_stocks['market'].isin(['北交所', 'bse', 'BSE'])
             ]['ts_code'].unique()
             
             if len(non_bse_code_8) > 0:
-                metrics['code_8_not_bse'] = list(non_bse_code_8[:10])
-                issues.append(f"发现 {len(non_bse_code_8)} 个8开头代码未标记为北交所")
+                metrics['code_8_or_920_not_bse'] = list(non_bse_code_8[:10])
+                issues.append(f"发现 {len(non_bse_code_8)} 个8或920开头代码未标记为北交所")
         
         # 综合判定
         passed = len(invalid_codes) == 0
@@ -316,7 +317,7 @@ class CrossTableChecker:
         result = CheckResult(
             name="北交所股票代码验证",
             passed=passed,
-            description="验证北交所股票代码符合8或4开头的编码规则",
+            description="验证北交所股票代码符合8、4或920开头的编码规则",
             issues=issues,
             metrics=metrics,
             severity=severity
