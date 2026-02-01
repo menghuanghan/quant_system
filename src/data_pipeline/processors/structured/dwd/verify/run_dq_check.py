@@ -21,17 +21,17 @@ import pandas as pd
 import numpy as np
 
 # 添加项目根目录到路径
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[6]))
 
-from scripts.verify.dq_config import (
+from .dq_config import (
     DWD_PATHS, THRESHOLDS, REPORTS_DIR,
     CheckResult, TableSummary, QualityReport,
     setup_logging, format_number, format_percentage, get_file_size_mb,
 )
-from scripts.verify.check_price_table import PriceTableChecker
-from scripts.verify.check_fundamental_table import FundamentalTableChecker
-from scripts.verify.check_status_table import StatusTableChecker
-from scripts.verify.check_cross_table import CrossTableChecker
+from .check_price_table import PriceTableChecker
+from .check_fundamental_table import FundamentalTableChecker
+from .check_status_table import StatusTableChecker
+from .check_cross_table import CrossTableChecker
 
 
 logger = setup_logging(__name__)

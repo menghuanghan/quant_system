@@ -14,7 +14,7 @@ import logging
 # ============================================================================
 # 路径配置
 # ============================================================================
-BASE_DIR = Path(__file__).resolve().parents[2]  # 项目根目录
+BASE_DIR = Path(__file__).resolve().parents[6]  # 项目根目录
 DWD_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
 RAW_DIR = BASE_DIR / "data" / "raw" / "structured"
 REPORTS_DIR = BASE_DIR / "reports"
