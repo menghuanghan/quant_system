@@ -15,7 +15,7 @@ import logging
 # 路径配置
 # ============================================================================
 BASE_DIR = Path(__file__).resolve().parents[6]  # 项目根目录
-DWD_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
+DWD_DIR = BASE_DIR / "data" / "features" / "preprocessed"
 RAW_DIR = BASE_DIR / "data" / "raw" / "structured"
 REPORTS_DIR = BASE_DIR / "reports"
 
@@ -29,9 +29,9 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 @dataclass
 class DWDFilePaths:
     """DWD宽表文件路径"""
-    stock_price: Path = DWD_DIR / "dwd_stock_price.parquet"
-    stock_fundamental: Path = DWD_DIR / "dwd_stock_fundamental.parquet"
-    stock_status: Path = DWD_DIR / "dwd_stock_status.parquet"
+    stock_price: Path = DWD_DIR / "preprocessed_stock_price.parquet"
+    stock_fundamental: Path = DWD_DIR / "preprocessed_stock_fundamental.parquet"
+    stock_status: Path = DWD_DIR / "preprocessed_stock_status.parquet"
     
     # 原始数据参考
     trade_calendar: Path = RAW_DIR / "metadata" / "trade_calendar.parquet"
