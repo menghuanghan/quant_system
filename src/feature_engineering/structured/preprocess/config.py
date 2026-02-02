@@ -10,12 +10,12 @@ from typing import Dict, List, Optional, Tuple
 
 
 # 项目根目录
-# feature_preprocess/config.py -> structured -> processors -> data_pipeline -> src -> quant_system
-BASE_DIR = Path(__file__).resolve().parents[5]  # 向上5级到项目根目录
+# preprocess/config.py -> preprocess -> structured -> feature_engineering -> src -> quant_system
+BASE_DIR = Path(__file__).resolve().parents[4]  # 向上4级到项目根目录
 
 # 数据路径
 DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
-FEATURE_OUTPUT_DIR = BASE_DIR / "data" / "features" / "preprocessed"
+FEATURE_OUTPUT_DIR = BASE_DIR / "data" / "features" / "preprocessed"  # 预处理后数据输出
 
 
 @dataclass
