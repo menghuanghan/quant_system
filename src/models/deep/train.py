@@ -45,12 +45,15 @@ class TrainConfig:
     lr_scheduler: str = "cosine"  # cosine / step / none
     lr_min: float = 1e-5
     
-    # 损失函数
+    # 损失函数类型
+    loss_type: str = "combined"  # combined / ic_only
+    # 当 loss_type="combined" 时使用以下权重
     mse_weight: float = 0.7
     ic_weight: float = 0.3
     
     # 早停
     patience: int = 10  # 连续多少 epoch 验证 IC 不提升就停止
+    min_epochs: int = 1  # 最少训练轮数，在此之前不检查早停
     
     # 混合精度
     use_amp: bool = True
@@ -90,11 +93,16 @@ class GRUTrainer:
         self.config = config
         self.device = device
         
-        # 损失函数
-        self.criterion = CombinedLoss(
-            alpha=config.mse_weight,
-            beta=config.ic_weight,
-        )
+        # 损失函数 - 根据 loss_type 选择
+        if config.loss_type == "ic_only":
+            self.criterion = ICLoss()
+            logger.info("📊 使用纯 IC Loss")
+        else:
+            self.criterion = CombinedLoss(
+                alpha=config.mse_weight,
+                beta=config.ic_weight,
+            )
+            logger.info(f"📊 使用 Combined Loss (MSE={config.mse_weight}, IC={config.ic_weight})")
         
         # 优化器
         self.optimizer = torch.optim.AdamW(
@@ -327,8 +335,9 @@ class GRUTrainer:
                     logger.info(f"  💾 保存最佳模型 (RankIC: {valid_rank_ic:.4f})")
             else:
                 self.patience_counter += 1
-                if self.patience_counter >= self.config.patience:
-                    logger.info(f"⏹️ 早停: {self.config.patience} epoch 无提升")
+                # 只有超过 min_epochs 才检查早停
+                if epoch >= self.config.min_epochs and self.patience_counter >= self.config.patience:
+                    logger.info(f"⏹️ 早停: {self.config.patience} epoch 无提升 (min_epochs={self.config.min_epochs})")
                     break
         
         total_time = time.time() - start_time

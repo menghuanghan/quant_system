@@ -83,6 +83,7 @@ class StockDataset(Dataset):
         target_col: str,
         window_size: int = 20,
         dates: Optional[np.ndarray] = None,  # 日期数组 (用于按日计算 IC)
+        codes: Optional[np.ndarray] = None,  # 股票代码数组 (用于对齐)
         device: str = "cpu",  # 数据存储设备 (cpu / cuda)
     ):
         """
@@ -93,12 +94,17 @@ class StockDataset(Dataset):
             target_col: 目标列名
             window_size: 窗口长度
             dates: 日期数组
+            codes: 股票代码数组
             device: 数据存储设备 (预加载到 GPU 可大幅提升训练速度)
         """
         self.window_size = window_size
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.device = device
+        
+        # 保存元数据
+        self.dates = dates
+        self.codes = codes
         
         # 提取特征矩阵和标签
         if hasattr(data, 'to_arrow'):
@@ -112,9 +118,10 @@ class StockDataset(Dataset):
         # 转为 PyTorch Tensor 并放到指定设备
         self.features = torch.from_numpy(features_np).to(device)
         self.labels = torch.from_numpy(labels_np).to(device)
-        self.indices = torch.from_numpy(indices.astype(np.int64)).to(device)
         
-        self.dates = dates
+        # 关键优化: indices 保留在 CPU (numpy)，避免 __getitem__ 中的 .item() GPU 同步开销
+        # 原因: PyTorch DataLoader 每秒调用 __getitem__ 数千次，.item() 会触发 CUDA 同步
+        self.indices = indices.astype(np.int64)  # numpy array, 保留在 CPU
         
         # 计算内存/显存占用
         mem_mb = (self.features.numel() * 4 + self.labels.numel() * 4) / 1024 / 1024
@@ -131,7 +138,7 @@ class StockDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        获取单个样本 (GPU 原生切片)
+        获取单个样本 (GPU 原生切片，零同步开销)
         
         Args:
             idx: 样本索引
@@ -141,8 +148,9 @@ class StockDataset(Dataset):
             - X: (window_size, n_features) 张量 (已在 GPU 上)
             - y: 标量张量 (已在 GPU 上)
         """
-        # 窗口最后一行的实际索引
-        end_idx = self.indices[idx].item()
+        # 窗口最后一行的实际索引 (indices 在 CPU，转为 Python int)
+        # 关键: 不使用 .item()，避免 GPU<->CPU 同步
+        end_idx = int(self.indices[idx])
         start_idx = end_idx - self.window_size + 1
         
         # GPU 上直接切片，零拷贝
@@ -154,7 +162,19 @@ class StockDataset(Dataset):
     def get_dates(self, idx: int) -> Optional[str]:
         """获取样本对应的日期"""
         if self.dates is not None:
-            return self.dates[self.indices[idx].item()]
+            return self.dates[int(self.indices[idx])]
+        return None
+    
+    def get_all_dates(self) -> Optional[np.ndarray]:
+        """获取所有样本的日期数组"""
+        if self.dates is not None:
+            return np.array([self.dates[int(i)] for i in self.indices])
+        return None
+    
+    def get_all_codes(self) -> Optional[np.ndarray]:
+        """获取所有样本的股票代码数组"""
+        if self.codes is not None:
+            return np.array([self.codes[int(i)] for i in self.indices])
         return None
 
 
@@ -228,10 +248,20 @@ def prepare_data(
     logger.info("📊 准备深度学习数据集")
     logger.info("=" * 60)
     
-    # 1. 加载数据 (强制使用 pandas，cuDF/cupy 兼容性问题)
-    import pandas as pd
-    df = pd.read_parquet(str(config.data_path))
-    logger.info(f"✓ Pandas 加载数据: {len(df):,} 行")
+    # 1. 加载数据
+    if config.use_gpu:
+        try:
+            import cudf
+            df = cudf.read_parquet(str(config.data_path))
+            logger.info(f"✓ cuDF 加载数据: {len(df):,} 行")
+        except ImportError:
+            import pandas as pd
+            df = pd.read_parquet(str(config.data_path))
+            logger.info(f"✓ Pandas 加载数据: {len(df):,} 行")
+    else:
+        import pandas as pd
+        df = pd.read_parquet(str(config.data_path))
+        logger.info(f"✓ Pandas 加载数据: {len(df):,} 行")
     
     # 2. 筛选特征列
     all_cols = df.columns.tolist()
@@ -254,11 +284,14 @@ def prepare_data(
     # 4. 时间切分
     if hasattr(df, 'to_arrow'):
         dates = df['trade_date'].to_arrow().to_pandas().values
+        codes = df['ts_code'].to_arrow().to_pandas().values
     else:
         dates = df['trade_date'].values
+        codes = df['ts_code'].values
     
     # 转换为字符串比较
     dates_str = np.array([str(d)[:10] for d in dates])
+    codes_str = np.array([str(c) for c in codes])
     
     train_mask = (dates_str >= config.train_start) & (dates_str <= config.train_end)
     valid_mask = (dates_str >= config.valid_start) & (dates_str <= config.valid_end)
@@ -295,6 +328,7 @@ def prepare_data(
         target_col=config.target_col,
         window_size=config.window_size,
         dates=dates_str,
+        codes=codes_str,
         device=device,
     )
     
@@ -305,6 +339,7 @@ def prepare_data(
         target_col=config.target_col,
         window_size=config.window_size,
         dates=dates_str,
+        codes=codes_str,
         device=device,
     )
     
@@ -315,6 +350,7 @@ def prepare_data(
         target_col=config.target_col,
         window_size=config.window_size,
         dates=dates_str,
+        codes=codes_str,
         device=device,
     )
     

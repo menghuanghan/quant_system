@@ -44,6 +44,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GRU 基准模型训练")
     
     # 模型参数
+    parser.add_argument("--model-type", type=str, default="gru",
+                        choices=["gru", "attention", "lstm_skip"],
+                        help="模型类型 (gru/attention/lstm_skip, 默认: gru)")
     parser.add_argument("--hidden-dim", type=int, default=64,
                         help="GRU 隐层大小 (默认: 64)")
     parser.add_argument("--num-layers", type=int, default=2,
@@ -60,6 +63,15 @@ def parse_args():
                         help="学习率 (默认: 1e-3)")
     parser.add_argument("--patience", type=int, default=10,
                         help="早停耐心值 (默认: 10)")
+    parser.add_argument("--min-epochs", type=int, default=1,
+                        help="最少训练轮数 (默认: 1)")
+    parser.add_argument("--loss-type", type=str, default="combined",
+                        choices=["combined", "ic_only"],
+                        help="损失函数类型 (默认: combined)")
+    parser.add_argument("--mse-weight", type=float, default=0.7,
+                        help="MSE 权重 (默认: 0.7)")
+    parser.add_argument("--ic-weight", type=float, default=0.3,
+                        help="IC 权重 (默认: 0.3)")
     
     # 数据参数
     parser.add_argument("--window-size", type=int, default=20,
@@ -160,6 +172,7 @@ def main():
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         dropout=args.dropout,
+        model_type=args.model_type,
     )
     
     # Step 3: 创建训练器
@@ -170,6 +183,10 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         patience=args.patience,
+        min_epochs=args.min_epochs,
+        loss_type=args.loss_type,
+        mse_weight=args.mse_weight,
+        ic_weight=args.ic_weight,
         num_workers=0 if device == "cuda" else args.num_workers,  # GPU 数据不需要多进程
         use_amp=use_amp,
     )
