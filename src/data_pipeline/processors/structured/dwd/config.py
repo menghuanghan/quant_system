@@ -40,6 +40,40 @@ class DataSourcePaths:
     income_statement_dir: Path = RAW_DATA_DIR / "fundamental" / "income_statement"
     cash_flow_dir: Path = RAW_DATA_DIR / "fundamental" / "cash_flow"
     financial_indicator_dir: Path = RAW_DATA_DIR / "fundamental" / "financial_indicator"
+    
+    # ========== 资金流向与筹码 ==========
+    # 资金流向（日频）
+    money_flow_dir: Path = RAW_DATA_DIR / "trading_behavior" / "money_flow"
+    margin_detail_dir: Path = RAW_DATA_DIR / "trading_behavior" / "margin_detail"
+    top_list: Path = RAW_DATA_DIR / "trading_behavior" / "top_list.parquet"
+    top_inst_dir: Path = RAW_DATA_DIR / "trading_behavior" / "top_inst"
+    hsgt_flow: Path = RAW_DATA_DIR / "trading_behavior" / "hsgt_flow.parquet"
+    
+    # 筹码结构（低频）
+    top10_holders_dir: Path = RAW_DATA_DIR / "fundamental" / "top10_holders"
+    share_structure_dir: Path = RAW_DATA_DIR / "fundamental" / "share_structure"
+    
+    # ========== 行业分类 ==========
+    sw_index_member: Path = RAW_DATA_DIR / "cross_sectional" / "sw_index_member.parquet"
+    sw_index_classify: Path = RAW_DATA_DIR / "cross_sectional" / "sw_index_classify.parquet"
+    
+    # ========== 事件数据 ==========
+    repurchase: Path = RAW_DATA_DIR / "fundamental" / "repurchase.parquet"
+    share_float: Path = RAW_DATA_DIR / "fundamental" / "share_float.parquet"
+    pledge_dir: Path = RAW_DATA_DIR / "fundamental" / "pledge"
+    dividend_dir: Path = RAW_DATA_DIR / "fundamental" / "dividend"
+    
+    # ========== 宏观数据 ==========
+    cn_gdp: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_gdp.parquet"
+    cn_cpi: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_cpi.parquet"
+    cn_pmi: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_pmi.parquet"
+    cn_m2: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_m2.parquet"
+    lpr: Path = RAW_DATA_DIR / "macro_exogenous" / "lpr.parquet"
+    shibor: Path = RAW_DATA_DIR / "macro_exogenous" / "shibor.parquet"
+    
+    # 市场风险指标
+    market_congestion: Path = RAW_DATA_DIR / "deep_risk_quality" / "market_congestion.parquet"
+    stock_bond_spread: Path = RAW_DATA_DIR / "deep_risk_quality" / "stock_bond_spread.parquet"
 
 
 # ============================================================================
@@ -48,10 +82,17 @@ class DataSourcePaths:
 @dataclass
 class DWDOutputConfig:
     """DWD输出配置"""
-    # 输出文件名
+    # 输出文件名 - 核心宽表
     stock_price: str = "dwd_stock_price.parquet"
     stock_fundamental: str = "dwd_stock_fundamental.parquet"
     stock_status: str = "dwd_stock_status.parquet"
+    
+    # 输出文件名 - 扩展宽表
+    money_flow: str = "dwd_money_flow.parquet"
+    chip_structure: str = "dwd_chip_structure.parquet"
+    stock_industry: str = "dwd_stock_industry.parquet"
+    event_signal: str = "dwd_event_signal.parquet"
+    macro_env: str = "dwd_macro_env.parquet"
     
     # 输出目录
     output_dir: Path = DWD_OUTPUT_DIR
