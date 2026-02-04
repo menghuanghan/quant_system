@@ -470,12 +470,28 @@ class MacroEnvProcessor(BaseProcessor):
         
         for col in low_freq_cols:
             if col in result.columns:
+                # 先 bfill 处理开头缺失（如果数据从月中开始发布）
+                result[col] = result[col].bfill()
+                # 再 ffill 处理中间和末尾缺失
                 result[col] = result[col].ffill()
         
         # SHIBOR也需要前向填充（非交易日无数据）
         shibor_cols = ['shibor_on', 'shibor_1w', 'shibor_1m', 'shibor_3m', 'shibor_6m', 'shibor_1y']
         for col in shibor_cols:
             if col in result.columns:
+                result[col] = result[col].bfill()
+                result[col] = result[col].ffill()
+        
+        # market_congestion 和 stock_bond_spread 也需要填充
+        # 这些数据可能有不完整的日期范围，使用 bfill + ffill 组合
+        # bfill 处理早期缺失（数据还未开始）
+        # ffill 处理后期缺失（数据尚未更新）
+        market_cols = ['market_congestion', 'stock_bond_spread']
+        for col in market_cols:
+            if col in result.columns:
+                # 先 bfill 填充早期缺失
+                result[col] = result[col].bfill()
+                # 再 ffill 填充晚期缺失
                 result[col] = result[col].ffill()
         
         # 5. 计算衍生特征

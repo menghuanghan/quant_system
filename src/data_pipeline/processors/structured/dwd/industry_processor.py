@@ -10,7 +10,8 @@ IndustryProcessor - 行业分类宽表处理器（纯cuDF GPU版本）
 处理逻辑：
     1. 优先使用 stock_list_a 的 industry 字段作为基础行业分类
     2. 如果 sw_index_member 可用，则补充申万多级行业分类
-    3. industry_changed 标记基于行业代码变化计算
+    3. 如果 sw_index_member 不可用，则根据 industry 字段推断申万一级行业
+    4. industry_changed 标记基于行业代码变化计算
 """
 
 import logging
@@ -25,6 +26,7 @@ from .config import (
     DWD_OUTPUT_CONFIG,
     PROCESSING_CONFIG,
 )
+from .industry_mapping import get_sw_l1_from_industry, INDUSTRY_TO_SW_L1_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -260,11 +262,45 @@ class IndustryProcessor(BaseProcessor):
             for col in ['sw_l1_code', 'sw_l1_name', 'sw_l2_code', 'sw_l2_name', 'sw_l3_code', 'sw_l3_name']:
                 result[col] = None
         
-        # 6. 填充申万字段的缺失值
+        # 6. 使用 industry 字段推断/填充 sw_l1_name
+        logger.info("使用 industry 字段推断申万一级行业...")
+        
+        # 创建映射表（从 industry_mapping.py 导入的 INDUSTRY_TO_SW_L1_MAP）
+        industry_sw_l1_map = cudf.DataFrame({
+            'industry': list(INDUSTRY_TO_SW_L1_MAP.keys()),
+            '_inferred_sw_l1': list(INDUSTRY_TO_SW_L1_MAP.values())
+        })
+        
+        # 合并映射
+        result = result.merge(industry_sw_l1_map, on='industry', how='left')
+        
+        # 如果 sw_l1_name 为空或"未分类"，则使用推断值
+        if 'sw_l1_name' in result.columns:
+            # 找出需要填充的行：sw_l1_name 为 null 或 "未分类"
+            needs_fill = result['sw_l1_name'].isna() | (result['sw_l1_name'] == '未分类')
+            has_inferred = result['_inferred_sw_l1'].notna()
+            
+            # 使用 cuDF 的 where 方法进行条件填充
+            result['sw_l1_name'] = result['sw_l1_name'].where(
+                ~(needs_fill & has_inferred),
+                result['_inferred_sw_l1']
+            )
+        else:
+            # 如果没有 sw_l1_name 列，直接使用推断值
+            result['sw_l1_name'] = result['_inferred_sw_l1']
+        
+        # 清理临时列
+        result = result.drop(columns=['_inferred_sw_l1'], errors='ignore')
+        
+        # 最终填充剩余缺失值
         sw_name_cols = ['sw_l1_name', 'sw_l2_name', 'sw_l3_name']
         for col in sw_name_cols:
             if col in result.columns:
                 result[col] = result[col].fillna('未分类')
+        
+        # 统计推断效果
+        classified = (result['sw_l1_name'] != '未分类').sum()
+        logger.info(f"申万一级行业覆盖率: {int(classified)}/{len(result)} = {int(classified)/len(result)*100:.2f}%")
         
         # 7. 计算行业变更标记（基于 industry 字段）
         result = self._add_industry_change_flag(result)
