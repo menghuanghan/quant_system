@@ -357,6 +357,19 @@ class FundamentalProcessor(BaseProcessor):
         # 将财务数据按公告日对齐
         fundamental['trade_date'] = fundamental['ann_date']
         
+        # **关键修复**：同一股票同一公告日可能有多条记录（不同报告期），需要去重保留最新报告期
+        # 先按报告期降序排序，然后去重保留第一条（即最新报告期）
+        if 'report_date' in fundamental.columns:
+            logger.info("去重：按 (ts_code, trade_date) 保留 report_date 最新的记录")
+            fundamental = fundamental.sort_values(
+                ['ts_code', 'trade_date', 'report_date'], 
+                ascending=[True, True, False]
+            )
+            dup_before = len(fundamental)
+            fundamental = fundamental.drop_duplicates(subset=['ts_code', 'trade_date'], keep='first')
+            if len(fundamental) < dup_before:
+                logger.info(f"去重: {dup_before} → {len(fundamental)} 行")
+        
         # 选择需要填充的列
         ffill_cols = [col for col in fundamental.columns 
                      if col not in ['ts_code', 'trade_date', 'ann_date']]

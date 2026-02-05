@@ -1030,7 +1030,8 @@ class MacroEnvProcessor(BaseProcessor):
         
         result = result.sort_values('trade_date')
         
-        # 低频宏观数据使用 bfill + ffill
+        # 低频宏观数据使用 ffill（禁止 bfill，避免未来数据泄露）
+        # 例如：GDP Q2 于 7月31日 发布，若使用 bfill 会将其回填到 4-6月，导致 Look-Ahead Bias
         low_freq_cols = [
             'gdp_yoy',
             'cpi_yoy', 'cpi_mom',
@@ -1042,55 +1043,48 @@ class MacroEnvProcessor(BaseProcessor):
         
         for col in low_freq_cols:
             if col in result.columns:
-                result[col] = result[col].bfill()
                 result[col] = result[col].ffill()
         
-        # SHIBOR使用 bfill + ffill
+        # SHIBOR 使用 ffill（禁止 bfill，避免未来数据泄露）
         shibor_cols = ['shibor_on', 'shibor_1w', 'shibor_1m', 'shibor_3m', 'shibor_6m', 'shibor_1y']
         for col in shibor_cols:
             if col in result.columns:
-                result[col] = result[col].bfill()
                 result[col] = result[col].ffill()
         
-        # 市场风险指标使用 bfill + ffill
+        # 市场风险指标使用 ffill（禁止 bfill，避免未来数据泄露）
         risk_cols = ['market_congestion', 'stock_bond_spread']
         for col in risk_cols:
             if col in result.columns:
-                result[col] = result[col].bfill()
                 result[col] = result[col].ffill()
         
-        # 深度风险因子使用 bfill + ffill
+        # 深度风险因子使用 ffill（禁止 bfill，避免未来数据泄露）
         deep_risk_cols = [
             'pb_median', 'pb_ew', 'pb_quantile_10y', 'pb_quantile_all',
             'buffett_indicator', 'buffett_quantile_10y', 'buffett_quantile_all',
         ]
         for col in deep_risk_cols:
             if col in result.columns:
-                result[col] = result[col].bfill()
                 result[col] = result[col].ffill()
         
-        # 指数数据使用 ffill（早期可能无数据）
+        # 指数数据使用 ffill（禁止 bfill，避免未来数据泄露）
         for prefix in ['sh300', 'zz500', 'cyb', 'sz50', 'zz1000', 'kc50']:
             for suffix in ['_pct_chg', '_amplitude', '_turnover', '_close', '_vol', '_amount']:
                 col = f'{prefix}{suffix}'
                 if col in result.columns:
-                    result[col] = result[col].bfill()
                     result[col] = result[col].ffill()
         
-        # 回购利率使用 ffill
+        # 回购利率使用 ffill（禁止 bfill，避免未来数据泄露）
         for prefix in ['gc001', 'r001']:
             for suffix in ['_close', '_weight', '_high', '_low', '_amount']:
                 col = f'liquidity_{prefix}{suffix}'
                 if col in result.columns:
-                    result[col] = result[col].bfill()
                     result[col] = result[col].ffill()
         
-        # 期货数据使用 ffill（早期无数据）
+        # 期货数据使用 ffill（禁止 bfill，避免未来数据泄露）
         for prefix in ['if', 'ic', 'ih', 'im']:
             for suffix in ['_total_oi', '_close', '_basis_rate']:
                 col = f'{prefix}{suffix}'
                 if col in result.columns:
-                    result[col] = result[col].bfill()
                     result[col] = result[col].ffill()
         
         # ================================================================

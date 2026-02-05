@@ -29,6 +29,19 @@ class DataConfig:
     fundamental_table: str = "dwd_stock_fundamental.parquet"
     status_table: str = "dwd_stock_status.parquet"
     
+    # 输入：DWD 五张扩展宽表
+    money_flow_table: str = "dwd_money_flow.parquet"
+    chip_table: str = "dwd_chip_structure.parquet"
+    industry_table: str = "dwd_stock_industry.parquet"
+    event_table: str = "dwd_event_signal.parquet"
+    macro_table: str = "dwd_macro_env.parquet"
+    
+    # 参考数据（用于特征生成阶段，不在 Merger 中合并）
+    raw_data_dir: Path = BASE_DIR / "data" / "raw" / "structured"
+    index_weight_dir: Path = raw_data_dir / "cross_sectional" / "index_weight"
+    etf_daily_dir: Path = raw_data_dir / "market_data" / "etf_daily"
+    index_daily_dir: Path = raw_data_dir / "market_data" / "index_daily"
+    
     # 输出
     output_dir: Path = FEATURE_OUTPUT_DIR
     train_file: str = "train.parquet"
@@ -41,6 +54,147 @@ class DataConfig:
     # 正式期：2021-01-01 ~ 2025-12-31（用于训练/验证/测试）
     train_start: str = "2021-01-01"
     train_end: str = "2025-12-31"
+    
+    # 便捷属性：获取完整路径
+    @property
+    def price_path(self) -> Path:
+        return self.input_dir / self.price_table
+    
+    @property
+    def fundamental_path(self) -> Path:
+        return self.input_dir / self.fundamental_table
+    
+    @property
+    def status_path(self) -> Path:
+        return self.input_dir / self.status_table
+    
+    @property
+    def money_flow_path(self) -> Path:
+        return self.input_dir / self.money_flow_table
+    
+    @property
+    def chip_path(self) -> Path:
+        return self.input_dir / self.chip_table
+    
+    @property
+    def industry_path(self) -> Path:
+        return self.input_dir / self.industry_table
+    
+    @property
+    def event_path(self) -> Path:
+        return self.input_dir / self.event_table
+    
+    @property
+    def macro_path(self) -> Path:
+        return self.input_dir / self.macro_table
+    
+    @property
+    def merged_path(self) -> Path:
+        """合并后的中间文件路径"""
+        return self.output_dir / "merged.parquet"
+
+
+@dataclass
+class FeatureGroups:
+    """
+    字段组配置
+    
+    将 DWD 宽表字段按业务域分组，便于 FeatureGenerator 按组取用。
+    不在白名单内的字段将被丢弃，避免无用字段进入模型。
+    """
+    
+    # 资金流字段组 (dwd_money_flow)
+    money_flow_fields: List[str] = field(default_factory=lambda: [
+        # 分单资金流
+        "net_mf_amount", "net_main_amount", "net_retail_amount",
+        "buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount",
+        # 两融
+        "rzye", "rqye", "rzmre", "rzche",
+        # 龙虎榜
+        "top_net_amount", "top_l_buy", "top_l_sell", "top_inst_net_buy",
+        "is_top_list",
+        # 北向资金
+        "hsgt_north", "hsgt_north_ma5", "hsgt_north_ma20",
+        # 大宗交易
+        "block_trade_amount", "block_trade_vol", "block_trade_count", "block_trade_avg_price",
+        # 北交所标记
+        "is_bj_stock",
+    ])
+    
+    # 筹码结构字段组 (dwd_chip_structure)
+    chip_fields: List[str] = field(default_factory=lambda: [
+        "top10_hold_ratio", "top1_hold_ratio", "top10_inst_ratio",
+        "holder_num", "holder_num_chg", "holder_num_chg_pct",
+        "chip_concentration", "holder_decrease",
+    ])
+    
+    # 行业分类字段组 (dwd_stock_industry)
+    industry_fields: List[str] = field(default_factory=lambda: [
+        "industry", "industry_idx",
+        "sw_l1_code", "sw_l1_name", "sw_l1_idx",
+        "sw_l2_code", "sw_l2_name", "sw_l2_idx",
+        "industry_changed",
+    ])
+    
+    # 事件驱动字段组 (dwd_event_signal)
+    event_fields: List[str] = field(default_factory=lambda: [
+        # 回购
+        "is_repurchase_ann", "repurchase_amount", "in_repurchase_window",
+        # 解禁
+        "is_unlock_day", "unlock_share", "unlock_ratio", "days_to_unlock", "in_unlock_window",
+        # 质押
+        "pledge_ratio", "pledge_ratio_high",
+        # 分红
+        "is_dividend_ann", "cash_div", "stk_div", "in_dividend_window",
+        # 事件聚合
+        "has_event", "has_risk_event",
+    ])
+    
+    # 宏观环境字段组 (dwd_macro_env) - 注意：已剔除 gdp 绝对值，只保留 gdp_yoy
+    macro_fields: List[str] = field(default_factory=lambda: [
+        # GDP
+        "gdp_yoy",
+        # CPI/PPI
+        "cpi_yoy", "cpi_mom",
+        # PMI
+        "pmi", "pmi_prod", "pmi_new_order",
+        # 货币供应
+        "m2", "m2_yoy",
+        # 利率
+        "lpr_1y", "lpr_5y",
+        "shibor_on", "shibor_1w", "shibor_1m", "shibor_3m", "shibor_6m", "shibor_1y",
+        # 市场风险
+        "market_congestion", "stock_bond_spread",
+        # 深度风险因子
+        "pb_median", "pb_ew", "pb_quantile_10y", "pb_quantile_all",
+        "buffett_indicator", "buffett_quantile_10y", "buffett_quantile_all",
+        "break_net_ratio",
+        # 指数基准
+        "sh300_pct_chg", "sh300_amplitude", "sh300_turnover", "sh300_close", "sh300_vol", "sh300_amount",
+        "zz500_pct_chg", "zz500_amplitude", "zz500_turnover", "zz500_close", "zz500_vol", "zz500_amount",
+        "cyb_pct_chg", "cyb_amplitude", "cyb_turnover", "cyb_close", "cyb_vol", "cyb_amount",
+        "sz50_pct_chg", "sz50_amplitude", "sz50_turnover", "sz50_close", "sz50_vol", "sz50_amount",
+        "zz1000_pct_chg", "zz1000_amplitude", "zz1000_turnover", "zz1000_close", "zz1000_vol", "zz1000_amount",
+        "kc50_pct_chg", "kc50_amplitude", "kc50_turnover", "kc50_close", "kc50_vol", "kc50_amount",
+        # 回购利率
+        "liquidity_gc001_close", "liquidity_gc001_weight", "liquidity_gc001_high", "liquidity_gc001_low", "liquidity_gc001_amount",
+        "liquidity_r001_close", "liquidity_r001_weight", "liquidity_r001_high", "liquidity_r001_low", "liquidity_r001_amount",
+        # 股指期货
+        "if_total_oi", "if_close", "if_basis_rate",
+        "ic_total_oi", "ic_close", "ic_basis_rate",
+        "ih_total_oi", "ih_close", "ih_basis_rate",
+        "im_total_oi", "im_close", "im_basis_rate",
+        # 全市场两融
+        "market_total_rzye", "market_total_rqye", "market_total_rzrqye",
+        # PMI regime
+        "pmi_regime",
+        # 高阶宏观状态字段
+        "lpr_trend",       # 利率趋势 (降息/加息周期)
+        "money_regime",    # 货币宽紧状态
+        "risk_appetite",   # 市场风险偏好
+        "macro_score",     # 宏观综合评分
+        "macro_regime",    # 宏观综合状态
+    ])
 
 
 @dataclass
@@ -202,6 +356,7 @@ class PipelineConfig:
     label: LabelConfig = field(default_factory=LabelConfig)
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
     drop_columns: DropColumnsConfig = field(default_factory=DropColumnsConfig)
+    feature_groups: FeatureGroups = field(default_factory=FeatureGroups)  # 新增：字段组配置
     
     # 日志级别
     verbose: bool = True

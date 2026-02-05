@@ -137,7 +137,7 @@ class EventSignalProcessor(BaseProcessor):
             date_col: 日期列名
         
         Returns:
-            添加了 mapped_trade_date 列的DataFrame
+            添加了 mapped_trade_date 列的DataFrame（保持 object/str 类型以兼容骨架表）
         """
         date_mapping = self._get_date_mapping()
         
@@ -145,6 +145,7 @@ class EventSignalProcessor(BaseProcessor):
         dates = df[date_col].to_arrow().to_pylist()
         mapped_dates = [date_mapping.get(d, d) for d in dates]
         
+        # 保持 object/str 类型（与骨架表一致）
         df['mapped_trade_date'] = cudf.Series(mapped_dates)
         
         # 统计映射情况
@@ -335,7 +336,22 @@ class EventSignalProcessor(BaseProcessor):
         
         logger.info("处理质押数据...")
         
-        # 关键修复：映射到交易日
+        # 关键修复：质押数据的 end_date 是统计截止日，中登公司实际公告日期通常滞后 3-5 天
+        # 为避免 Look-Ahead Bias，增加 5 天公告滞后偏移
+        import pandas as pd
+        PLEDGE_ANNOUNCEMENT_LAG_DAYS = 5
+        
+        # 转换日期类型为 datetime64 以便做日期加法
+        if df['end_date'].dtype == 'object' or str(df['end_date'].dtype) == 'str':
+            df['end_date'] = cudf.to_datetime(df['end_date'], format='%Y-%m-%d')
+        
+        df['end_date'] = df['end_date'] + pd.Timedelta(days=PLEDGE_ANNOUNCEMENT_LAG_DAYS)
+        
+        # 转回字符串格式以便映射（与 _map_date_to_trade_date 兼容）
+        df['end_date'] = df['end_date'].dt.strftime('%Y-%m-%d')
+        logger.info(f"质押数据增加 {PLEDGE_ANNOUNCEMENT_LAG_DAYS} 天公告滞后偏移")
+        
+        # 映射到交易日（返回 object/str 类型）
         df = self._map_date_to_trade_date(df, 'end_date')
         
         # 质押是累积数据，使用PIT方式处理
@@ -346,7 +362,7 @@ class EventSignalProcessor(BaseProcessor):
         pledge_data = pledge_data.sort_values(['ts_code', 'trade_date'])
         pledge_data = pledge_data.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
         
-        # 合并到骨架表
+        # 合并到骨架表（两者都是 object 类型）
         result = skeleton.merge(pledge_data, on=['ts_code', 'trade_date'], how='left')
         
         # 关键修复：前向填充质押比例（状态型数据）

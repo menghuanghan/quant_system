@@ -203,6 +203,7 @@ class ChipStructureProcessor(BaseProcessor):
         df: cudf.DataFrame,
         ann_date_col: str,
         value_cols: list,
+        report_date_col: str = None,  # 新增：报告期字段，用于去重时保留最新报告期
     ) -> cudf.DataFrame:
         """
         将低频PIT数据对齐到日频
@@ -210,6 +211,12 @@ class ChipStructureProcessor(BaseProcessor):
         逻辑：
         1. 对于每个stock，在ann_date当天及之后的日期都使用该值
         2. 直到下一个ann_date出现新值
+        
+        Args:
+            df: 低频数据
+            ann_date_col: 公告日字段名（如 chip_ann_date）
+            value_cols: 需要填充的值字段列表
+            report_date_col: 报告期字段名（如 chip_report_date），用于同一公告日多条记录时保留最新报告期
         """
         if len(df) == 0:
             return cudf.DataFrame()
@@ -226,6 +233,15 @@ class ChipStructureProcessor(BaseProcessor):
         dates_df = cudf.DataFrame({'trade_date': trade_dates, '_key': 1})
         stocks_df = cudf.DataFrame({'ts_code': stocks, '_key': 1})
         skeleton = dates_df.merge(stocks_df, on='_key').drop(columns=['_key'])
+        
+        # **关键修复**：同一股票同一公告日可能有多条记录（不同报告期），需要去重保留最新报告期
+        if report_date_col and report_date_col in df.columns:
+            logger.info(f"去重：按 (ts_code, {ann_date_col}) 保留 {report_date_col} 最新的记录")
+            df = df.sort_values(['ts_code', ann_date_col, report_date_col], ascending=[True, True, False])
+            df = df.drop_duplicates(subset=['ts_code', ann_date_col], keep='first')
+        else:
+            # 没有报告期字段时，简单去重保留第一条
+            df = df.drop_duplicates(subset=['ts_code', ann_date_col], keep='first')
         
         # 合并低频数据（按公告日）
         df = df.rename(columns={ann_date_col: 'trade_date'})
@@ -262,7 +278,11 @@ class ChipStructureProcessor(BaseProcessor):
         if len(top10_agg) > 0:
             top10_value_cols = ['top10_hold_ratio', 'top10_hold_amount', 'top1_hold_ratio', 
                                'top10_inst_ratio', 'chip_report_date']
-            top10_daily = self._pit_align_to_daily(top10_agg, 'chip_ann_date', top10_value_cols)
+            # 修复：传入 report_date_col 以在同一公告日多条记录时保留最新报告期
+            top10_daily = self._pit_align_to_daily(
+                top10_agg, 'chip_ann_date', top10_value_cols, 
+                report_date_col='chip_report_date'
+            )
             if len(top10_daily) > 0:
                 # 移除重复的骨架列
                 top10_daily = top10_daily.drop(columns=['chip_ann_date'], errors='ignore')
@@ -274,7 +294,11 @@ class ChipStructureProcessor(BaseProcessor):
         
         if len(share_struct_processed) > 0:
             holder_value_cols = ['holder_num', 'holder_num_chg', 'holder_num_chg_pct', 'holder_report_date']
-            holder_daily = self._pit_align_to_daily(share_struct_processed, 'holder_ann_date', holder_value_cols)
+            # 修复：传入 report_date_col 以在同一公告日多条记录时保留最新报告期
+            holder_daily = self._pit_align_to_daily(
+                share_struct_processed, 'holder_ann_date', holder_value_cols,
+                report_date_col='holder_report_date'
+            )
             if len(holder_daily) > 0:
                 holder_daily = holder_daily.drop(columns=['holder_ann_date'], errors='ignore')
                 result = result.merge(
