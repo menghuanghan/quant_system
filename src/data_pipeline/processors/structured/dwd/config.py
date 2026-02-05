@@ -48,6 +48,8 @@ class DataSourcePaths:
     top_list: Path = RAW_DATA_DIR / "trading_behavior" / "top_list.parquet"
     top_inst_dir: Path = RAW_DATA_DIR / "trading_behavior" / "top_inst"
     hsgt_flow: Path = RAW_DATA_DIR / "trading_behavior" / "hsgt_flow.parquet"
+    block_trade: Path = RAW_DATA_DIR / "trading_behavior" / "block_trade.parquet"  # 大宗交易
+    margin_summary: Path = RAW_DATA_DIR / "trading_behavior" / "margin_summary.parquet"  # 全市场两融余额
     
     # 筹码结构（低频）
     top10_holders_dir: Path = RAW_DATA_DIR / "fundamental" / "top10_holders"
@@ -74,6 +76,19 @@ class DataSourcePaths:
     # 市场风险指标
     market_congestion: Path = RAW_DATA_DIR / "deep_risk_quality" / "market_congestion.parquet"
     stock_bond_spread: Path = RAW_DATA_DIR / "deep_risk_quality" / "stock_bond_spread.parquet"
+    
+    # ========== 深度风险因子 ==========
+    a_pe_pb_ew_median: Path = RAW_DATA_DIR / "deep_risk_quality" / "a_pe_pb_ew_median.parquet"
+    buffett_indicator: Path = RAW_DATA_DIR / "deep_risk_quality" / "buffett_indicator.parquet"
+    break_net_stock: Path = RAW_DATA_DIR / "deep_risk_quality" / "break_net_stock.parquet"
+    
+    # ========== 指数与基准 ==========
+    index_daily_dir: Path = RAW_DATA_DIR / "market_data" / "index_daily"
+    
+    # ========== 衍生品数据 ==========
+    repo_daily_dir: Path = RAW_DATA_DIR / "derivatives" / "repo_daily"
+    fut_daily_dir: Path = RAW_DATA_DIR / "derivatives" / "fut_daily"
+    opt_basic: Path = RAW_DATA_DIR / "derivatives" / "opt_basic.parquet"
 
 
 # ============================================================================

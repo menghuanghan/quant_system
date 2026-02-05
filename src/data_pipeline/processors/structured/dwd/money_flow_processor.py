@@ -232,6 +232,46 @@ class MoneyFlowProcessor(BaseProcessor):
         logger.info(f"加载沪深港通资金流向完成，共 {len(df)} 行")
         return df
     
+    def _load_block_trade(self) -> cudf.DataFrame:
+        """
+        加载大宗交易数据
+        
+        均聚合计算：
+            - block_trade_amount: 当日大宗交易总成交额
+            - block_trade_vol: 当日大宗交易总成交量
+            - block_trade_count: 当日大宗交易笔数
+            - block_trade_premium: 加权平均溢价率 (Deal_Price - Close_Price) / Close_Price
+        """
+        logger.info("加载大宗交易数据...")
+        
+        df = self.read_parquet(DATA_SOURCE_PATHS.block_trade)
+        
+        if len(df) == 0:
+            logger.warning("无法加载大宗交易数据")
+            return cudf.DataFrame()
+        
+        df = self.normalize_date_column(df, 'trade_date')
+        df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        
+        # 算溢价率之前先获取当日收盘价，但大宗交易价格本身已包含相对市价的信息
+        # 原始数据字段：price(成交价), vol(成交量), amount(成交额)
+        
+        # 按 trade_date + ts_code 分组聚合
+        agg_df = df.groupby(['trade_date', 'ts_code']).agg({
+            'amount': 'sum',  # 总成交额
+            'vol': 'sum',     # 总成交量
+            'price': ['mean', 'count'],  # 平均价格和交易笔数
+        }).reset_index()
+        
+        # 展平多级列名
+        agg_df.columns = ['trade_date', 'ts_code', 'block_trade_amount', 'block_trade_vol', 
+                          'block_trade_avg_price', 'block_trade_count']
+        
+        # 计算加权平均溢价率：需要当日收盘价，稍后在合并时计算
+        
+        logger.info(f"加载大宗交易数据完成，共 {len(agg_df)} 行")
+        return agg_df
+    
     def _calculate_derived_features(self, df: cudf.DataFrame) -> cudf.DataFrame:
         """计算衍生特征"""
         logger.info("计算资金流衍生特征...")
@@ -298,6 +338,7 @@ class MoneyFlowProcessor(BaseProcessor):
         top_list = self._load_top_list()
         top_inst = self._load_top_inst()
         hsgt_flow = self._load_hsgt_flow()
+        block_trade = self._load_block_trade()  # 大宗交易
         
         # 3. 合并数据（左连接骨架表）
         logger.info("合并数据到骨架表...")
@@ -319,6 +360,10 @@ class MoneyFlowProcessor(BaseProcessor):
         # 沪深港通是市场级数据，只按trade_date合并（广播到所有股票）
         if len(hsgt_flow) > 0:
             result = result.merge(hsgt_flow, on='trade_date', how='left')
+        
+        # 大宗交易数据
+        if len(block_trade) > 0:
+            result = result.merge(block_trade, on=['ts_code', 'trade_date'], how='left')
         
         # 4. 填充缺失值（确保无 NaN 泄漏到模型层）
         logger.info("填充缺失值...")
@@ -361,7 +406,14 @@ class MoneyFlowProcessor(BaseProcessor):
             if col in result.columns:
                 result[col] = result[col].fillna(0)
         
-        # 4.5 添加北交所标志位（北交所无分单明细数据，模型需感知）
+        # 4.5 大宗交易字段填充为0（无交易日=0）
+        block_trade_cols = ['block_trade_amount', 'block_trade_vol', 'block_trade_count', 
+                           'block_trade_avg_price', 'block_trade_premium']
+        for col in block_trade_cols:
+            if col in result.columns:
+                result[col] = result[col].fillna(0)
+        
+        # 4.6 添加北交所标志位（北交所无分单明细数据，模型需感知）
         result['is_bj_stock'] = result['ts_code'].str.endswith('.BJ').astype('int32')
         
         # 5. 计算衍生特征
