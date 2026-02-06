@@ -311,6 +311,26 @@ class LabelConfig:
     generate_class_labels: bool = True
     # 分类阈值（涨/跌/平）
     class_threshold: float = 0.02    # ±2% 为平盘
+    
+    # ========== 新增配置 ==========
+    # 超额收益标签（Alpha Return）
+    generate_excess_return: bool = True      # 是否生成超额收益标签
+    benchmark_code: str = "000300.SH"        # 基准指数代码（沪深300）
+    excess_return_days: List[int] = field(default_factory=lambda: [5, 10])
+    
+    # 截面排名标签（Cross-Sectional Rank）
+    generate_rank_labels: bool = True        # 是否生成截面排名标签
+    rank_label_days: List[int] = field(default_factory=lambda: [5, 10])
+    
+    # 夏普标签（Risk-Adjusted Return）
+    generate_sharpe_labels: bool = True      # 是否生成夏普标签
+    sharpe_label_days: List[int] = field(default_factory=lambda: [5, 10, 20])
+    
+    # 三分类标签（Top/Middle/Bottom）
+    generate_bin_labels: bool = True         # 是否生成分位数分类标签
+    bin_label_days: List[int] = field(default_factory=lambda: [5])
+    bin_top_pct: float = 0.30                # Top 30% 为做多
+    bin_bottom_pct: float = 0.30             # Bottom 30% 为做空/避险
 
 
 @dataclass

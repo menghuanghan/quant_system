@@ -2,9 +2,13 @@
 价格表预处理器
 
 处理 dwd_stock_price 表，主要包括：
-1. 收益率去极值（Winsorization）- 裁剪到 [-30%, +100%]
-2. 成交量/成交额对数变换
+1. 单位换算（千元 -> 元）- 统一金额单位
+2. 收益率去极值（Winsorization）- 裁剪到 [-30%, +100%]
 3. 交易状态最终判定（结合 vol 和 is_trading）
+
+注意：
+- 不在 Preprocess 阶段做 Log 变换（保持原始物理意义）
+- Log 变换应在 Feature Transformation 阶段进行
 """
 
 import logging
@@ -30,8 +34,8 @@ class PricePreprocessor(BasePreprocessor):
         执行价格表预处理
         
         处理步骤：
-        1. 收益率去极值
-        2. 成交量/成交额对数变换
+        1. 单位换算（千元 -> 元）
+        2. 收益率去极值
         3. 交易状态最终判定
         
         Args:
@@ -47,11 +51,11 @@ class PricePreprocessor(BasePreprocessor):
         original_shape = df.shape
         df = df.copy()
         
-        # 1. 收益率去极值
-        df = self._winsorize_returns(df)
+        # 1. 单位换算（千元 -> 元）
+        df = self._convert_amount_units(df)
         
-        # 2. 成交量/成交额对数变换
-        df = self._log_transform_volume(df)
+        # 2. 收益率去极值
+        df = self._winsorize_returns(df)
         
         # 3. 交易状态最终判定
         df = self._determine_trading_status(df)
@@ -102,27 +106,26 @@ class PricePreprocessor(BasePreprocessor):
         
         return df
     
-    def _log_transform_volume(self, df: Any) -> Any:
+    def _convert_amount_units(self, df: Any) -> Any:
         """
-        成交量/成交额对数变换
+        单位换算：千元 -> 元
         
-        对 vol 和 amount 取对数（保留符号）
+        将 amount 字段乘以 1000，统一为元
         """
-        logger.info("📌 Step 2: 成交量/成交额对数变换")
+        logger.info("📌 Step 1: 单位换算 (千元 -> 元)")
         
-        epsilon = self.config.log_transform.log_epsilon
+        # price 表的 amount 单位是千元
+        amount_multiplier = 1000.0
+        amount_fields = ["amount"]
         
-        for field in self.config.log_transform.price_log_fields:
+        converted_count = 0
+        for field in amount_fields:
             if field in df.columns:
-                df = self.log_transform(
-                    df, field, 
-                    epsilon=epsilon, 
-                    output_column=f"{field}_log",
-                    inplace=True
-                )
-                logger.info(f"  ✓ {field} -> {field}_log")
-            else:
-                logger.warning(f"  ⚠️ {field} 列不存在，跳过")
+                df[field] = df[field] * amount_multiplier
+                converted_count += 1
+                logger.info(f"  ✓ {field} ×{amount_multiplier:.0f}")
+        
+        self.stats["converted_amount_fields"] = converted_count
         
         return df
     

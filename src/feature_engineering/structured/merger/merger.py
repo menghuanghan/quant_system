@@ -606,6 +606,216 @@ class DataMerger:
         
         return result
     
+    def process_with_preprocessing(
+        self,
+        preprocessors: Optional[dict] = None,
+        filter_universe: bool = True,
+        drop_unnecessary: bool = True,
+        save_result: bool = True,
+        output_path: Optional[Path] = None
+    ) -> pd.DataFrame:
+        """
+        流式预处理+合并：读取→预处理→合并 循环
+        
+        内存优化策略：
+        - 每次只加载一张表到显存
+        - 立即预处理，然后与中间结果合并
+        - 合并后释放原始表，只保留中间结果
+        - 避免8张表同时驻留显存导致OOM
+        
+        Args:
+            preprocessors: 预处理器字典 {'price': PricePreprocessor, ...}
+            filter_universe: 是否过滤股票池
+            drop_unnecessary: 是否删除不需要的列
+            save_result: 是否保存结果
+            output_path: 输出路径
+        
+        Returns:
+            预处理并合并后的DataFrame
+        """
+        logger.info("=" * 60)
+        logger.info("🚀 流式预处理+合并流程 [读取→预处理→合并 循环]")
+        logger.info("=" * 60)
+        
+        if preprocessors is None:
+            preprocessors = {}
+        
+        # Step 1: 加载并预处理主骨架（price）
+        logger.info("[Step 1] 加载并预处理主骨架(price)...")
+        self._log_memory_usage("开始")
+        
+        result = self.load_table('price', downcast=True)
+        if result is None:
+            raise ValueError("主骨架表(price)加载失败")
+        
+        # 预处理 price
+        if 'price' in preprocessors:
+            logger.info("  📊 预处理 price...")
+            result = preprocessors['price'].process(result)
+        
+        # 统一 trade_date 类型为 datetime64[ns]（确保后续合并一致）
+        if 'trade_date' in result.columns:
+            if self.use_gpu and self._cudf:
+                if not str(result['trade_date'].dtype).startswith('datetime64'):
+                    result['trade_date'] = self._cudf.to_datetime(result['trade_date'])
+            else:
+                # pandas: 统一转为 datetime64[ns]
+                if not str(result['trade_date'].dtype).startswith('datetime64'):
+                    result['trade_date'] = pd.to_datetime(result['trade_date'])
+                # 确保是 datetime64[ns] 而非 datetime64[us]
+                if str(result['trade_date'].dtype) != 'datetime64[ns]':
+                    result['trade_date'] = result['trade_date'].astype('datetime64[ns]')
+        
+        skeleton_rows = len(result)
+        logger.info(f"  ✓ 主骨架: {skeleton_rows:,} 行, {len(result.columns)} 列")
+        self._log_memory_usage("骨架预处理后")
+        
+        # Step 2: 流式 读取→预处理→合并 面板表
+        logger.info("[Step 2] 流式处理面板表...")
+        
+        for table_name in self.PANEL_TABLES:
+            logger.info(f"  处理 {table_name}...")
+            
+            # 加载表
+            df = self.load_table(table_name, downcast=True)
+            if df is None or len(df) == 0:
+                logger.warning(f"    跳过空表: {table_name}")
+                continue
+            
+            # 预处理
+            if table_name in preprocessors:
+                logger.info(f"    📊 预处理 {table_name}...")
+                df = preprocessors[table_name].process(df)
+            
+            # 确保合并键存在
+            missing_keys = [k for k in self.PANEL_KEYS if k not in df.columns]
+            if missing_keys:
+                logger.warning(f"    表 {table_name} 缺少合并键: {missing_keys}，跳过")
+                del df
+                self._force_gc()
+                continue
+            
+            # 统一 trade_date 类型（确保与骨架表一致：datetime64[ns]）
+            if 'trade_date' in df.columns:
+                if self.use_gpu and self._cudf:
+                    # cuDF: 确保都是 datetime64[ns]
+                    if not str(df['trade_date'].dtype).startswith('datetime64'):
+                        df['trade_date'] = self._cudf.to_datetime(df['trade_date'])
+                else:
+                    # pandas: 统一转为 datetime64[ns]
+                    if not str(df['trade_date'].dtype).startswith('datetime64'):
+                        df['trade_date'] = pd.to_datetime(df['trade_date'])
+                    # 确保与骨架表类型完全一致
+                    skeleton_dtype = str(result['trade_date'].dtype)
+                    if str(df['trade_date'].dtype) != skeleton_dtype:
+                        # 统一为 datetime64[ns]
+                        df['trade_date'] = pd.to_datetime(df['trade_date']).astype('datetime64[ns]')
+                        if str(result['trade_date'].dtype) != 'datetime64[ns]':
+                            result['trade_date'] = pd.to_datetime(result['trade_date']).astype('datetime64[ns]')
+            
+            # 预去重
+            dup_before = len(df)
+            df = df.drop_duplicates(subset=self.PANEL_KEYS, keep='first')
+            if len(df) < dup_before:
+                logger.debug(f"    去重 {table_name}: {dup_before} → {len(df)}")
+            
+            # 去除重复列
+            overlap_cols = set(df.columns) & set(result.columns) - set(self.PANEL_KEYS)
+            if overlap_cols:
+                df = df.drop(columns=list(overlap_cols), errors='ignore')
+            
+            # 合并
+            cols_before = len(result.columns)
+            result = result.merge(df, on=self.PANEL_KEYS, how='left')
+            cols_added = len(result.columns) - cols_before
+            
+            logger.info(f"    ✓ {table_name}: +{cols_added} 列")
+            
+            # 立即释放
+            del df
+            self._force_gc()
+        
+        self._log_memory_usage("面板处理后")
+        
+        # Step 3: 流式处理宏观表
+        logger.info("[Step 3] 处理宏观表...")
+        macro_df = self.load_table('macro', downcast=True)
+        if macro_df is not None and len(macro_df) > 0:
+            # 预处理
+            if 'macro' in preprocessors:
+                logger.info("    📊 预处理 macro...")
+                macro_df = preprocessors['macro'].process(macro_df)
+            
+            # 统一 trade_date 类型（确保与骨架表一致）
+            if 'trade_date' in macro_df.columns:
+                if self.use_gpu and self._cudf:
+                    if not str(macro_df['trade_date'].dtype).startswith('datetime64'):
+                        macro_df['trade_date'] = self._cudf.to_datetime(macro_df['trade_date'])
+                else:
+                    # pandas: 统一为 datetime64[ns]
+                    if not str(macro_df['trade_date'].dtype).startswith('datetime64'):
+                        macro_df['trade_date'] = pd.to_datetime(macro_df['trade_date'])
+                    if str(macro_df['trade_date'].dtype) != 'datetime64[ns]':
+                        macro_df['trade_date'] = macro_df['trade_date'].astype('datetime64[ns]')
+            
+            # 去重和合并
+            macro_df = macro_df.drop_duplicates(subset=['trade_date'], keep='first')
+            
+            overlap_cols = set(macro_df.columns) & set(result.columns) - {'trade_date'}
+            if overlap_cols:
+                macro_df = macro_df.drop(columns=list(overlap_cols), errors='ignore')
+            
+            cols_before = len(result.columns)
+            result = result.merge(macro_df, on='trade_date', how='left')
+            cols_added = len(result.columns) - cols_before
+            
+            logger.info(f"    ✓ macro: +{cols_added} 列")
+            
+            del macro_df
+            self._force_gc()
+        
+        self._log_memory_usage("宏观处理后")
+        
+        # Step 4: 合理性检查
+        logger.info("[Step 4] 合理性检查...")
+        self.sanity_check(result, skeleton_rows)
+        
+        # Step 5: 可选过滤
+        if filter_universe:
+            logger.info("[Step 5] 过滤股票池...")
+            result = self.filter_universe(result)
+            self._force_gc()
+        
+        # Step 6: 可选删除列
+        if drop_unnecessary:
+            logger.info("[Step 6] 删除冗余列...")
+            result = self.drop_columns(result)
+        
+        # Step 7: 保存
+        if save_result:
+            if output_path is None:
+                output_path = self.data_config.merged_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            logger.info(f"[Step 7] 保存结果...")
+            
+            # GPU模式需要转回pandas
+            if self.use_gpu and self._cudf and hasattr(result, 'to_pandas'):
+                result_pd = result.to_pandas()
+                result_pd.to_parquet(output_path, compression='snappy')
+                del result_pd
+            else:
+                result.to_parquet(output_path, compression='snappy')
+            
+            logger.info(f"  ✓ 已保存: {output_path}")
+        
+        self._log_memory_usage("完成")
+        logger.info("=" * 60)
+        logger.info(f"🎉 流式预处理+合并完成: {len(result):,} 行, {len(result.columns)} 列")
+        logger.info("=" * 60)
+        
+        return result
+    
     def _process_standard(
         self,
         filter_universe: bool = True,

@@ -2,6 +2,14 @@
 标签生成模块
 
 生成预测目标（未来 N 日收益率）并进行处理。
+
+支持的标签类型：
+1. 基础收益率标签: ret_5d, ret_10d, ret_20d
+2. 分类标签: label_5d (三分类)
+3. 超额收益标签: excess_ret_5d, excess_ret_10d
+4. 截面排名标签: rank_ret_5d, rank_ret_10d
+5. 夏普标签: sharpe_5d, sharpe_10d
+6. 分位数分类标签: label_bin_5d (三分类)
 """
 
 import logging
@@ -9,22 +17,31 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .advanced_label_generator import AdvancedLabelGenerator
+
 logger = logging.getLogger(__name__)
 
 
 class LabelGenerator:
     """标签生成器"""
     
-    def __init__(self, config, use_gpu: bool = True):
+    def __init__(
+        self,
+        config,
+        use_gpu: bool = True,
+        ref_data: Optional[Dict[str, Any]] = None
+    ):
         """
         初始化标签生成器
         
         Args:
             config: LabelConfig 配置
             use_gpu: 是否使用 GPU
+            ref_data: 参考数据（benchmark 等，用于高级标签）
         """
         self.config = config
         self.use_gpu = use_gpu
+        self.ref_data = ref_data or {}
         self.stats: Dict[str, Any] = {}
         
         if use_gpu:
@@ -77,6 +94,42 @@ class LabelGenerator:
         if self.config.generate_class_labels:
             df = self._generate_class_labels(df)
         
+        # 5. 生成高级标签（超额收益、排名、夏普、分位数分类）
+        df = self._generate_advanced_labels(df)
+        
+        return df
+    
+    def _generate_advanced_labels(self, df: Any) -> Any:
+        """
+        生成高级标签
+        
+        包括：超额收益、截面排名、夏普标签、分位数分类
+        """
+        # 检查是否启用任何高级标签
+        should_generate = any([
+            getattr(self.config, 'generate_excess_return', True),
+            getattr(self.config, 'generate_rank_labels', True),
+            getattr(self.config, 'generate_sharpe_labels', True),
+            getattr(self.config, 'generate_bin_labels', True),
+        ])
+        
+        if not should_generate:
+            logger.info("  ⏭️ 高级标签生成已禁用")
+            return df
+        
+        # 初始化高级标签生成器
+        advanced_gen = AdvancedLabelGenerator(
+            config=self.config,
+            ref_data=self.ref_data,
+            use_gpu=self.use_gpu
+        )
+        
+        # 生成高级标签
+        df = advanced_gen.generate_advanced_labels(df)
+        
+        # 合并统计信息
+        self.stats['advanced_labels'] = advanced_gen.get_stats()
+        
         return df
     
     def _generate_forward_return(
@@ -93,13 +146,32 @@ class LabelGenerator:
         
         使用 shift(-N) 实现"偷看未来"
         """
-        grouped = df.groupby('ts_code', sort=False)
+        # 确保按 ts_code 和 trade_date 排序
+        df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
         
-        # 计算未来第 N 天的价格
-        future_price = grouped[price_col].transform(lambda x: x.shift(-forward_days))
+        # cuDF 兼容的 shift 操作：
+        # 1. 先计算 shift 结果，保存为临时列
+        # 2. 使用 groupby + cumcount 检测边界，防止跨股票 shift
         
-        # 计算收益率
-        df[output_col] = (future_price - df[price_col]) / df[price_col]
+        if self.use_gpu:
+            # cuDF 原生 groupby shift
+            # 使用 apply + shift 替代 transform
+            grouped = df.groupby('ts_code', sort=False)
+            
+            # 直接使用 shift（cuDF 原生支持）
+            shift_col = f'_future_{forward_days}'
+            df[shift_col] = grouped[price_col].shift(-forward_days)
+            
+            # 计算收益率
+            df[output_col] = (df[shift_col] - df[price_col]) / df[price_col]
+            
+            # 删除临时列 (使用 del 避免 cuDF 深拷贝)
+            del df[shift_col]
+        else:
+            # pandas 使用 transform
+            grouped = df.groupby('ts_code', sort=False)
+            future_price = grouped[price_col].transform(lambda x: x.shift(-forward_days))
+            df[output_col] = (future_price - df[price_col]) / df[price_col]
         
         # 统计
         if self.use_gpu:
@@ -161,15 +233,22 @@ class LabelGenerator:
         df['is_suspended_day'] = (df['vol'] == 0).astype('int32')
         
         # 计算未来 N 日的停牌天数
+        # 使用 shift 累加方式实现"未来N日停牌天数"
         grouped = df.groupby('ts_code', sort=False)
         
-        # 使用滑动窗口计算未来停牌天数（shift 使窗口看向"未来"）
-        # 注意：这里需要反向滑动，所以用 rolling 后 shift
-        future_suspended = grouped['is_suspended_day'].transform(
-            lambda x: x.iloc[::-1].rolling(window=primary_days, min_periods=1).sum().iloc[::-1]
-        )
-        
-        df['future_suspended_days'] = future_suspended
+        if self.use_gpu:
+            # cuDF 兼容方式：累加未来 primary_days 日的停牌标记
+            # 未来停牌 = sum(shift(-1), shift(-2), ..., shift(-N))
+            future_sum = grouped['is_suspended_day'].shift(-1).fillna(0)
+            for i in range(2, primary_days + 1):
+                future_sum = future_sum + grouped['is_suspended_day'].shift(-i).fillna(0)
+            df['future_suspended_days'] = future_sum.astype('int32')
+        else:
+            # pandas 使用 rolling 反向窗口
+            future_suspended = grouped['is_suspended_day'].transform(
+                lambda x: x.iloc[::-1].rolling(window=primary_days, min_periods=1).sum().iloc[::-1]
+            )
+            df['future_suspended_days'] = future_suspended
         
         # 标记无效样本
         label_col = f'ret_{primary_days}d'
@@ -188,8 +267,9 @@ class LabelGenerator:
             
             logger.info(f"    ✓ 标记无效样本: {invalid_count:,} 行 (未来 {primary_days} 日停牌 > {max_suspended} 天)")
         
-        # 清理临时列
-        df = df.drop(columns=['is_suspended_day', 'future_suspended_days'])
+        # 清理临时列 (使用 del 避免 cuDF 深拷贝)
+        del df['is_suspended_day']
+        del df['future_suspended_days']
         
         return df
     

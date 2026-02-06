@@ -110,6 +110,130 @@ class TradingStatusConfig:
     trust_volume_over_label: bool = True
 
 
+# ============================================================================
+# 扩展表预处理配置
+# ============================================================================
+
+@dataclass
+class MoneyFlowConfig:
+    """资金流预处理配置"""
+    
+    # 单位换算：万元 -> 元
+    amount_multiplier: float = 10000.0
+    
+    # 需要进行单位换算的金额字段（万元→元）
+    # 注意：rzye, rqye, rzrqye 原本就是元，不需要换算
+    amount_fields: List[str] = field(default_factory=lambda: [
+        "buy_sm_amount", "sell_sm_amount",
+        "buy_md_amount", "sell_md_amount",
+        "buy_lg_amount", "sell_lg_amount",
+        "buy_elg_amount", "sell_elg_amount",
+        "net_mf_amount",
+        "top_l_buy", "top_l_sell", "top_net_amount",  # 龙虎榜
+        "top_inst_buy", "top_inst_sell", "top_inst_net_buy",  # 机构
+        "block_trade_amount",  # 大宗交易
+    ])
+    
+    # 大宗交易成交量：万股 → 手 (1万股 = 100手)
+    block_trade_vol_multiplier: float = 100.0
+    
+    # 需要在停牌日清零的字段
+    suspend_zero_fields: List[str] = field(default_factory=lambda: [
+        "net_mf_amount", "net_main_amount",
+        "buy_sm_amount", "sell_sm_amount",
+        "buy_md_amount", "sell_md_amount",
+        "buy_lg_amount", "sell_lg_amount",
+        "buy_elg_amount", "sell_elg_amount",
+    ])
+
+
+@dataclass
+class ChipConfig:
+    """筹码结构预处理配置"""
+    
+    # 持股比例上限 (Clip)
+    hold_ratio_max: float = 100.0
+    
+    # 需要 Clip 的比例字段
+    ratio_clip_fields: List[str] = field(default_factory=lambda: [
+        "top10_hold_ratio",
+        "top1_hold_ratio",
+        "top10_inst_ratio",
+    ])
+    
+    # 需要前向填充的字段
+    ffill_fields: List[str] = field(default_factory=lambda: [
+        "holder_num",
+        "top10_hold_ratio",
+        "top10_hold_amount",
+    ])
+
+
+@dataclass
+class IndustryConfig:
+    """行业分类预处理配置"""
+    
+    # 未分类的默认索引
+    unknown_idx: int = -1
+    
+    # 需要确保为 int 类型的索引字段
+    index_fields: List[str] = field(default_factory=lambda: [
+        "industry_idx",
+        "sw_l1_idx",
+        "sw_l2_idx",
+    ])
+
+
+@dataclass
+class MacroConfig:
+    """宏观预处理配置"""
+    
+    # 是否对宏观数据做 shift(1)（模拟"开盘前已知"）
+    apply_shift: bool = True
+    shift_days: int = 1
+    
+    # 需要 shift 的字段前缀（排除 trade_date）
+    shift_field_prefixes: List[str] = field(default_factory=lambda: [
+        "gdp", "cpi", "ppi", "pmi", "m2", "lpr", "shibor",
+        "market_", "stock_bond", "buffett", "pb_", "break_net",
+        "sh300", "zz500", "cyb", "sz50", "zz1000", "kc50",
+        "gc001", "r001", "if_", "ic_", "ih_", "im_",
+        "macro_", "risk_", "money_regime", "lpr_trend",
+    ])
+
+
+@dataclass
+class EventConfig:
+    """事件信号预处理配置"""
+    
+    # 质押率上限
+    pledge_ratio_max: float = 100.0
+    
+    # 0/1 信号列（NaN 应填 0）
+    signal_columns: List[str] = field(default_factory=lambda: [
+        "is_repurchase_ann",
+        "in_repurchase_window",
+        "is_unlock_day",
+        "in_unlock_window",
+        "is_dividend_ann",
+        "in_dividend_window",
+        "has_event",
+        "has_risk_event",
+    ])
+
+
+@dataclass
+class FundamentalAmountConfig:
+    """基本面金额单位换算配置"""
+    
+    # 万元 -> 元 的字段（乘数 10000）
+    wan_yuan_fields: List[str] = field(default_factory=lambda: [
+        "total_mv",           # 总市值（万元）
+        "circ_mv",            # 流通市值（万元）
+    ])
+    wan_yuan_multiplier: float = 10000.0
+
+
 @dataclass
 class PreprocessConfig:
     """预处理总配置"""
@@ -125,10 +249,25 @@ class PreprocessConfig:
     data_lag: DataLagConfig = field(default_factory=DataLagConfig)
     trading_status: TradingStatusConfig = field(default_factory=TradingStatusConfig)
     
-    # 输出文件名
+    # 扩展表预处理配置
+    money_flow: MoneyFlowConfig = field(default_factory=MoneyFlowConfig)
+    chip: ChipConfig = field(default_factory=ChipConfig)
+    industry: IndustryConfig = field(default_factory=IndustryConfig)
+    macro: MacroConfig = field(default_factory=MacroConfig)
+    event: EventConfig = field(default_factory=EventConfig)
+    fundamental_amount: FundamentalAmountConfig = field(default_factory=FundamentalAmountConfig)
+    
+    # 输出文件名 - 核心表
     output_price_file: str = "preprocessed_stock_price.parquet"
     output_fundamental_file: str = "preprocessed_stock_fundamental.parquet"
     output_status_file: str = "preprocessed_stock_status.parquet"
+    
+    # 输出文件名 - 扩展表
+    output_money_flow_file: str = "preprocessed_money_flow.parquet"
+    output_chip_file: str = "preprocessed_chip_structure.parquet"
+    output_industry_file: str = "preprocessed_stock_industry.parquet"
+    output_macro_file: str = "preprocessed_macro_env.parquet"
+    output_event_file: str = "preprocessed_event_signal.parquet"
     
     # 处理选项
     use_gpu: bool = True  # 是否使用 GPU 加速

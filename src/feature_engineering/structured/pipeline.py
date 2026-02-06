@@ -55,44 +55,77 @@ class FeaturePipeline:
         from .postprocess.post_processor import PostProcessor
         from .preprocess import (
             PreprocessConfig,
+            # 核心3表预处理器
             PricePreprocessor,
             FundamentalPreprocessor,
             StatusPreprocessor,
+            # 扩展5表预处理器
+            MoneyFlowPreprocessor,
+            ChipPreprocessor,
+            IndustryPreprocessor,
+            MacroPreprocessor,
+            EventPreprocessor,
         )
         
-        # 预处理器
+        # 预处理器 - 8表完整配置
         preprocess_config = PreprocessConfig(use_gpu=self.use_gpu)
+        
+        # 核心3表预处理器
         self.price_preprocessor = PricePreprocessor(preprocess_config)
         self.fundamental_preprocessor = FundamentalPreprocessor(preprocess_config)
         self.status_preprocessor = StatusPreprocessor(preprocess_config)
         
+        # 扩展5表预处理器
+        self.money_flow_preprocessor = MoneyFlowPreprocessor(preprocess_config)
+        self.chip_preprocessor = ChipPreprocessor(preprocess_config)
+        self.industry_preprocessor = IndustryPreprocessor(preprocess_config)
+        self.macro_preprocessor = MacroPreprocessor(preprocess_config)
+        self.event_preprocessor = EventPreprocessor(preprocess_config)
+        
+        # 预处理器字典（供流式合并使用）
+        self.preprocessors = {
+            'price': self.price_preprocessor,
+            'fundamental': self.fundamental_preprocessor,
+            'status': self.status_preprocessor,
+            'money_flow': self.money_flow_preprocessor,
+            'chip': self.chip_preprocessor,
+            'industry': self.industry_preprocessor,
+            'macro': self.macro_preprocessor,
+            'event': self.event_preprocessor,
+        }
+        
+        # 参考数据加载器
+        from .features.reference_data_loader import ReferenceDataLoader
+        self.ref_loader = ReferenceDataLoader(self.config.data, self.use_gpu)
+        
         # 其他处理器
-        self.merger = DataMerger(self.config.universe, self.use_gpu)
-        self.feature_generator = FeatureGenerator(self.config.technical, self.use_gpu)
-        self.label_generator = LabelGenerator(self.config.label, self.use_gpu)
+        self.merger = DataMerger(self.config.data, use_gpu=self.use_gpu)
+        # 特征生成器（参考数据延迟加载）
+        self.feature_generator = FeatureGenerator(self.config.technical, self.use_gpu, ref_data=None)
+        # 标签生成器（参考数据延迟加载，用于超额收益等高级标签）
+        self.label_generator = LabelGenerator(self.config.label, self.use_gpu, ref_data=None)
         self.post_processor = PostProcessor(
             self.config.normalization,
             self.config.data,
             self.use_gpu
         )
     
-    def run(self, save_output: bool = True) -> Any:
+    def run(self, save_output: bool = True, streaming_mode: bool = True) -> Any:
         """
         执行完整流水线
         
-        流程：
-        1. Load: 读取三张 DWD 宽表
-        2. Preprocess: 预处理（倒数变换、对数变换、去极值等）
-        3. Merge & Filter: 连表，剔除 ST、停牌、次新股
-        4. Feature Eng: 计算 MA, MACD, Volatility 等
-        5. Labeling: 生成未来 N 日收益率标签
-        6. Slice: 只保留 2021.01.01 之后的数据
-        7. Normalize: 截面 Z-Score 标准化
-        8. Clean: 丢弃含 NaN 的行
-        9. Save: 输出 train.parquet
+        流程（流式模式）：
+        1. 流式预处理+合并：读取→预处理→合并 循环（内存高效）
+        2. Feature Eng: 计算 MA, MACD, Volatility 等
+        3. Labeling: 生成未来 N 日收益率标签
+        4. Slice: 只保留 2021.01.01 之后的数据
+        5. Normalize: 截面 Z-Score 标准化
+        6. Clean: 丢弃含 NaN 的行
+        7. Save: 输出 train.parquet
         
         Args:
             save_output: 是否保存输出文件
+            streaming_mode: 是否使用流式预处理+合并（推荐，内存高效）
             
         Returns:
             最终的 DataFrame
@@ -100,35 +133,36 @@ class FeaturePipeline:
         start_time = time.time()
         
         logger.info("=" * 70)
-        logger.info("🚀 特征工程流水线启动")
+        logger.info("🚀 特征工程流水线启动" + (" [流式模式]" if streaming_mode else " [标准模式]"))
         logger.info("=" * 70)
         
-        # Step 0: 加载 DWD 数据
-        price_df, fundamental_df, status_df = self._load_data()
-        
-        # Step 1: 预处理三张表
-        price_df, fundamental_df, status_df = self._preprocess_tables(
-            price_df, fundamental_df, status_df
-        )
-        
-        # 收集需要删除的列
-        drop_columns = []
-        if hasattr(self.config, 'drop_columns'):
-            drop_columns = (
-                self.config.drop_columns.drop_raw_valuations +
-                self.config.drop_columns.drop_misc
+        if streaming_mode:
+            # 流式模式：预处理+合并一体化
+            df = self._run_streaming_mode()
+        else:
+            # 标准模式：分步加载预处理合并（向后兼容）
+            price_df, fundamental_df, status_df = self._load_data()
+            price_df, fundamental_df, status_df = self._preprocess_tables(
+                price_df, fundamental_df, status_df
             )
+            drop_columns = []
+            if hasattr(self.config, 'drop_columns'):
+                drop_columns = (
+                    self.config.drop_columns.drop_raw_valuations +
+                    self.config.drop_columns.drop_misc
+                )
+            df = self.merger.process(price_df, fundamental_df, status_df, drop_columns=drop_columns)
+            del price_df, fundamental_df, status_df
         
-        # Step 2: 合并与过滤
-        df = self.merger.process(price_df, fundamental_df, status_df, drop_columns=drop_columns)
-        
-        # 释放原始数据内存
-        del price_df, fundamental_df, status_df
+        # Step 2.5: 加载参考数据（用于相对强弱和指数成分特征）
+        ref_data = self.ref_loader.load_all()
+        self.feature_generator.set_ref_data(ref_data)
         
         # Step 3: 特征生成
         df = self.feature_generator.generate_all(df)
         
-        # Step 4: 标签生成
+        # Step 4: 标签生成（需要 ref_data 用于超额收益标签）
+        self.label_generator.ref_data = ref_data
         df = self.label_generator.generate_labels(df)
         
         # Step 5-7: 后处理（切分、标准化、清洗）
@@ -142,6 +176,31 @@ class FeaturePipeline:
         elapsed = time.time() - start_time
         self._print_summary(df, elapsed)
         
+        return df
+    
+    def _run_streaming_mode(self) -> Any:
+        """
+        流式预处理+合并模式
+        
+        内存高效：读取一张表 → 预处理 → 合并 → 释放 → 下一张
+        避免8张表同时驻留显存导致OOM
+        
+        Returns:
+            预处理并合并后的DataFrame
+        """
+        logger.info("=" * 60)
+        logger.info("📋 Step 0-2: 流式 加载+预处理+合并 (8表)")
+        logger.info("=" * 60)
+        
+        # 使用 merger 的 process_with_preprocessing 方法
+        df = self.merger.process_with_preprocessing(
+            preprocessors=self.preprocessors,
+            filter_universe=True,
+            drop_unnecessary=False,  # 保留所有列供后续处理
+            save_result=False  # 不单独保存中间结果
+        )
+        
+        logger.info(f"  ✓ 流式处理完成: {len(df):,} 行, {len(df.columns)} 列")
         return df
     
     def _load_data(self):
