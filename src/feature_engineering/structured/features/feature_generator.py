@@ -462,7 +462,9 @@ class FeatureGenerator:
             },
             {
                 'name': '资金流特征',
-                'columns_needed': ['ts_code', 'trade_date', 'amount', 'net_main_amount', 'net_mf_amount', 'block_trade_amount', 
+                'columns_needed': ['ts_code', 'trade_date', 'amount', 
+                                   'net_main_amount', 'net_elg_amount', 'net_lg_amount', 'net_md_amount', 'net_sm_amount',
+                                   'net_mf_amount', 'block_trade_amount', 
                                    'buy_sm_amount', 'sell_sm_amount', 'rzye', 'rqye', 'hsgt_north'],
                 'generator': self._generate_mf_features_standalone
             },

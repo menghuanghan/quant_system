@@ -337,6 +337,11 @@ class FeaturePipeline:
             import pandas as pd
             df = pd.read_parquet(str(merger_preprocess_path))
         
+        # ⚠️ 关键：按 ts_code, trade_date 排序并 reset_index，与特征/标签列保持一致
+        # generate_column_by_column/generate_labels_column_by_column 内部也按此顺序排序
+        df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+        logger.info("  ✓ 已按 ts_code, trade_date 排序以对齐特征/标签列")
+        
         # 合并特征列
         for col_name, col_data in feature_columns.items():
             df[col_name] = col_data
