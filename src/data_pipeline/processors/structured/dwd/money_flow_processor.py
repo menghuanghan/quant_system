@@ -44,6 +44,8 @@ class MoneyFlowProcessor(BaseProcessor):
         - buy_md_amount, sell_md_amount: 中单买卖金额
         - buy_lg_amount, sell_lg_amount: 大单买卖金额
         - buy_elg_amount, sell_elg_amount: 超大单买卖金额
+        - net_sm_amount, net_md_amount: 小单/中单净流入
+        - net_lg_amount, net_elg_amount: 大单/超大单净流入
         - net_mf_amount: 主力净流入金额
         - net_mf_amount_pct: 主力净流入占比
         # 两融
@@ -281,6 +283,16 @@ class MoneyFlowProcessor(BaseProcessor):
             df['buy_main_amount'] = df['buy_lg_amount'].fillna(0) + df['buy_elg_amount'].fillna(0)
             df['sell_main_amount'] = df['sell_lg_amount'].fillna(0) + df['sell_elg_amount'].fillna(0)
             df['net_main_amount'] = df['buy_main_amount'] - df['sell_main_amount']
+        
+        # 各档资金净流入（超大单/大单/中单/小单）
+        if 'buy_elg_amount' in df.columns and 'sell_elg_amount' in df.columns:
+            df['net_elg_amount'] = df['buy_elg_amount'].fillna(0) - df['sell_elg_amount'].fillna(0)
+        if 'buy_lg_amount' in df.columns and 'sell_lg_amount' in df.columns:
+            df['net_lg_amount'] = df['buy_lg_amount'].fillna(0) - df['sell_lg_amount'].fillna(0)
+        if 'buy_md_amount' in df.columns and 'sell_md_amount' in df.columns:
+            df['net_md_amount'] = df['buy_md_amount'].fillna(0) - df['sell_md_amount'].fillna(0)
+        if 'buy_sm_amount' in df.columns and 'sell_sm_amount' in df.columns:
+            df['net_sm_amount'] = df['buy_sm_amount'].fillna(0) - df['sell_sm_amount'].fillna(0)
         
         # 散户资金（小单+中单）
         if 'buy_sm_amount' in df.columns and 'buy_md_amount' in df.columns:

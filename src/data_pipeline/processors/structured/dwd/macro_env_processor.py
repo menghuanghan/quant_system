@@ -7,6 +7,7 @@ MacroEnvProcessor - 宏观环境宽表处理器（纯cuDF GPU版本）
     基础宏观：
     - cn_gdp: GDP（季度）
     - cn_cpi: CPI（月度）
+    - cn_ppi: PPI工业生产者出厂价格（月度）
     - cn_pmi: PMI（月度）
     - cn_m2: M2货币供应量（月度）
     - lpr: LPR利率（不定期）
@@ -57,6 +58,9 @@ class MacroEnvProcessor(BaseProcessor):
         # CPI相关（月度）
         - cpi_yoy: CPI同比
         - cpi_mom: CPI环比
+        
+        # PPI相关（月度）
+        - ppi_yoy: PPI工业生产者出厂价格同比
         
         # PMI相关（月度）
         - pmi: 制造业PMI
@@ -289,6 +293,42 @@ class MacroEnvProcessor(BaseProcessor):
         df = df[[c for c in cols if c in df.columns]]
         
         logger.info(f"加载PMI数据完成，共 {len(df)} 行")
+        return df
+    
+    def _load_ppi(self) -> cudf.DataFrame:
+        """加载PPI数据"""
+        logger.info("加载PPI数据...")
+        
+        df = self.read_parquet(DATA_SOURCE_PATHS.cn_ppi)
+        
+        if len(df) == 0:
+            logger.warning("无法加载PPI数据")
+            return cudf.DataFrame()
+        
+        # month格式: 202401等
+        df['month_str'] = df['month'].astype(str)
+        df['year'] = df['month_str'].str.slice(0, 4)
+        df['mon'] = df['month_str'].str.slice(4, 6)
+        
+        # PIT修复：PPI实际在次月9-12日公布，使用次月15日作为保守可用日期
+        df['year_int'] = df['year'].astype('int32')
+        df['mon_int'] = df['mon'].astype('int32')
+        df['pub_year'] = df['year_int']
+        df['pub_mon'] = df['mon_int'] + 1
+        mask_overflow = df['pub_mon'] > 12
+        df.loc[mask_overflow, 'pub_year'] = df.loc[mask_overflow, 'year_int'] + 1
+        df.loc[mask_overflow, 'pub_mon'] = 1
+        df['trade_date'] = (
+            df['pub_year'].astype(str) + '-' + 
+            df['pub_mon'].astype(str).str.zfill(2) + '-15'
+        )
+        df = df.drop(columns=['year_int', 'mon_int', 'pub_year', 'pub_mon', 'month_str', 'year', 'mon'], errors='ignore')
+        
+        # 选择需要的字段（工业生产者出厂价格同比）
+        cols = ['trade_date', 'ppi_yoy']
+        df = df[[c for c in cols if c in df.columns]]
+        
+        logger.info(f"加载PPI数据完成，共 {len(df)} 行")
         return df
     
     def _load_m2(self) -> cudf.DataFrame:
@@ -945,6 +985,7 @@ class MacroEnvProcessor(BaseProcessor):
         # ================================================================
         gdp = self._load_gdp()
         cpi = self._load_cpi()
+        ppi = self._load_ppi()
         pmi = self._load_pmi()
         m2 = self._load_m2()
         lpr = self._load_lpr()
@@ -982,6 +1023,7 @@ class MacroEnvProcessor(BaseProcessor):
         low_freq_data = [
             (gdp, ['gdp_yoy']),
             (cpi, ['cpi_yoy', 'cpi_mom']),
+            (ppi, ['ppi_yoy']),
             (pmi, ['pmi', 'pmi_prod', 'pmi_new_order']),
             (m2, ['m2', 'm2_yoy']),
             (lpr, ['lpr_1y', 'lpr_5y']),
@@ -1035,6 +1077,7 @@ class MacroEnvProcessor(BaseProcessor):
         low_freq_cols = [
             'gdp_yoy',
             'cpi_yoy', 'cpi_mom',
+            'ppi_yoy',  # PPI工业生产者出厂价格同比
             'pmi', 'pmi_prod', 'pmi_new_order',
             'm2', 'm2_yoy',
             'lpr_1y', 'lpr_5y',

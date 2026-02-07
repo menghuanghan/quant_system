@@ -46,6 +46,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只打印配置，不执行")
     parser.add_argument("--verbose", "-v", action="store_true", default=True, help="详细输出")
     parser.add_argument("--output", "-o", type=str, help="自定义输出文件名")
+    parser.add_argument("--memory-efficient", "-m", action="store_true", default=True, 
+                        help="使用内存高效模式（逐列计算，中间结果暂存磁盘）")
+    parser.add_argument("--no-memory-efficient", action="store_true", 
+                        help="禁用内存高效模式")
     
     args = parser.parse_args()
     
@@ -68,10 +72,14 @@ def main():
         config.data.train_file = args.output
     
     # 打印配置
+    memory_efficient = args.memory_efficient and not args.no_memory_efficient
+    
     logger.info("📋 流水线配置:")
     logger.info(f"   GPU 加速: {config.use_gpu}")
+    logger.info(f"   内存高效模式: {memory_efficient}")
     logger.info(f"   输入目录: {config.data.input_dir}")
     logger.info(f"   输出目录: {config.data.output_dir}")
+    logger.info(f"   临时目录: {config.data.temp_dir}")
     logger.info(f"   输出文件: {config.data.train_file}")
     logger.info(f"   预热期: {config.data.warmup_start} ~ {config.data.warmup_end}")
     logger.info(f"   正式期: {config.data.train_start} ~ {config.data.train_end}")
@@ -99,7 +107,7 @@ def main():
     # 执行流水线
     try:
         pipeline = FeaturePipeline(config)
-        df = pipeline.run(save_output=True)
+        df = pipeline.run(save_output=True, memory_efficient=memory_efficient)
         
         logger.info("")
         logger.info("🎉 流水线执行成功!")

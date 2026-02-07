@@ -332,3 +332,125 @@ class LabelGenerator:
     def get_stats(self) -> Dict[str, Any]:
         """获取处理统计信息"""
         return self.stats
+    
+    def generate_labels_column_by_column(
+        self, 
+        parquet_path: str,
+        use_gpu: bool = True
+    ) -> Dict[str, Any]:
+        """
+        逐列计算标签（内存高效模式）
+        
+        策略：
+        1. 每次只读取计算当前标签所需的列
+        2. 计算完成后立即释放源列
+        3. 标签列驻留显存
+        
+        Args:
+            parquet_path: 中间表 parquet 文件路径
+            use_gpu: 是否使用 GPU
+            
+        Returns:
+            标签列字典 {column_name: column_data}
+        """
+        import gc
+        from pathlib import Path
+        
+        if use_gpu:
+            import cudf
+            import cupy as cp
+            pd_lib = cudf
+        else:
+            import pandas as pd
+            pd_lib = pd
+        
+        label_columns = {}
+        parquet_path = Path(parquet_path)
+        
+        # 读取需要的基础列（包含 return_1d 用于夏普标签计算）
+        base_cols = ['ts_code', 'trade_date', 'close_hfq', 'is_trading', 'return_1d', 'vol']
+        available_cols = []
+        for col in base_cols:
+            try:
+                _ = pd_lib.read_parquet(str(parquet_path), columns=[col])
+                available_cols.append(col)
+            except:
+                pass
+        
+        df = pd_lib.read_parquet(str(parquet_path), columns=available_cols)
+        df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+        
+        price_col = 'close_hfq' if 'close_hfq' in df.columns else 'close'
+        
+        # ============================
+        # 1. 生成基础收益率标签
+        # ============================
+        logger.info("  📊 计算未来收益率标签...")
+        
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            df = self._generate_forward_return(df, price_col, days, label_col)
+            label_columns[label_col] = df[label_col].copy()
+        
+        logger.info(f"    ✓ 收益率标签: {list(self.config.forward_days)}")
+        
+        # ============================
+        # 2. 标签去极值
+        # ============================
+        df = self._clip_labels(df)
+        
+        # 更新去极值后的收益率标签
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            if label_col in df.columns:
+                label_columns[label_col] = df[label_col].copy()
+        
+        # ============================
+        # 3. 标记无效样本
+        # ============================
+        df = self._mark_invalid_samples(df)
+        
+        # 再次更新
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            if label_col in df.columns:
+                label_columns[label_col] = df[label_col].copy()
+        
+        # ============================
+        # 4. 生成分类标签
+        # ============================
+        if self.config.generate_class_labels:
+            logger.info("  📊 计算分类标签...")
+            df = self._generate_class_labels(df)
+            
+            for days in self.config.forward_days:
+                class_col = f'label_{days}d'
+                if class_col in df.columns:
+                    label_columns[class_col] = df[class_col].copy()
+        
+        # ============================
+        # 5. 生成高级标签
+        # ============================
+        logger.info("  📊 计算高级标签...")
+        df = self._generate_advanced_labels(df)
+        
+        # 收集所有新生成的标签列
+        advanced_label_prefixes = ['excess_ret_', 'rank_ret_', 'sharpe_', 'label_bin_']
+        for col in df.columns:
+            for prefix in advanced_label_prefixes:
+                if col.startswith(prefix):
+                    label_columns[col] = df[col].copy()
+                    break
+        
+        # 释放内存
+        del df
+        gc.collect()
+        if use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except:
+                pass
+        
+        logger.info(f"  ✅ 标签列: {list(label_columns.keys())}")
+        
+        return label_columns

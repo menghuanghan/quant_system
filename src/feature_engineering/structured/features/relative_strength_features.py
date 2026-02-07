@@ -327,6 +327,10 @@ class IndexMemberGenerator:
         idx_weights['trade_date'] = pd.to_datetime(idx_weights['trade_date'])
         idx_weights = idx_weights.sort_values('trade_date')
         
+        # 统一 datetime 精度（避免 ns/us 不兼容问题）
+        df_pd['trade_date'] = df_pd['trade_date'].astype('datetime64[ns]')
+        idx_weights['trade_date'] = idx_weights['trade_date'].astype('datetime64[ns]')
+        
         n_before = len(df_pd)
         
         result = pd.merge_asof(

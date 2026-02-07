@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]  # 向上3级到项目根目录
 DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
 PREPROCESSED_DIR = BASE_DIR / "data" / "features" / "preprocessed"  # 预处理后数据
 FEATURE_OUTPUT_DIR = BASE_DIR / "data" / "features" / "structured"
+FEATURE_TEMP_DIR = BASE_DIR / "data" / "features" / "temp"  # 流水线中间结果暂存目录
 
 
 @dataclass
@@ -44,7 +45,11 @@ class DataConfig:
     
     # 输出
     output_dir: Path = FEATURE_OUTPUT_DIR
+    temp_dir: Path = FEATURE_TEMP_DIR  # 中间结果暂存目录
     train_file: str = "train.parquet"
+    
+    # 中间结果文件名
+    merger_preprocess_file: str = "merger_preprocess.parquet"  # 合并+预处理后的中间表
     
     # 数据时间范围
     # 预热期：2019-06-01 ~ 2020-12-31（用于计算 MA250 等长周期指标）
@@ -92,6 +97,11 @@ class DataConfig:
     def merged_path(self) -> Path:
         """合并后的中间文件路径"""
         return self.output_dir / "merged.parquet"
+    
+    @property
+    def merger_preprocess_path(self) -> Path:
+        """合并+预处理后的暂存文件路径"""
+        return self.temp_dir / self.merger_preprocess_file
 
 
 @dataclass
@@ -365,8 +375,8 @@ class NormalizationConfig:
 class PipelineConfig:
     """流水线总配置"""
     
-    # GPU 加速
-    use_gpu: bool = True
+    # GPU 加速（关闭以使用纯 CPU 模式）
+    use_gpu: bool = False
     
     # 子配置
     data: DataConfig = field(default_factory=DataConfig)

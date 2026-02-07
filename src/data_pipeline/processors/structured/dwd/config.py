@@ -68,6 +68,7 @@ class DataSourcePaths:
     # ========== 宏观数据 ==========
     cn_gdp: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_gdp.parquet"
     cn_cpi: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_cpi.parquet"
+    cn_ppi: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_ppi.parquet"
     cn_pmi: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_pmi.parquet"
     cn_m2: Path = RAW_DATA_DIR / "macro_exogenous" / "cn_m2.parquet"
     lpr: Path = RAW_DATA_DIR / "macro_exogenous" / "lpr.parquet"

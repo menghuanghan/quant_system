@@ -110,7 +110,7 @@ class FeaturePipeline:
             self.use_gpu
         )
     
-    def run(self, save_output: bool = True, streaming_mode: bool = True) -> Any:
+    def run(self, save_output: bool = True, streaming_mode: bool = True, memory_efficient: bool = False) -> Any:
         """
         执行完整流水线
         
@@ -126,6 +126,7 @@ class FeaturePipeline:
         Args:
             save_output: 是否保存输出文件
             streaming_mode: 是否使用流式预处理+合并（推荐，内存高效）
+            memory_efficient: 是否使用内存高效模式（逐列计算，中间结果暂存磁盘）
             
         Returns:
             最终的 DataFrame
@@ -133,10 +134,24 @@ class FeaturePipeline:
         start_time = time.time()
         
         logger.info("=" * 70)
-        logger.info("🚀 特征工程流水线启动" + (" [流式模式]" if streaming_mode else " [标准模式]"))
+        mode_desc = "[内存高效模式]" if memory_efficient else ("[流式模式]" if streaming_mode else "[标准模式]")
+        logger.info(f"🚀 特征工程流水线启动 {mode_desc}")
         logger.info("=" * 70)
         
-        if streaming_mode:
+        if memory_efficient:
+            # 内存高效模式：中间结果暂存磁盘，逐列计算特征/标签
+            df = self._run_memory_efficient_mode()
+            
+            # Step 8: 保存输出
+            if save_output:
+                self._save_output(df)
+            
+            # 统计信息汇总
+            elapsed = time.time() - start_time
+            self._print_summary(df, elapsed)
+            
+            return df
+        elif streaming_mode:
             # 流式模式：预处理+合并一体化
             df = self._run_streaming_mode()
         else:
@@ -166,7 +181,10 @@ class FeaturePipeline:
         df = self.label_generator.generate_labels(df)
         
         # Step 5-7: 后处理（切分、标准化、清洗）
-        df = self.post_processor.process(df)
+        # 暂时注销后处理模块，避免 OOM
+        # TODO: 后续需要在内存高效模式下重新实现
+        # df = self.post_processor.process(df)
+        logger.info("⚠️ 后处理模块已暂时注销")
         
         # Step 8: 保存输出
         if save_output:
@@ -201,6 +219,138 @@ class FeaturePipeline:
         )
         
         logger.info(f"  ✓ 流式处理完成: {len(df):,} 行, {len(df.columns)} 列")
+        return df
+    
+    def _run_memory_efficient_mode(self) -> Any:
+        """
+        内存高效模式：避免 OOM
+        
+        核心策略：
+        1. 合并+预处理后暂存磁盘，释放内存/显存
+        2. 特征生成逐列计算：每次只读取需要的列，计算后立即释放
+        3. 标签生成同理
+        4. 新生成的特征/标签列驻留显存
+        5. 最后合并保存
+        
+        Returns:
+            最终的 DataFrame (特征 + 标签)
+        """
+        import gc
+        
+        # 确保临时目录存在
+        temp_dir = self.config.data.temp_dir
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        merger_preprocess_path = self.config.data.merger_preprocess_path
+        
+        # ============================
+        # Step 1: 流式合并+预处理 → 暂存磁盘
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 Step 1: 流式 加载+预处理+合并 (8表) → 暂存磁盘")
+        logger.info("=" * 60)
+        
+        df = self.merger.process_with_preprocessing(
+            preprocessors=self.preprocessors,
+            filter_universe=True,
+            drop_unnecessary=False,
+            save_result=False
+        )
+        
+        # 保存到磁盘
+        logger.info(f"  💾 暂存到: {merger_preprocess_path}")
+        
+        # 如果是 cuDF，需要转换为 pandas 才能保存（避免 cuDF parquet 写入问题）
+        if self.use_gpu:
+            df_pd = df.to_pandas()
+            df_pd.to_parquet(str(merger_preprocess_path), index=False)
+            file_size = merger_preprocess_path.stat().st_size / (1024 * 1024)
+            logger.info(f"     ✓ 已保存 {len(df_pd):,} 行, {len(df_pd.columns)} 列, {file_size:.1f} MB")
+            # 释放内存
+            del df_pd, df
+        else:
+            df.to_parquet(str(merger_preprocess_path), index=False)
+            file_size = merger_preprocess_path.stat().st_size / (1024 * 1024)
+            logger.info(f"     ✓ 已保存 {len(df):,} 行, {len(df.columns)} 列, {file_size:.1f} MB")
+            del df
+        
+        gc.collect()
+        if self.use_gpu:
+            try:
+                import cupy as cp
+                cp.get_default_memory_pool().free_all_blocks()
+                logger.info("     ✓ 显存已释放")
+            except:
+                pass
+        
+        # ============================
+        # Step 2: 加载参考数据
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 Step 2: 加载参考数据")
+        logger.info("=" * 60)
+        
+        ref_data = self.ref_loader.load_all()
+        self.feature_generator.set_ref_data(ref_data)
+        
+        # ============================
+        # Step 3: 逐列计算特征
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 Step 3: 逐列计算特征 (内存高效模式)")
+        logger.info("=" * 60)
+        
+        feature_columns = self.feature_generator.generate_column_by_column(
+            parquet_path=merger_preprocess_path,
+            ref_data=ref_data,
+            use_gpu=self.use_gpu
+        )
+        
+        logger.info(f"  ✅ 特征生成完成: {len(feature_columns)} 列")
+        
+        # ============================
+        # Step 4: 逐列计算标签
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 Step 4: 逐列计算标签 (内存高效模式)")
+        logger.info("=" * 60)
+        
+        self.label_generator.ref_data = ref_data
+        label_columns = self.label_generator.generate_labels_column_by_column(
+            parquet_path=merger_preprocess_path,
+            use_gpu=self.use_gpu
+        )
+        
+        logger.info(f"  ✅ 标签生成完成: {len(label_columns)} 列")
+        
+        # ============================
+        # Step 5: 合并所有列
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 Step 5: 合并特征+标签到最终表")
+        logger.info("=" * 60)
+        
+        # 读取原始表（只读取主键和必要列）
+        if self.use_gpu:
+            import cudf
+            df = cudf.read_parquet(str(merger_preprocess_path))
+        else:
+            import pandas as pd
+            df = pd.read_parquet(str(merger_preprocess_path))
+        
+        # 合并特征列
+        for col_name, col_data in feature_columns.items():
+            df[col_name] = col_data
+        
+        # 合并标签列
+        for col_name, col_data in label_columns.items():
+            df[col_name] = col_data
+        
+        logger.info(f"  ✓ 最终表: {len(df):,} 行, {len(df.columns)} 列")
+        
+        # 释放中间变量
+        del feature_columns, label_columns
+        gc.collect()
+        
         return df
     
     def _load_data(self):
@@ -274,14 +424,36 @@ class FeaturePipeline:
         return price_df, fundamental_df, status_df
     
     def _save_output(self, df: Any):
-        """保存输出文件"""
+        """保存输出文件（内存高效模式）"""
+        import gc
+        
         output_dir = self.config.data.output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         
         output_path = output_dir / self.config.data.train_file
         
         logger.info(f"  💾 保存输出: {output_path}")
-        df.to_parquet(str(output_path), index=False)
+        
+        # 如果是 GPU DataFrame，先转到 CPU 再保存，避免 GPU OOM
+        if self.use_gpu:
+            logger.info(f"     📤 转换到 CPU 内存...")
+            pdf = df.to_pandas()
+            
+            # 释放 GPU DataFrame
+            del df
+            gc.collect()
+            if self.use_gpu:
+                import cupy as cp
+                cp.get_default_memory_pool().free_all_blocks()
+            
+            logger.info(f"     💾 写入 parquet...")
+            pdf.to_parquet(str(output_path), index=False, engine='pyarrow')
+            
+            # 释放 pandas DataFrame
+            del pdf
+            gc.collect()
+        else:
+            df.to_parquet(str(output_path), index=False)
         
         # 获取文件大小
         file_size = output_path.stat().st_size / (1024 * 1024)
@@ -331,10 +503,16 @@ class FeaturePipeline:
     
     def get_stats(self) -> Dict[str, Any]:
         """获取所有模块的统计信息"""
-        return {
-            "pipeline": self.stats,
-            "merger": self.merger.get_stats(),
-            "feature_generator": self.feature_generator.get_stats(),
-            "label_generator": self.label_generator.get_stats(),
-            "post_processor": self.post_processor.get_stats(),
-        }
+        result = {"pipeline": self.stats}
+        
+        # 安全获取各模块统计信息
+        if hasattr(self.merger, 'get_stats'):
+            result["merger"] = self.merger.get_stats()
+        if hasattr(self.feature_generator, 'get_stats'):
+            result["feature_generator"] = self.feature_generator.get_stats()
+        if hasattr(self.label_generator, 'get_stats'):
+            result["label_generator"] = self.label_generator.get_stats()
+        if hasattr(self.post_processor, 'get_stats'):
+            result["post_processor"] = self.post_processor.get_stats()
+        
+        return result
