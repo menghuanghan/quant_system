@@ -11,6 +11,7 @@
 """
 
 import logging
+import time
 from typing import Optional, List
 from datetime import datetime
 
@@ -434,8 +435,11 @@ class ShareFloatCollector(BaseCollector):
         start_date: Optional[str],
         end_date: Optional[str]
     ) -> pd.DataFrame:
-        """从Tushare获取限售解禁"""
+        """从Tushare获取限售解禁（按月+offset分页，避免6000行截断）"""
+        import calendar
+        
         pro = self.tushare_api
+        PAGE_LIMIT = 6000  # Tushare 单次返回上限
         
         params = {}
         if ts_code:
@@ -444,46 +448,73 @@ class ShareFloatCollector(BaseCollector):
             params['ann_date'] = ann_date
         if float_date:
             params['float_date'] = float_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
         
         df = pd.DataFrame()
         
-        # 针对限售解禁，Tushare建议按月或按年分块获取
+        # 按月+offset分页获取，确保不丢失数据
         if start_date and end_date:
             try:
-                # 按年分块
                 start_year = int(start_date[:4])
+                start_month = int(start_date[4:6])
                 end_year = int(end_date[:4])
-                years = range(start_year, end_year + 1)
+                end_month = int(end_date[4:6])
                 
                 all_dfs = []
-                for year in years:
-                    p = params.copy()
-                    p['start_date'] = f"{year}0101"
-                    p['end_date'] = f"{year}1231"
+                y, m = start_year, start_month
+                while (y, m) <= (end_year, end_month):
+                    last_day = calendar.monthrange(y, m)[1]
+                    sd = f"{y}{m:02d}01"
+                    ed = f"{y}{m:02d}{last_day:02d}"
                     
-                    # 裁剪
-                    if p['start_date'] < start_date:
-                        p['start_date'] = start_date
-                    if p['end_date'] > end_date:
-                        p['end_date'] = end_date
+                    # 裁剪到用户指定范围
+                    if sd < start_date:
+                        sd = start_date
+                    if ed > end_date:
+                        ed = end_date
                     
-                    try:
-                        chunk = pro.share_float(**p)
-                        if not chunk.empty:
-                            all_dfs.append(chunk)
-                    except:
-                        pass
+                    # offset 分页
+                    offset = 0
+                    for _ in range(20):  # 最多20页，防无限循环
+                        try:
+                            p = dict(params)
+                            p['start_date'] = sd
+                            p['end_date'] = ed
+                            p['limit'] = PAGE_LIMIT
+                            p['offset'] = offset
+                            
+                            chunk = pro.share_float(**p)
+                            if chunk is not None and not chunk.empty:
+                                all_dfs.append(chunk)
+                            if chunk is None or len(chunk) < PAGE_LIMIT:
+                                break  # 本页不满，已到末尾
+                            offset += PAGE_LIMIT
+                            time.sleep(0.3)
+                        except Exception as e:
+                            logger.debug(f"share_float offset={offset} 出错: {e}")
+                            break
+                    
+                    time.sleep(0.3)
+                    # 下一个月
+                    m += 1
+                    if m > 12:
+                        m = 1
+                        y += 1
                 
                 if all_dfs:
                     df = pd.concat(all_dfs, ignore_index=True)
-            except:
+                    df = df.drop_duplicates()
+            except Exception as e:
+                logger.warning(f"按月分页获取失败，回退到单次请求: {e}")
+                params['start_date'] = start_date
+                params['end_date'] = end_date
                 df = pro.share_float(**params)
         else:
-            df = pro.share_float(**params)
+            params_call = dict(params)
+            if start_date:
+                params_call['start_date'] = start_date
+            if end_date:
+                params_call['end_date'] = end_date
+            df = pro.share_float(**params_call)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
