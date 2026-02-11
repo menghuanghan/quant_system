@@ -100,17 +100,45 @@ class MarginSummaryCollector(BaseCollector):
         """从Tushare获取融资融券汇总"""
         pro = self.tushare_api
         
-        params = {}
-        if trade_date:
-            params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        if exchange_id:
-            params['exchange_id'] = exchange_id
-        
-        df = pro.margin(**params)
+        # 如果是范围查询且未指定交易所，按交易所分别采集以避免4000条限制
+        if (start_date or end_date) and not exchange_id and not trade_date:
+            exchanges = ['SSE', 'SZSE', 'BSE']
+            all_dfs = []
+            
+            for ex in exchanges:
+                try:
+                    params = {'exchange_id': ex}
+                    if start_date:
+                        params['start_date'] = start_date
+                    if end_date:
+                        params['end_date'] = end_date
+                    
+                    df = pro.margin(**params)
+                    if not df.empty:
+                        all_dfs.append(df)
+                        logger.info(f"融资融券汇总 {ex}: {len(df)} 条记录")
+                    
+                    time.sleep(0.3)  # 频控
+                except Exception as e:
+                    logger.warning(f"获取 {ex} 融资融券汇总失败: {e}")
+            
+            if not all_dfs:
+                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+            
+            df = pd.concat(all_dfs, ignore_index=True)
+        else:
+            # 单日查询或指定了交易所
+            params = {}
+            if trade_date:
+                params['trade_date'] = trade_date
+            if start_date:
+                params['start_date'] = start_date
+            if end_date:
+                params['end_date'] = end_date
+            if exchange_id:
+                params['exchange_id'] = exchange_id
+            
+            df = pro.margin(**params)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
@@ -376,6 +404,8 @@ class MarginTargetCollector(BaseCollector):
         ts_code: Optional[str] = None,
         is_new: str = 'Y',
         mg_type: Optional[str] = None,
+        start_date: Optional[str] = None,  # 忽略，仅为兼容调度器
+        end_date: Optional[str] = None,    # 忽略，仅为兼容调度器
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -720,7 +750,10 @@ def get_margin_detail(
 def get_margin_target(
     ts_code: Optional[str] = None,
     is_new: str = 'Y',
-    mg_type: Optional[str] = None
+    mg_type: Optional[str] = None,
+    start_date: Optional[str] = None,  # 忽略，仅为兼容调度器
+    end_date: Optional[str] = None,    # 忽略，仅为兼容调度器
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取两融标的数据
@@ -729,12 +762,15 @@ def get_margin_target(
         ts_code: 证券代码
         is_new: 是否最新
         mg_type: 标的类型
+        start_date: 忽略（时间无关数据）
+        end_date: 忽略（时间无关数据）
     
     Returns:
         DataFrame: 两融标的数据
     """
     collector = MarginTargetCollector()
-    return collector.collect(ts_code=ts_code, is_new=is_new, mg_type=mg_type)
+    return collector.collect(ts_code=ts_code, is_new=is_new, mg_type=mg_type, 
+                           start_date=start_date, end_date=end_date)
 
 
 def get_slb(

@@ -442,6 +442,7 @@ FUNDAMENTAL_TASKS = [
         priority=5,
         output_file="top10_holders/{ts_code}.parquet",
         batch_size=50,
+        split_by="ts_code",
     ),
     CollectionTask(
         name="pledge",
@@ -454,6 +455,7 @@ FUNDAMENTAL_TASKS = [
         priority=6,
         output_file="pledge/{ts_code}.parquet",
         date_field="end_date",
+        split_by="ts_code",
     ),
     CollectionTask(
         name="share_float",

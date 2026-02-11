@@ -411,6 +411,8 @@ class MainBusinessCollector(BaseCollector):
         **kwargs
     ) -> pd.DataFrame:
         """从Tushare获取主营业务"""
+        import time
+        
         pro = self.tushare_api
         
         params = {'ts_code': ts_code, 'type': type}
@@ -418,6 +420,9 @@ class MainBusinessCollector(BaseCollector):
             params['period'] = period
         
         df = pro.fina_mainbz(**params)
+        
+        # 频率控制：避免触发 Tushare 限速（60次/分钟）
+        time.sleep(1.0)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
