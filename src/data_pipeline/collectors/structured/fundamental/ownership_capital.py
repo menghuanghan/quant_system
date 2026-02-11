@@ -854,7 +854,8 @@ def get_share_structure(
 def get_top10_holders(
     ts_code: str,
     period: Optional[str] = None,
-    type: str = 'all'
+    type: str = 'all',
+    **kwargs  # 接受调度器传递的额外参数（如 start_date, end_date）
 ) -> pd.DataFrame:
     """
     获取前十大股东数据
@@ -863,6 +864,7 @@ def get_top10_holders(
         ts_code: 证券代码（必填）
         period: 报告期
         type: all=全部，top10=前十大，float=流通股东
+        **kwargs: 其他参数（由调度器传入，会被忽略）
     
     Returns:
         DataFrame: 股东数据
@@ -923,7 +925,8 @@ def get_repurchase(
     ts_code: Optional[str] = None,
     ann_date: Optional[str] = None,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    **kwargs  # 接受调度器传递的额外参数
 ) -> pd.DataFrame:
     """
     获取股票回购数据
@@ -933,6 +936,7 @@ def get_repurchase(
         ann_date: 公告日期
         start_date: 开始日期
         end_date: 结束日期
+        **kwargs: 其他参数（由调度器传入，会被忽略）
     
     Returns:
         DataFrame: 回购数据
@@ -947,7 +951,8 @@ def get_dividend(
     ann_date: Optional[str] = None,
     record_date: Optional[str] = None,
     ex_date: Optional[str] = None,
-    imp_ann_date: Optional[str] = None
+    imp_ann_date: Optional[str] = None,
+    **kwargs  # 接受调度器传递的额外参数
 ) -> pd.DataFrame:
     """
     获取分红送股数据
@@ -958,6 +963,7 @@ def get_dividend(
         record_date: 股权登记日
         ex_date: 除权除息日
         imp_ann_date: 实施公告日
+        **kwargs: 其他参数（由调度器传入，会被忽略）
     
     Returns:
         DataFrame: 分红送股数据
