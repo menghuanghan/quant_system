@@ -3,7 +3,7 @@
 
 完整流程：读取DWD -> 预处理 -> 合并 -> 特征计算 -> 标签生成 -> 标准化 -> 切分 -> 输出
 
-输入：data/processed/structured/dwd/ 下的三张核心宽表
+输入：data/processed/structured/dwd/ 下的8张宽表
 输出：data/features/structured/train.parquet
 """
 

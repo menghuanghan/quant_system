@@ -2,7 +2,7 @@
 状态表预处理器
 
 处理 dwd_stock_status 表，主要包括：
-1. 交易状态最终判定（需要与价格表的 vol 结合）
+1. 交易状态最终判定（需要与价格表的 vol 结合，直接覆盖 is_trading）
 2. 风险掩码生成
 """
 
@@ -33,7 +33,7 @@ class StatusPreprocessor(BasePreprocessor):
         执行状态表预处理
         
         处理步骤：
-        1. 结合价格表的成交量，判定最终交易状态
+        1. 结合价格表的成交量，更新交易状态（直接覆盖 is_trading）
         2. 生成风险掩码（ST、新股、涨跌停等）
         
         Args:
@@ -50,14 +50,11 @@ class StatusPreprocessor(BasePreprocessor):
         original_shape = df.shape
         df = df.copy()
         
-        # 1. 结合价格表判定最终交易状态
+        # 1. 结合价格表更新交易状态（直接覆盖 is_trading）
         if price_df is not None:
-            df = self._merge_trading_status(df, price_df)
+            df = self._update_trading_status(df, price_df)
         else:
-            # 如果没有价格表，直接复制 is_trading
-            if "is_trading" in df.columns:
-                df["is_trading_final"] = df["is_trading"]
-                logger.info("  ⚠️ 未提供价格表，is_trading_final = is_trading")
+            logger.info("  ⚠️ 未提供价格表，保留原始 is_trading")
         
         # 2. 生成风险掩码
         df = self._generate_risk_masks(df)
@@ -70,37 +67,38 @@ class StatusPreprocessor(BasePreprocessor):
         
         return df
     
-    def _merge_trading_status(self, df: Any, price_df: Any) -> Any:
+    def _update_trading_status(self, df: Any, price_df: Any) -> Any:
         """
-        结合价格表的成交量判定最终交易状态
+        结合价格表的成交量更新交易状态（直接覆盖 is_trading）
         
         策略："信资金，不信标签"
-        从价格表中获取已经计算好的 is_trading_final
+        从价格表中获取 is_trading（已经过 vol > 0 判定）覆盖原始值
         """
-        logger.info("📌 Step 1: 合并价格表交易状态")
+        logger.info("📌 Step 1: 更新交易状态 (is_trading)")
         
-        # 检查价格表是否有 is_trading_final
-        if "is_trading_final" not in price_df.columns:
-            logger.warning("  ⚠️ 价格表中没有 is_trading_final，使用 vol > 0 判断")
-            # 直接计算
+        # 从价格表获取 is_trading
+        if "is_trading" not in price_df.columns:
+            logger.warning("  ⚠️ 价格表中没有 is_trading 列")
             if "vol" in price_df.columns:
+                logger.info("  📌 使用 vol > 0 计算 is_trading")
                 if self.use_gpu:
                     price_trading = price_df[["trade_date", "ts_code"]].copy()
-                    price_trading["is_trading_final"] = (price_df["vol"] > 0).astype("int8")
+                    price_trading["is_trading_new"] = (price_df["vol"] > 0).astype("int8")
                 else:
                     price_trading = price_df[["trade_date", "ts_code"]].copy()
-                    price_trading["is_trading_final"] = (price_df["vol"] > 0).astype("int8")
+                    price_trading["is_trading_new"] = (price_df["vol"] > 0).astype("int8")
             else:
-                logger.warning("  ⚠️ 价格表中没有 vol，无法判断交易状态")
-                df["is_trading_final"] = df["is_trading"] if "is_trading" in df.columns else 1
+                logger.warning("  ⚠️ 价格表中没有 vol，无法更新交易状态")
                 return df
         else:
-            price_trading = price_df[["trade_date", "ts_code", "is_trading_final"]].copy()
+            price_trading = price_df[["trade_date", "ts_code", "is_trading"]].copy()
+            price_trading = price_trading.rename(columns={"is_trading": "is_trading_new"})
         
-        # 合并到状态表
+        # 保存原始值用于统计
+        original_is_trading = df["is_trading"].copy() if "is_trading" in df.columns else None
+        
+        # 合并价格表的交易状态
         if self.use_gpu:
-            import cudf
-            # cuDF merge
             df = df.merge(
                 price_trading,
                 on=["trade_date", "ts_code"],
@@ -113,27 +111,28 @@ class StatusPreprocessor(BasePreprocessor):
                 how="left"
             )
         
-        # 填充没有匹配到的行（可能是价格表中不存在的记录）
-        if "is_trading_final" in df.columns:
+        # 用新值覆盖原值，缺失值用原值填充
+        if "is_trading_new" in df.columns:
             if "is_trading" in df.columns:
-                # 使用原始 is_trading 填充
-                null_mask = df["is_trading_final"].isna()
                 if self.use_gpu:
-                    df["is_trading_final"] = df["is_trading_final"].fillna(df["is_trading"])
+                    df["is_trading"] = df["is_trading_new"].fillna(df["is_trading"]).astype("int8")
                 else:
-                    df.loc[null_mask, "is_trading_final"] = df.loc[null_mask, "is_trading"]
+                    df["is_trading"] = df["is_trading_new"].fillna(df["is_trading"]).astype("int8")
             else:
-                df["is_trading_final"] = df["is_trading_final"].fillna(0)
+                df["is_trading"] = df["is_trading_new"].fillna(0).astype("int8")
+            
+            # 删除临时列
+            df = df.drop(columns=["is_trading_new"])
         
-        # 统计
-        if "is_trading" in df.columns and "is_trading_final" in df.columns:
+        # 统计变化
+        if original_is_trading is not None and "is_trading" in df.columns:
             if self.use_gpu:
-                diff_count = int((df["is_trading_final"] != df["is_trading"]).sum())
+                diff_count = int((df["is_trading"] != original_is_trading).sum())
             else:
-                diff_count = (df["is_trading_final"] != df["is_trading"]).sum()
+                diff_count = (df["is_trading"] != original_is_trading).sum()
             
             self.stats["trading_status_diff"] = diff_count
-            logger.info(f"  📊 与原始 is_trading 不一致: {diff_count:,} 行")
+            logger.info(f"  📊 is_trading 更新: {diff_count:,} 行发生变化")
         
         return df
     
@@ -156,9 +155,7 @@ class StatusPreprocessor(BasePreprocessor):
             tradable_conditions.append(df["is_limit_up"] == 0)
         if "is_limit_down" in df.columns:
             tradable_conditions.append(df["is_limit_down"] == 0)
-        if "is_trading_final" in df.columns:
-            tradable_conditions.append(df["is_trading_final"] == 1)
-        elif "is_trading" in df.columns:
+        if "is_trading" in df.columns:
             tradable_conditions.append(df["is_trading"] == 1)
         
         if tradable_conditions:
@@ -167,12 +164,12 @@ class StatusPreprocessor(BasePreprocessor):
                 result = tradable_conditions[0]
                 for cond in tradable_conditions[1:]:
                     result = result & cond
-                df["is_tradable"] = result.astype("int8")
+                df["is_tradable"] = result.fillna(False).astype("int8")
             else:
                 result = tradable_conditions[0]
                 for cond in tradable_conditions[1:]:
                     result = result & cond
-                df["is_tradable"] = result.astype("int8")
+                df["is_tradable"] = result.fillna(False).astype("int8")
             
             if self.use_gpu:
                 tradable_count = int(df["is_tradable"].sum())
@@ -188,10 +185,10 @@ class StatusPreprocessor(BasePreprocessor):
         # 2. 风险标记：ST 或 新股
         if "is_st" in df.columns and "is_new" in df.columns:
             if self.use_gpu:
-                df["is_risky"] = ((df["is_st"] == 1) | (df["is_new"] == 1)).astype("int8")
+                df["is_risky"] = ((df["is_st"] == 1) | (df["is_new"] == 1)).fillna(False).astype("int8")
                 risky_count = int(df["is_risky"].sum())
             else:
-                df["is_risky"] = ((df["is_st"] == 1) | (df["is_new"] == 1)).astype("int8")
+                df["is_risky"] = ((df["is_st"] == 1) | (df["is_new"] == 1)).fillna(False).astype("int8")
                 risky_count = df["is_risky"].sum()
             
             logger.info(f"  ✓ is_risky (ST或新股): {risky_count:,} 行")
@@ -199,10 +196,10 @@ class StatusPreprocessor(BasePreprocessor):
         # 3. 涨跌停标记
         if "is_limit_up" in df.columns and "is_limit_down" in df.columns:
             if self.use_gpu:
-                df["is_limit"] = ((df["is_limit_up"] == 1) | (df["is_limit_down"] == 1)).astype("int8")
+                df["is_limit"] = ((df["is_limit_up"] == 1) | (df["is_limit_down"] == 1)).fillna(False).astype("int8")
                 limit_count = int(df["is_limit"].sum())
             else:
-                df["is_limit"] = ((df["is_limit_up"] == 1) | (df["is_limit_down"] == 1)).astype("int8")
+                df["is_limit"] = ((df["is_limit_up"] == 1) | (df["is_limit_down"] == 1)).fillna(False).astype("int8")
                 limit_count = df["is_limit"].sum()
             
             logger.info(f"  ✓ is_limit (涨跌停): {limit_count:,} 行")

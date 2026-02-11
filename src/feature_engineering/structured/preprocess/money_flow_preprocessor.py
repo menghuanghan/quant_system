@@ -72,16 +72,6 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         
         return df
     
-    def _convert_amount_units(self, df: Any) -> Any:
-        """
-        [已弃用] 单位换算：万元 -> 元
-        
-        注意：此逻辑已移至 DWD 层 (money_flow_processor.py)
-        保留此方法仅为向后兼容，不再调用
-        """
-        logger.warning("⚠️ _convert_amount_units 已弃用，金额转换已在DWD层完成")
-        return df  # 直接返回，不做任何处理
-    
     def _clean_suspended_data(self, df: Any, status_df: Any) -> Any:
         """
         停牌清洗：利用状态表的 is_suspended 字段
@@ -138,7 +128,15 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         """
         logger.info("📌 Step 3: 极值检查")
         
-        amount_fields = self.config.money_flow.amount_fields
+        # 金额字段列表（DWD层已统一为元单位）
+        amount_fields = [
+            "buy_sm_amount", "sell_sm_amount",
+            "buy_md_amount", "sell_md_amount",
+            "buy_lg_amount", "sell_lg_amount",
+            "buy_elg_amount", "sell_elg_amount",
+            "net_mf_amount", "net_main_amount",
+            "block_trade_amount",
+        ]
         inf_found = 0
         
         for field in amount_fields:
@@ -169,7 +167,15 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         """
         logger.info("📌 Step 4: 缺失值填充")
         
-        amount_fields = self.config.money_flow.amount_fields
+        # 金额字段列表（DWD层已统一为元单位）
+        amount_fields = [
+            "buy_sm_amount", "sell_sm_amount",
+            "buy_md_amount", "sell_md_amount",
+            "buy_lg_amount", "sell_lg_amount",
+            "buy_elg_amount", "sell_elg_amount",
+            "net_mf_amount", "net_main_amount",
+            "block_trade_amount",
+        ]
         
         filled_count = 0
         for field in amount_fields:

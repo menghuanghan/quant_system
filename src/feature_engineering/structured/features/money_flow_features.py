@@ -18,11 +18,6 @@ logger = logging.getLogger(__name__)
 # 防止除零的小量
 EPSILON = 1e-10
 
-# [弃用] 单位转换因子
-# 从 DWD 层开始，所有金额字段已统一为元，不再需要此转换
-# 保留此变量仅为向后兼容，值设为 1.0
-UNIT_CONVERSION_FACTOR = 1.0
-
 
 class MoneyFlowFeatureGenerator:
     """
@@ -107,19 +102,19 @@ class MoneyFlowFeatureGenerator:
         # 主力净流入强度 (超大+大单)
         # 注意：从DWD层开始，所有金额字段已统一为元，无需单位转换
         if 'net_main_amount' in df.columns:
-            features['mf_main_intensity'] = df['net_main_amount'] * UNIT_CONVERSION_FACTOR / amount
+            features['mf_main_intensity'] = df['net_main_amount'] / amount
         
         # 特大单净流入强度
         if 'net_elg_amount' in df.columns:
-            features['mf_elg_intensity'] = df['net_elg_amount'] * UNIT_CONVERSION_FACTOR / amount
+            features['mf_elg_intensity'] = df['net_elg_amount'] / amount
         
         # 大单净流入强度
         if 'net_lg_amount' in df.columns:
-            features['mf_lg_intensity'] = df['net_lg_amount'] * UNIT_CONVERSION_FACTOR / amount
+            features['mf_lg_intensity'] = df['net_lg_amount'] / amount
         
         # 中单净流入强度
         if 'net_md_amount' in df.columns:
-            features['mf_md_intensity'] = df['net_md_amount'] * UNIT_CONVERSION_FACTOR / amount
+            features['mf_md_intensity'] = df['net_md_amount'] / amount
         
         # 应用特征
         for name, values in features.items():
@@ -170,7 +165,7 @@ class MoneyFlowFeatureGenerator:
         # 散户净流入强度（小单）
         # 注意：从DWD层开始，所有金额字段已统一为元，无需单位转换
         if 'net_sm_amount' in df.columns:
-            features['mf_retail_intensity'] = df['net_sm_amount'] * UNIT_CONVERSION_FACTOR / amount
+            features['mf_retail_intensity'] = df['net_sm_amount'] / amount
         
         # 散户买入占比（所有金额字段已统一为元）
         if 'buy_sm_amount' in df.columns:

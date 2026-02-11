@@ -70,6 +70,9 @@ class FundamentalPreprocessor(BasePreprocessor):
         # 5. 估值指标缺失值填充（亏损股 PE 无法计算，EP 填充为 0）
         df = self._fill_valuation_missing(df)
         
+        # 6. 丢弃原始估值字段（防止模型读取到 NaN）
+        df = self._drop_original_valuation_fields(df)
+        
         # 记录统计信息
         self.stats["original_shape"] = original_shape
         self.stats["final_shape"] = df.shape
@@ -77,16 +80,6 @@ class FundamentalPreprocessor(BasePreprocessor):
         logger.info(f"✅ 基本面表处理完成: {original_shape} -> {df.shape}")
         
         return df
-    
-    def _convert_amount_units(self, df: Any) -> Any:
-        """
-        [已弃用] 单位换算：万元 -> 元
-        
-        注意：此逻辑已移至 DWD 层 (fundamental_processor.py)
-        保留此方法仅为向后兼容，不再调用
-        """
-        logger.warning("⚠️ _convert_amount_units 已弃用，金额转换已在DWD层完成")
-        return df  # 直接返回，不做任何处理
     
     def _calculate_data_lag(self, df: Any) -> Any:
         """
@@ -295,6 +288,33 @@ class FundamentalPreprocessor(BasePreprocessor):
                 logger.info(f"  ✓ {field}: 填充 {before_null:,} 个缺失值为 0")
         
         self.stats["valuation_fill_stats"] = fill_stats
+        
+        return df
+    
+    def _drop_original_valuation_fields(self, df: Any) -> Any:
+        """
+        丢弃原始估值字段
+        
+        处理完成后，丢弃 pe_ttm, pb, ps_ttm 原始字段，
+        防止模型读取到包含 NaN 的原始数据。
+        保留已转换的 ep, bp, sp 字段。
+        """
+        logger.info("📌 Step 7: 丢弃原始估值字段")
+        
+        fields_to_drop = ["pe_ttm", "pb", "ps_ttm"]
+        dropped = []
+        
+        for field in fields_to_drop:
+            if field in df.columns:
+                df = df.drop(columns=[field])
+                dropped.append(field)
+        
+        if dropped:
+            logger.info(f"  ✓ 已丢弃: {', '.join(dropped)}")
+        else:
+            logger.info("  ✓ 无需丢弃的字段")
+        
+        self.stats["dropped_valuation_fields"] = dropped
         
         return df
     

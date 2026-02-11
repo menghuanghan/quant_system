@@ -118,22 +118,6 @@ class TradingStatusConfig:
 class MoneyFlowConfig:
     """资金流预处理配置"""
     
-    # 单位换算：万元 -> 元
-    amount_multiplier: float = 10000.0
-    
-    # 需要进行单位换算的金额字段（万元→元）
-    # 注意：rzye, rqye, rzrqye 原本就是元，不需要换算
-    amount_fields: List[str] = field(default_factory=lambda: [
-        "buy_sm_amount", "sell_sm_amount",
-        "buy_md_amount", "sell_md_amount",
-        "buy_lg_amount", "sell_lg_amount",
-        "buy_elg_amount", "sell_elg_amount",
-        "net_mf_amount",
-        "top_l_buy", "top_l_sell", "top_net_amount",  # 龙虎榜
-        "top_inst_buy", "top_inst_sell", "top_inst_net_buy",  # 机构
-        "block_trade_amount",  # 大宗交易
-    ])
-    
     # 大宗交易成交量：万股 → 手 (1万股 = 100手)
     block_trade_vol_multiplier: float = 100.0
     
@@ -223,18 +207,6 @@ class EventConfig:
 
 
 @dataclass
-class FundamentalAmountConfig:
-    """基本面金额单位换算配置"""
-    
-    # 万元 -> 元 的字段（乘数 10000）
-    wan_yuan_fields: List[str] = field(default_factory=lambda: [
-        "total_mv",           # 总市值（万元）
-        "circ_mv",            # 流通市值（万元）
-    ])
-    wan_yuan_multiplier: float = 10000.0
-
-
-@dataclass
 class PreprocessConfig:
     """预处理总配置"""
     
@@ -255,7 +227,6 @@ class PreprocessConfig:
     industry: IndustryConfig = field(default_factory=IndustryConfig)
     macro: MacroConfig = field(default_factory=MacroConfig)
     event: EventConfig = field(default_factory=EventConfig)
-    fundamental_amount: FundamentalAmountConfig = field(default_factory=FundamentalAmountConfig)
     
     # 输出文件名 - 核心表
     output_price_file: str = "preprocessed_stock_price.parquet"
