@@ -26,7 +26,7 @@ from .config import (
     DWD_OUTPUT_CONFIG,
     PROCESSING_CONFIG,
 )
-from .industry_mapping import get_sw_l1_from_industry, INDUSTRY_TO_SW_L1_MAP
+from .industry_mapping import get_sw_l1_from_industry, INDUSTRY_TO_SW_L1_MAP, SW_L1_NAME_TO_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +292,26 @@ class IndustryProcessor(BaseProcessor):
         # 清理临时列
         result = result.drop(columns=['_inferred_sw_l1'], errors='ignore')
         
+        # 6.5 使用 sw_l1_name 反查 sw_l1_code（填充映射推断未覆盖的部分）
+        logger.info("使用 sw_l1_name 反查 sw_l1_code...")
+        if 'sw_l1_code' in result.columns and 'sw_l1_name' in result.columns:
+            name_to_code_df = cudf.DataFrame({
+                'sw_l1_name': list(SW_L1_NAME_TO_CODE.keys()),
+                '_inferred_sw_l1_code': list(SW_L1_NAME_TO_CODE.values())
+            })
+            result = result.merge(name_to_code_df, on='sw_l1_name', how='left')
+            
+            # 仅填充 sw_l1_code 为空的行
+            code_needs_fill = result['sw_l1_code'].isna()
+            has_inferred_code = result['_inferred_sw_l1_code'].notna()
+            result['sw_l1_code'] = result['sw_l1_code'].where(
+                ~(code_needs_fill & has_inferred_code),
+                result['_inferred_sw_l1_code']
+            )
+            n_filled = int((code_needs_fill & has_inferred_code).sum())
+            logger.info(f"反查填充了 {n_filled} 条 sw_l1_code 记录")
+            result = result.drop(columns=['_inferred_sw_l1_code'], errors='ignore')
+        
         # 最终填充剩余缺失值
         sw_name_cols = ['sw_l1_name', 'sw_l2_name', 'sw_l3_name']
         for col in sw_name_cols:
@@ -353,7 +373,10 @@ class IndustryProcessor(BaseProcessor):
         # 9. 排序
         result = result.sort_values(['trade_date', 'ts_code']).reset_index(drop=True)
         
-        # 10. 输出统计
+        # 10. float64 → float32（节省内存）
+        result = self.convert_float64_to_float32(result)
+        
+        # 11. 输出统计
         classified_count = (result['industry'] != '未分类').sum()
         total_count = len(result)
         logger.info(f"行业分类宽表处理完成，共 {total_count} 行")

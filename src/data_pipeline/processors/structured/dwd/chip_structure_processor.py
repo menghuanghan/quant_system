@@ -74,6 +74,16 @@ class ChipStructureProcessor(BaseProcessor):
         # 过滤日期范围（使用ann_date进行PIT过滤）
         df = df[df['ann_date'] <= self.end_date]
         
+        # ====== PIT修复：过滤end_date > ann_date的脏数据 ======
+        # 财报期（end_date）必须早于或等于公告日（ann_date），否则是数据错误
+        n_before = len(df)
+        df = df[df['end_date'] <= df['ann_date']]
+        n_after = len(df)
+        if n_before > n_after:
+            logger.warning(
+                f"PIT过滤: 移除了 {n_before - n_after} 行 end_date > ann_date 的脏数据"
+            )
+        
         logger.info(f"加载十大股东数据完成，共 {len(df)} 行")
         return df
     
@@ -93,15 +103,53 @@ class ChipStructureProcessor(BaseProcessor):
         # 过滤日期范围
         df = df[df['ann_date'] <= self.end_date]
         
+        # ====== PIT修复：过滤end_date > ann_date的脏数据 ======
+        n_before = len(df)
+        df = df[df['end_date'] <= df['ann_date']]
+        n_after = len(df)
+        if n_before > n_after:
+            logger.warning(
+                f"PIT过滤: 移除了 {n_before - n_after} 行 end_date > ann_date 的脏数据"
+            )
+        
         logger.info(f"加载股本结构数据完成，共 {len(df)} 行")
         return df
     
     def _aggregate_top10_holders(self, df: cudf.DataFrame) -> cudf.DataFrame:
-        """汇总十大股东数据"""
+        """汇总十大股东数据
+        
+        注意：Tushare top10_holders 接口同时返回"前十大股东"和"前十大流通股东"两组数据，
+        每期通常有 20 行记录。必须先过滤只保留"前十大股东"，否则 hold_ratio sum 会翻倍。
+        """
         if len(df) == 0:
             return cudf.DataFrame()
         
         logger.info("汇总十大股东数据...")
+        
+        # ── 关键修复：只保留"前十大股东"，排除"前十大流通股东" ──
+        if 'holder_type' in df.columns:
+            df['holder_type'] = df['holder_type'].fillna('')
+            
+            # 检查是否存在 前十大股东/前十大流通股东 分类
+            has_classification = df['holder_type'].str.contains('前十大', regex=False).any()
+            
+            if has_classification:
+                n_before = len(df)
+                df_total = df[df['holder_type'].str.contains('前十大股东', regex=False) & 
+                             ~df['holder_type'].str.contains('流通', regex=False)]
+                n_after = len(df_total)
+                logger.info(
+                    f"过滤十大股东类型: {n_before} → {n_after} 行 "
+                    f"(排除了 {n_before - n_after} 行'前十大流通股东'记录)"
+                )
+                df = df_total
+            else:
+                # 旧格式数据无 holder_type 分类 → 按股票/报告期只取前10名
+                logger.info("holder_type 无'前十大'分类标签，按持股比例取前10名")
+                df = df.sort_values(['ts_code', 'ann_date', 'end_date', 'hold_ratio'], 
+                                   ascending=[True, True, True, False])
+                df['_rank'] = df.groupby(['ts_code', 'ann_date', 'end_date']).cumcount()
+                df = df[df['_rank'] < 10].drop(columns=['_rank'])
         
         # 按股票和报告期汇总
         agg_df = df.groupby(['ts_code', 'ann_date', 'end_date']).agg({
@@ -114,6 +162,14 @@ class ChipStructureProcessor(BaseProcessor):
             'hold_amount': 'top10_hold_amount',
         })
         
+        # ── 安全钳：top10_hold_ratio 理论上不应超过 100% ──
+        overflow = (agg_df['top10_hold_ratio'] > 100).sum()
+        if overflow > 0:
+            logger.warning(
+                f"仍有 {overflow} 条记录 top10_hold_ratio > 100%，执行 clip(0, 100)"
+            )
+            agg_df['top10_hold_ratio'] = agg_df['top10_hold_ratio'].clip(upper=100.0)
+        
         # 计算第一大股东持股比例
         # 按持股比例排序，取最大值
         top1_df = df.sort_values(['ts_code', 'ann_date', 'hold_ratio'], ascending=[True, True, False])
@@ -124,11 +180,8 @@ class ChipStructureProcessor(BaseProcessor):
         
         agg_df = agg_df.merge(top1_df, on=['ts_code', 'ann_date'], how='left')
         
-        # 计算机构持股比例（holder_type = 'I' 或类似标识）
+        # 计算机构持股比例
         if 'holder_type' in df.columns:
-            # cuDF限制：str.contains的case=False只有在regex=False时才支持
-            # 改用多次匹配或者转小写后匹配
-            df['holder_type'] = df['holder_type'].fillna('')
             holder_type_lower = df['holder_type'].str.lower()
             
             # 使用多个条件判断机构类型
@@ -320,6 +373,9 @@ class ChipStructureProcessor(BaseProcessor):
         
         # 7. 排序
         result = result.sort_values(['trade_date', 'ts_code']).reset_index(drop=True)
+        
+        # 8. float64 → float32（节省内存）
+        result = self.convert_float64_to_float32(result)
         
         logger.info(f"筹码结构宽表处理完成，共 {len(result)} 行")
         return result

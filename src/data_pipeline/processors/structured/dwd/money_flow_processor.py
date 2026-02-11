@@ -104,6 +104,17 @@ class MoneyFlowProcessor(BaseProcessor):
         ]
         df = df[[c for c in cols if c in df.columns]]
         
+        # ====== 金额单位转换（万元 → 元）======
+        # Tushare money_flow 的金额字段单位是万元
+        amount_cols = [
+            'buy_sm_amount', 'sell_sm_amount',
+            'buy_md_amount', 'sell_md_amount',
+            'buy_lg_amount', 'sell_lg_amount',
+            'buy_elg_amount', 'sell_elg_amount',
+            'net_mf_amount'
+        ]
+        df = self.convert_wan_yuan_to_yuan(df, amount_cols)
+        
         logger.info(f"加载资金流向数据完成，共 {len(df)} 行")
         return df
     
@@ -195,10 +206,15 @@ class MoneyFlowProcessor(BaseProcessor):
         """
         加载沪深港通资金流向数据（市场级数据）
         
-        字段说明：
-            - hgt: 沪股通净流入（亿元）
-            - sgt: 深股通净流入（亿元）
-            - north_money: 北向资金总净流入（亿元）
+        单位自适应转换：
+            - Tushare原始数据在 2024-08-19 前为"百万元"，之后变为"万元"
+            - 使用阈值判断（|x| < 50,000 → 百万元；|x| >= 50,000 → 万元）
+            - 统一转换为元
+        
+        字段说明（转换后，单位：元）：
+            - hgt: 沪股通净流入
+            - sgt: 深股通净流入
+            - north_money: 北向资金总净流入
             - ggt_ss: 港股通(沪)净流入
             - ggt_sz: 港股通(深)净流入
             - south_money: 南向资金总净流入
@@ -213,6 +229,30 @@ class MoneyFlowProcessor(BaseProcessor):
         
         df = self.normalize_date_column(df, 'trade_date')
         df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
+        
+        # 自适应单位转换：以 north_money 为参考列检测单位
+        # |x| < 50,000 → 百万元 → ×1,000,000 → 元
+        # |x| >= 50,000 → 万元  → ×10,000   → 元
+        HSGT_UNIT_THRESHOLD = 50000.0
+        money_cols = ['hgt', 'sgt', 'north_money', 'ggt_ss', 'ggt_sz', 'south_money']
+        money_cols = [c for c in money_cols if c in df.columns]
+        
+        # 用 north_money 判断每行的单位（更鲁棒）
+        ref_col = 'north_money' if 'north_money' in df.columns else money_cols[0]
+        is_wan = df[ref_col].abs() >= HSGT_UNIT_THRESHOLD  # True=万元, False=百万元
+        
+        baiwan_count = int((~is_wan).sum())
+        wan_count = int(is_wan.sum())
+        logger.info(f"HSGT单位检测: {baiwan_count} 行百万元, {wan_count} 行万元")
+        
+        for col in money_cols:
+            if col in df.columns:
+                # 百万元 → 元: ×1,000,000; 万元 → 元: ×10,000
+                col_vals = df[col].fillna(0)
+                baiwan_converted = col_vals * 1_000_000  # 百万元转元
+                wan_converted = col_vals * 10_000         # 万元转元
+                # where(cond, other): 保留cond=True的值，cond=False用other替换
+                df[col] = baiwan_converted.where(~is_wan, wan_converted)
         
         # 选择并重命名字段
         rename_map = {
@@ -231,7 +271,7 @@ class MoneyFlowProcessor(BaseProcessor):
         cols = ['trade_date'] + [v for v in rename_map.values() if v in df.columns]
         df = df[cols]
         
-        logger.info(f"加载沪深港通资金流向完成，共 {len(df)} 行")
+        logger.info(f"加载沪深港通资金流向完成，共 {len(df)} 行（单位已统一为元）")
         return df
     
     def _load_block_trade(self) -> cudf.DataFrame:
@@ -269,6 +309,10 @@ class MoneyFlowProcessor(BaseProcessor):
         agg_df.columns = ['trade_date', 'ts_code', 'block_trade_amount', 'block_trade_vol', 
                           'block_trade_avg_price', 'block_trade_count']
         
+        # ====== 金额单位转换（万元 → 元）======
+        # Tushare block_trade 的金额字段单位是万元
+        agg_df = self.convert_wan_yuan_to_yuan(agg_df, ['block_trade_amount'])
+        
         # 计算加权平均溢价率：需要当日收盘价，稍后在合并时计算
         
         logger.info(f"加载大宗交易数据完成，共 {len(agg_df)} 行")
@@ -293,6 +337,20 @@ class MoneyFlowProcessor(BaseProcessor):
             df['net_md_amount'] = df['buy_md_amount'].fillna(0) - df['sell_md_amount'].fillna(0)
         if 'buy_sm_amount' in df.columns and 'sell_sm_amount' in df.columns:
             df['net_sm_amount'] = df['buy_sm_amount'].fillna(0) - df['sell_sm_amount'].fillna(0)
+        
+        # ======= 修复: 重新计算 net_mf_amount =======
+        # Tushare 原始 net_mf_amount 口径与 buy/sell_*_amount 不一致
+        # 统一使用分档汇总计算：净流入 = ∑买入 - ∑卖出
+        required_cols = ['buy_sm_amount', 'sell_sm_amount', 'buy_md_amount', 'sell_md_amount',
+                        'buy_lg_amount', 'sell_lg_amount', 'buy_elg_amount', 'sell_elg_amount']
+        if all(c in df.columns for c in required_cols):
+            df['net_mf_amount'] = (
+                df['buy_sm_amount'].fillna(0) + df['buy_md_amount'].fillna(0) + 
+                df['buy_lg_amount'].fillna(0) + df['buy_elg_amount'].fillna(0)
+                - df['sell_sm_amount'].fillna(0) - df['sell_md_amount'].fillna(0)
+                - df['sell_lg_amount'].fillna(0) - df['sell_elg_amount'].fillna(0)
+            )
+            logger.info("已重新计算 net_mf_amount = ∑(买入 - 卖出)")
         
         # 散户资金（小单+中单）
         if 'buy_sm_amount' in df.columns and 'buy_md_amount' in df.columns:
@@ -443,6 +501,9 @@ class MoneyFlowProcessor(BaseProcessor):
         
         # 7. 排序
         result = result.sort_values(['trade_date', 'ts_code']).reset_index(drop=True)
+        
+        # 8. float64 → float32（节省内存）
+        result = self.convert_float64_to_float32(result)
         
         logger.info(f"资金博弈宽表处理完成，共 {len(result)} 行")
         return result

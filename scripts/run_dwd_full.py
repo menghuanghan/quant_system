@@ -501,8 +501,8 @@ def main():
     
     parser.add_argument(
         '--start-date',
-        default='2021-01-01',
-        help='开始日期 (YYYY-MM-DD，默认: 2021-01-01)'
+        default='2019-01-01',
+        help='开始日期 (YYYY-MM-DD，默认: 2019-01-01)'
     )
     
     parser.add_argument(

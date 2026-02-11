@@ -7,10 +7,11 @@
 1. 极端值处理（Winsorization/Clipping）- 防止极端值压扁正常数据分布
 2. 缺失值处理（倒数法）- PE→EP, PB→BP, PS→SP
 3. 交易状态修正 - is_trading_final = (vol > 0) | (is_trading == 1)
-4. 单位统一 - 所有金额字段统一为元
-5. 数据时滞过滤 - lag_days > 180 时标记为 NaN
+4. 数据时滞过滤 - lag_days > 180 时标记为 NaN
 
 注意：
+- 金额单位统一已在 DWD 层完成（所有金额字段已转换为元）
+- 数据类型压缩已在 DWD 层完成（float64 → float32）
 - Preprocess 阶段不做 Log 变换（保持原始物理意义）
 - Log 变换应在 Feature Transformation 阶段进行
 

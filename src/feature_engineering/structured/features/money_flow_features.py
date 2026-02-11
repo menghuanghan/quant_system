@@ -7,7 +7,7 @@
 - 散户情绪 (Retail Sentiment)
 - 北向资金偏好 (Northbound Preference)
 
-所有比率类特征使用 amount 作为分母，已预处理为元单位。
+注意：DWD层已统一所有金额字段为"元"，无需额外单位转换。
 """
 
 import logging
@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 # 防止除零的小量
 EPSILON = 1e-10
 
-# 单位转换：万元 -> 元
-# 资金流字段（net_main_amount, hsgt_north 等）为万元单位
-# 成交额 amount 为元单位，需要将分子乘以 10000 对齐
-UNIT_CONVERSION_FACTOR = 10000.0
+# [弃用] 单位转换因子
+# 从 DWD 层开始，所有金额字段已统一为元，不再需要此转换
+# 保留此变量仅为向后兼容，值设为 1.0
+UNIT_CONVERSION_FACTOR = 1.0
 
 
 class MoneyFlowFeatureGenerator:
@@ -105,7 +105,7 @@ class MoneyFlowFeatureGenerator:
         features = {}
         
         # 主力净流入强度 (超大+大单)
-        # 注意：net_main_amount 为万元单位，amount 为元单位，需乘以 10000 对齐
+        # 注意：从DWD层开始，所有金额字段已统一为元，无需单位转换
         if 'net_main_amount' in df.columns:
             features['mf_main_intensity'] = df['net_main_amount'] * UNIT_CONVERSION_FACTOR / amount
         
@@ -168,15 +168,15 @@ class MoneyFlowFeatureGenerator:
         features = {}
         
         # 散户净流入强度（小单）
-        # 注意：net_sm_amount 为万元单位，需乘以 10000 对齐
+        # 注意：从DWD层开始，所有金额字段已统一为元，无需单位转换
         if 'net_sm_amount' in df.columns:
             features['mf_retail_intensity'] = df['net_sm_amount'] * UNIT_CONVERSION_FACTOR / amount
         
-        # 散户买入占比（buy_sm_amount 已在预处理中换算为元，无需再乘）
+        # 散户买入占比（所有金额字段已统一为元）
         if 'buy_sm_amount' in df.columns:
             features['mf_retail_buy_ratio'] = df['buy_sm_amount'] / amount
         
-        # 散户卖出占比（sell_sm_amount 已在预处理中换算为元，无需再乘）
+        # 散户卖出占比（所有金额字段已统一为元）
         if 'sell_sm_amount' in df.columns:
             features['mf_retail_sell_ratio'] = df['sell_sm_amount'] / amount
         
@@ -197,12 +197,12 @@ class MoneyFlowFeatureGenerator:
         注意：hsgt_north 是市场级数据（当日北向资金总净流入），
         非个股级！用于捕捉宏观资金情绪。
         
-        - mf_north_net: 北向资金净流入原始值（万元），市场级
+        - mf_north_net: 北向资金净流入原始值（元），市场级
         - mf_north_hold_ratio: 北向持股占流通市值比例（个股级，如有）
         """
         features = {}
         
-        # 北向资金净流入原始值（万元）- 市场级宏观情绪
+        # 北向资金净流入原始值（元）- 市场级宏观情绪
         if 'hsgt_north' in df.columns:
             features['mf_north_net'] = df['hsgt_north']
         

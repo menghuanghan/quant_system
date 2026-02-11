@@ -142,6 +142,10 @@ class FundamentalProcessor(BaseProcessor):
         df = self.normalize_date_column(df, 'trade_date')
         df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
         
+        # ====== 金额单位转换（万元 → 元）======
+        # Tushare daily_basic 的市值字段单位是万元
+        df = self.convert_wan_yuan_to_yuan(df, ['total_mv', 'circ_mv'])
+        
         logger.info(f"加载每日基本指标数据完成，共 {len(df)} 行")
         return df
     
@@ -435,10 +439,25 @@ class FundamentalProcessor(BaseProcessor):
         df = df[existing_columns]
         df = df.sort_values(['trade_date', 'ts_code'])
         
+        # 4.5 市值逻辑修正: total_mv < circ_mv 是数据源精度问题
+        # 当总市值小于流通市值时，修正 total_mv = circ_mv
+        if 'total_mv' in df.columns and 'circ_mv' in df.columns:
+            invalid_mask = df['total_mv'] < df['circ_mv']
+            n_invalid = int(invalid_mask.sum())
+            if n_invalid > 0:
+                logger.warning(
+                    f"市值逻辑修正: 发现 {n_invalid} 行 total_mv < circ_mv，已修正"
+                )
+                # 使用 cuDF 原生条件赋值（避免 cupy reducer 的 GPU 兼容性问题）
+                df['total_mv'] = df['total_mv'].where(~invalid_mask, df['circ_mv'])
+        
         # 5. 按 start_date 过滤输出（骨架表包含完整历史用于ffill，输出只保留目标日期范围）
         logger.info(f"过滤输出日期范围: {self.start_date} ~ {self.end_date}")
         df = df[(df['trade_date'] >= self.start_date) & (df['trade_date'] <= self.end_date)]
         logger.info(f"过滤后数据行数: {len(df)}")
+        
+        # 6. float64 → float32（节省内存）
+        df = self.convert_float64_to_float32(df)
         
         return df
     

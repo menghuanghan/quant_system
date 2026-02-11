@@ -199,7 +199,10 @@ class StatusProcessor(BaseProcessor):
             df['limit_ratio'] = df['limit_ratio'].where(~mask, ratio)
         
         # 新股无限制期设为100%
-        df['limit_ratio'] = df['limit_ratio'].where(df['is_new_no_limit'] == 0, 1.0)
+        # 修复：只有明确 is_new_no_limit == 1 时才设为1.0
+        # 使用 mask + loc 模式，避免 where() 在 NaN 条件下的歧义行为
+        new_no_limit_mask = df['is_new_no_limit'] == 1
+        df.loc[new_no_limit_mask, 'limit_ratio'] = 1.0
         
         df = df.drop(columns=['no_limit_days'])
         
@@ -323,6 +326,19 @@ class StatusProcessor(BaseProcessor):
         existing_columns = [col for col in output_columns if col in df.columns]
         df = df[existing_columns]
         df = df.sort_values(['trade_date', 'ts_code'])
+        
+        # 7.5 主键去重（修复重复记录问题）
+        # 某些情况下骨架表与多数据源合并可能产生重复
+        n_before = len(df)
+        df = df.drop_duplicates(subset=['trade_date', 'ts_code'], keep='last')
+        n_after = len(df)
+        if n_before > n_after:
+            logger.warning(
+                f"主键去重: 移除了 {n_before - n_after} 行重复的 (trade_date, ts_code) 记录"
+            )
+        
+        # 8. float64 → float32（节省内存）
+        df = self.convert_float64_to_float32(df)
         
         return df
     

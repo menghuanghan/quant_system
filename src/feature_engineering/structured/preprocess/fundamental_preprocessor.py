@@ -34,14 +34,16 @@ class FundamentalPreprocessor(BasePreprocessor):
         执行基本面表预处理
         
         处理步骤：
-        0. 单位换算（万元→元）
         1. 计算数据时滞
         2. 倒数变换（估值指标）
         3. 分位数去极值
         4. 时滞数据过滤
+        5. 估值指标缺失值填充
+        
+        注意：金额单位转换已在 DWD 层完成（total_mv, circ_mv 已统一为元）
         
         Args:
-            df: 输入的基本面表 DataFrame
+            df: 输入的基本面表 DataFrame（金额字段已统一为元）
             
         Returns:
             处理后的 DataFrame
@@ -53,10 +55,7 @@ class FundamentalPreprocessor(BasePreprocessor):
         original_shape = df.shape
         df = df.copy()
         
-        # 0. 单位换算（万元→元）
-        df = self._convert_amount_units(df)
-        
-        # 1. 计算数据时滞
+        # 1. 计算数据时滞（金额单位转换已在DWD层完成）
         df = self._calculate_data_lag(df)
         
         # 2. 倒数变换（估值指标）
@@ -81,27 +80,13 @@ class FundamentalPreprocessor(BasePreprocessor):
     
     def _convert_amount_units(self, df: Any) -> Any:
         """
-        单位换算：万元 -> 元
+        [已弃用] 单位换算：万元 -> 元
         
-        处理字段：total_mv, circ_mv
+        注意：此逻辑已移至 DWD 层 (fundamental_processor.py)
+        保留此方法仅为向后兼容，不再调用
         """
-        logger.info("📌 Step 0: 单位换算 (万元→元)")
-        
-        amount_config = self.config.fundamental_amount
-        converted_count = 0
-        
-        for col in amount_config.wan_yuan_fields:
-            if col in df.columns:
-                df[col] = df[col] * amount_config.wan_yuan_multiplier
-                converted_count += 1
-                logger.info(f"  ✓ {col}: ×{amount_config.wan_yuan_multiplier:.0f}")
-        
-        if converted_count == 0:
-            logger.warning("  ⚠️ 无可换算字段")
-        else:
-            self.stats["unit_converted_fields"] = converted_count
-        
-        return df
+        logger.warning("⚠️ _convert_amount_units 已弃用，金额转换已在DWD层完成")
+        return df  # 直接返回，不做任何处理
     
     def _calculate_data_lag(self, df: Any) -> Any:
         """

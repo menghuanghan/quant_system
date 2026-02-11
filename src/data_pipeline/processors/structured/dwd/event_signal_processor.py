@@ -22,6 +22,7 @@ from typing import Optional, Set
 
 import cudf
 import cupy as cp
+import pandas as pd
 
 from .base import BaseProcessor
 from .config import (
@@ -276,8 +277,23 @@ class EventSignalProcessor(BaseProcessor):
         return result
     
     def _process_share_float(self, df: cudf.DataFrame, skeleton: cudf.DataFrame) -> cudf.DataFrame:
-        """处理解禁事件"""
+        """处理解禁事件
+        
+        PIT修复（v2）：days_to_unlock 只考虑已公告（ann_date <= trade_date）的解禁事件
+        
+        逻辑说明：
+        1. is_unlock_day: 标记解禁实际发生日期（float_date），用于事后分析
+        2. days_to_unlock: 只有在公告日（ann_date）之后才能"看到"该解禁事件
+           - 在 ann_date 之前: days_to_unlock = -1（不知道有这个解禁）
+           - 在 ann_date 之后: days_to_unlock = 距离 float_date 的交易日数
+        """
+        MIN_SHARE_FLOAT_ROWS = 500  # 低于此阈值认为数据不充分
+        
         if len(df) == 0:
+            logger.warning(
+                "解禁数据 (share_float) 为空，days_to_unlock 等字段将全为默认值。"
+                "请检查数据采集任务 'share_float' 是否正常执行。"
+            )
             return skeleton.assign(
                 is_unlock_day=0,
                 unlock_share=0.0,
@@ -286,18 +302,30 @@ class EventSignalProcessor(BaseProcessor):
                 in_unlock_window=0
             )
         
+        if len(df) < MIN_SHARE_FLOAT_ROWS:
+            logger.warning(
+                f"解禁数据 (share_float) 仅 {len(df)} 行，远低于预期 "
+                f"（阈值 {MIN_SHARE_FLOAT_ROWS}），days_to_unlock 等字段可能不准确。"
+                f"建议重新采集: python scripts/run_full_collection.py "
+                f"--domains fundamental --tasks share_float"
+            )
+        
         logger.info("处理解禁事件...")
         
-        # 关键修复：映射到交易日
+        # =============================================
+        # 1. 处理解禁日标记（is_unlock_day）- 使用 float_date
+        # =============================================
         df = self._map_date_to_trade_date(df, 'float_date')
+        # 保存 float_date 映射结果，避免后续被覆盖
+        df['float_trade_date'] = df['mapped_trade_date'].copy()
         
-        # 按股票-交易日汇总（使用映射后的日期）
-        float_agg = df.groupby(['ts_code', 'mapped_trade_date']).agg({
+        # 按股票-交易日汇总
+        float_agg = df.groupby(['ts_code', 'float_trade_date']).agg({
             'float_share': 'sum',
             'float_ratio': 'sum'
         }).reset_index()
         float_agg = float_agg.rename(columns={
-            'mapped_trade_date': 'trade_date',
+            'float_trade_date': 'trade_date',
             'float_share': 'unlock_share',
             'float_ratio': 'unlock_ratio'
         })
@@ -308,22 +336,169 @@ class EventSignalProcessor(BaseProcessor):
         result['unlock_share'] = result['unlock_share'].fillna(0.0)
         result['unlock_ratio'] = result['unlock_ratio'].fillna(0.0)
         
-        # 计算距离下次解禁天数（简化实现）
-        result['days_to_unlock'] = -1  # -1 表示无近期解禁
+        # =============================================
+        # 2. 计算 days_to_unlock（PIT 合规版本）
+        #    只有 ann_date <= trade_date 的解禁才"可见"
+        # =============================================
+        logger.info("计算 days_to_unlock（PIT 合规）...")
         
-        # 解禁窗口（解禁前后各15天）
+        # 将 ann_date 也映射到交易日（取下一个交易日）
+        df = self._map_date_to_trade_date(df, 'ann_date')
+        df['ann_trade_date'] = df['mapped_trade_date'].copy()
+        
+        # 构建解禁事件表：每个事件有 (ts_code, ann_trade_date, float_trade_date)
+        unlock_events = df[['ts_code', 'ann_trade_date', 'float_trade_date']].drop_duplicates()
+        
+        # 构建交易日序号映射
+        trade_dates = sorted(skeleton['trade_date'].unique().to_arrow().to_pylist())
+        date_to_pos = {d: i for i, d in enumerate(trade_dates)}
+        min_date = trade_dates[0]  # 骨架表最早日期
+        
+        # 为 result 添加序号
+        result = result.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+        result['_trade_pos'] = result['trade_date'].to_pandas().map(date_to_pos).values
+        
+        # 为解禁事件添加序号
+        # 关键修复：对于 ann_date 在骨架表之前的事件，将 _ann_pos 设为 -1（始终可见）
+        unlock_events_pd = unlock_events.to_pandas()
+        unlock_events_pd['_ann_pos'] = unlock_events_pd['ann_trade_date'].map(date_to_pos)
+        unlock_events_pd['_float_pos'] = unlock_events_pd['float_trade_date'].map(date_to_pos)
+        
+        # 如果 ann_trade_date < min_date 或不在字典中，设为 -1（始终可见）
+        is_early_announce = (unlock_events_pd['_ann_pos'].isna()) | (unlock_events_pd['ann_trade_date'] < min_date)
+        unlock_events_pd.loc[is_early_announce, '_ann_pos'] = -1
+        
+        # float_date 不在骨架表范围内的事件直接跳过（无效事件）
+        unlock_events_pd = unlock_events_pd.dropna(subset=['_float_pos'])
+        unlock_events_pd['_ann_pos'] = unlock_events_pd['_ann_pos'].astype(int)
+        unlock_events_pd['_float_pos'] = unlock_events_pd['_float_pos'].astype(int)
+        
+        # 统计历史公告
+        hist_announce = (unlock_events_pd['_ann_pos'] == -1).sum()
+        if hist_announce > 0:
+            logger.info(f"  历史公告（ann_date 在骨架表之前）: {hist_announce} 条，始终可见")
+        
+        # 初始化 days_to_unlock 为 -1（无解禁预警）
+        result['days_to_unlock'] = -1
+        
+        # =============================================
+        # 向量化计算 days_to_unlock（性能优化版本）
+        # 使用 numba JIT + numpy 广播机制
+        # =============================================
+        import numpy as np
+        from numba import njit, prange
+        
+        @njit(parallel=True, cache=True)
+        def _compute_days_to_unlock_numba(trade_positions, ann_positions, float_positions):
+            """
+            Numba JIT 加速版：计算每个交易日到最近可见解禁的天数
+            
+            trade_positions: shape (N,) - 交易日序号
+            ann_positions: shape (M,) - 解禁公告日序号 (-1 表示始终可见)
+            float_positions: shape (M,) - 解禁日序号
+            
+            返回: shape (N,) - 每个交易日的 days_to_unlock (-1 表示无可见解禁)
+            """
+            N = len(trade_positions)
+            M = len(float_positions)
+            
+            result = np.full(N, -1, dtype=np.int32)
+            
+            if M == 0:
+                return result
+            
+            # 并行处理每个交易日
+            for i in prange(N):
+                trade_pos = trade_positions[i]
+                min_days = np.int32(2147483647)  # INT_MAX
+                
+                # 遍历所有解禁事件，找最近的可见解禁
+                for j in range(M):
+                    ann_pos = ann_positions[j]
+                    float_pos = float_positions[j]
+                    
+                    # 可见性条件：ann_pos <= trade_pos（已公告）且 float_pos >= trade_pos（未来解禁）
+                    if ann_pos <= trade_pos and float_pos >= trade_pos:
+                        days = float_pos - trade_pos
+                        if days < min_days:
+                            min_days = days
+                
+                if min_days != 2147483647:
+                    result[i] = min_days
+            
+            return result
+        
+        # 按股票分组处理（避免全量笛卡尔积内存爆炸）
+        stocks = result['ts_code'].unique().to_arrow().to_pylist()
+        result_pd = result[['ts_code', '_trade_pos']].to_pandas()
+        
+        # 预分配结果数组
+        days_to_unlock_all = np.full(len(result_pd), -1, dtype=np.int32)
+        
+        # 为加速查找，提前建立索引
+        result_pd_indexed = result_pd.reset_index()
+        stock_groups = result_pd_indexed.groupby('ts_code')
+        event_groups = unlock_events_pd.groupby('ts_code')
+        
+        logger.info(f"  Numba JIT 并行处理 {len(stocks)} 只股票的 days_to_unlock...")
+        
+        # 预热 numba JIT（第一次调用会编译）
+        _warmup = _compute_days_to_unlock_numba(
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            np.array([0], dtype=np.int32)
+        )
+        
+        for ts_code in stocks:
+            # 获取该股票在结果表中的索引和交易日序号
+            stock_rows = stock_groups.get_group(ts_code)
+            indices = stock_rows['index'].values
+            trade_positions = stock_rows['_trade_pos'].values.astype(np.int32)
+            
+            # 获取该股票的解禁事件
+            if ts_code not in event_groups.groups:
+                continue  # 无解禁事件，保持 -1
+            
+            stock_events = event_groups.get_group(ts_code)
+            ann_positions = stock_events['_ann_pos'].values.astype(np.int32)
+            float_positions = stock_events['_float_pos'].values.astype(np.int32)
+            
+            # 向量化计算（无内层循环）
+            dtu = _compute_days_to_unlock_numba(trade_positions, ann_positions, float_positions)
+            
+            # 写入结果
+            days_to_unlock_all[indices] = dtu
+        
+        result['days_to_unlock'] = cudf.Series(days_to_unlock_all).astype('int32')
+        
+        # 清理临时列
+        result = result.drop(columns=['_trade_pos'], errors='ignore')
+        
+        # =============================================
+        # 3. 解禁窗口（解禁前后各15天）- 也使用 PIT 逻辑
+        # =============================================
         result = result.sort_values(['ts_code', 'trade_date'])
         
-        # 使用cumsum + shift方式实现窗口检测
+        # in_unlock_window: 距离解禁 <= 15 天（包括解禁前后）
+        # 解禁前：days_to_unlock 在 [0, 15] 区间
+        # 解禁后：需要另外处理
+        result['pre_unlock_window'] = ((result['days_to_unlock'] >= 0) & 
+                                        (result['days_to_unlock'] <= 15)).astype('int32')
+        
+        # 解禁后窗口：使用 cumsum + shift（解禁发生后15天内）
         result['cum_unlock'] = result.groupby('ts_code')['is_unlock_day'].cumsum()
         result['cum_unlock_15d_ago'] = result.groupby('ts_code')['cum_unlock'].shift(15).fillna(0)
-        result['unlock_15d_count'] = result['cum_unlock'] - result['cum_unlock_15d_ago']
+        result['post_unlock_count'] = result['cum_unlock'] - result['cum_unlock_15d_ago']
+        result['post_unlock_window'] = (result['post_unlock_count'] > 0).astype('int32')
         
-        result['in_unlock_window'] = ((result['unlock_15d_count'] > 0) | (result['is_unlock_day'] == 1)).astype('int32')
-        result = result.drop(columns=['cum_unlock', 'cum_unlock_15d_ago', 'unlock_15d_count'])
+        result['in_unlock_window'] = ((result['pre_unlock_window'] == 1) | 
+                                       (result['post_unlock_window'] == 1)).astype('int32')
+        result = result.drop(columns=['pre_unlock_window', 'cum_unlock', 'cum_unlock_15d_ago', 
+                                       'post_unlock_count', 'post_unlock_window'])
         
         matched = (result['is_unlock_day'] == 1).sum()
-        logger.info(f"解禁事件处理完成，捕获 {matched} 条记录")
+        pit_visible = (result['days_to_unlock'] >= 0).sum()
+        logger.info(f"解禁事件处理完成: 实际解禁 {matched} 天, PIT可见 {pit_visible} 条记录")
         return result
     
     def _process_pledge(self, df: cudf.DataFrame, skeleton: cudf.DataFrame) -> cudf.DataFrame:
@@ -513,6 +688,9 @@ class EventSignalProcessor(BaseProcessor):
         
         # 6. 排序
         result = result.sort_values(['trade_date', 'ts_code']).reset_index(drop=True)
+        
+        # 7. float64 → float32（节省内存）
+        result = self.convert_float64_to_float32(result)
         
         # 验证无NaN
         nan_counts = result.isnull().sum()

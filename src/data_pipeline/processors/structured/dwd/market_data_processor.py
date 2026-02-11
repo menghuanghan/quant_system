@@ -188,6 +188,10 @@ class MarketDataProcessor(BaseProcessor):
         df = df.dropna(subset=['close', 'adj_factor'])
         logger.info(f"填充缺失值后: {len(df)} 行")
         
+        # ====== 金额单位转换（千元 → 元）======
+        # Tushare stock_daily 的 amount 单位是千元
+        df = self.convert_qian_yuan_to_yuan(df, ['amount'])
+        
         # 4. 计算衍生字段（在全量数据上计算，包含历史数据）
         logger.info("计算衍生字段...")
         
@@ -198,9 +202,9 @@ class MarketDataProcessor(BaseProcessor):
         df['low_hfq'] = df['low'] * adj
         df['close_hfq'] = df['close'] * adj
         
-        # VWAP
-        df['vwap'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=None)
-        df['vwap_hfq'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=adj)
+        # VWAP（注意：amount 已转换为元）
+        df['vwap'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=None, amount_unit="yuan")
+        df['vwap_hfq'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=adj, amount_unit="yuan")
         
         # 日收益率（基于后复权价格）- 在全量数据上计算
         df = df.sort_values(['ts_code', 'trade_date'])
@@ -216,11 +220,10 @@ class MarketDataProcessor(BaseProcessor):
         else:
             df['turnover'] = 0.0
         
-        # 交易状态
-        if 'is_suspended' in df.columns:
-            df['is_trading'] = (1 - df['is_suspended']).astype('int32')
-        else:
-            df['is_trading'] = (df['vol'] > 0).astype('int32')
+        # 交易状态修复：以实际成交量 vol > 0 作为 is_trading 判定标准
+        # 原因：停牌信息表可能包含"盘中临时停牌"（涨跌停触发后恢复），这种情况仍有成交
+        # 因此用 vol > 0 更准确地反映"当日是否有交易"
+        df['is_trading'] = (df['vol'] > 0).astype('int32')
         
         # 停牌日收益率设为0
         df['return_1d'] = df['return_1d'].where(df['is_trading'] == 1, 0)
@@ -243,6 +246,9 @@ class MarketDataProcessor(BaseProcessor):
         existing_columns = [col for col in output_columns if col in df.columns]
         df = df[existing_columns]
         df = df.sort_values(['trade_date', 'ts_code'])
+        
+        # 7. float64 → float32（节省内存）
+        df = self.convert_float64_to_float32(df)
         
         return df
     

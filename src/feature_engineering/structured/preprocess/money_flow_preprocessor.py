@@ -2,9 +2,11 @@
 资金流预处理器
 
 处理 dwd_money_flow 表，主要包括：
-1. 单位统一：万元 -> 元（×10000）
-2. 停牌清洗：停牌日资金流字段置 0
-3. 极值检查：无 inf
+1. 停牌清洗：停牌日资金流字段置 0
+2. 极值检查：无 inf
+3. 缺失值填充
+
+注意：金额单位转换已在 DWD 层完成（所有金额字段已统一为元）
 """
 
 import logging
@@ -30,13 +32,14 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         执行资金流预处理
         
         处理步骤：
-        1. 单位换算（万元 -> 元）
-        2. 停牌清洗（利用状态表）
-        3. 极值检查
-        4. 缺失值填充
+        1. 停牌清洗（利用状态表）
+        2. 极值检查
+        3. 缺失值填充
+        
+        注意：金额单位转换已在 DWD 层完成
         
         Args:
-            df: 输入的资金流表 DataFrame
+            df: 输入的资金流表 DataFrame（金额字段已统一为元）
             status_df: 可选的状态表 DataFrame（用于停牌清洗）
             
         Returns:
@@ -49,19 +52,16 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         original_shape = df.shape
         df = df.copy()
         
-        # 1. 单位换算
-        df = self._convert_amount_units(df)
-        
-        # 2. 停牌清洗
+        # 1. 停牌清洗（金额单位转换已在DWD层完成）
         if status_df is not None:
             df = self._clean_suspended_data(df, status_df)
         else:
             logger.warning("  ⚠️ 未提供状态表，跳过停牌清洗")
         
-        # 3. 极值检查
+        # 2. 极值检查
         df = self._check_extreme_values(df)
         
-        # 4. 缺失值填充
+        # 3. 缺失值填充
         df = self._fill_missing_values(df)
         
         # 记录统计信息
@@ -74,31 +74,13 @@ class MoneyFlowPreprocessor(BasePreprocessor):
     
     def _convert_amount_units(self, df: Any) -> Any:
         """
-        单位换算：万元 -> 元
+        [已弃用] 单位换算：万元 -> 元
         
-        将所有金额字段乘以 10000，统一为元
+        注意：此逻辑已移至 DWD 层 (money_flow_processor.py)
+        保留此方法仅为向后兼容，不再调用
         """
-        logger.info("📌 Step 1: 单位换算 (万元 -> 元)")
-        
-        multiplier = self.config.money_flow.amount_multiplier
-        amount_fields = self.config.money_flow.amount_fields
-        
-        converted_count = 0
-        for field in amount_fields:
-            if field in df.columns:
-                df[field] = df[field] * multiplier
-                converted_count += 1
-        
-        self.stats["converted_fields"] = converted_count
-        logger.info(f"  ✓ 已转换 {converted_count} 个金额字段 (×{multiplier:.0f})")
-        
-        # 大宗交易成交量：万股 -> 手 (1万股 = 100手)
-        if "block_trade_vol" in df.columns:
-            vol_multiplier = self.config.money_flow.block_trade_vol_multiplier
-            df["block_trade_vol"] = df["block_trade_vol"] * vol_multiplier
-            logger.info(f"  ✓ 已转换 block_trade_vol (×{vol_multiplier:.0f}, 万股→手)")
-        
-        return df
+        logger.warning("⚠️ _convert_amount_units 已弃用，金额转换已在DWD层完成")
+        return df  # 直接返回，不做任何处理
     
     def _clean_suspended_data(self, df: Any, status_df: Any) -> Any:
         """
@@ -106,7 +88,7 @@ class MoneyFlowPreprocessor(BasePreprocessor):
         
         将停牌日的所有资金流字段置为 0
         """
-        logger.info("📌 Step 2: 停牌清洗")
+        logger.info("📌 Step 1: 停牌清洗")
         
         # 获取停牌信息
         if "is_suspended" not in status_df.columns:

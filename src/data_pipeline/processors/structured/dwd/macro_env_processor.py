@@ -616,6 +616,10 @@ class MacroEnvProcessor(BaseProcessor):
             
             df = self.normalize_date_column(df, 'trade_date')
             
+            # ====== 金额单位转换（千元 → 元）======
+            # Tushare index_daily 的 amount 单位是千元
+            df = self.convert_qian_yuan_to_yuan(df, ['amount'])
+            
             # 计算振幅
             if 'high' in df.columns and 'low' in df.columns and 'pre_close' in df.columns:
                 df['amplitude'] = (df['high'] - df['low']) / df['pre_close'] * 100
@@ -684,6 +688,10 @@ class MacroEnvProcessor(BaseProcessor):
                 continue
             
             df = self.normalize_date_column(df, 'trade_date')
+            
+            # ====== 金额单位转换（万元 → 元）======
+            # Tushare repo_daily 的 amount 单位是万元
+            df = self.convert_wan_yuan_to_yuan(df, ['amount'])
             
             # 透视为宽表列
             rename_map = {
@@ -1151,6 +1159,22 @@ class MacroEnvProcessor(BaseProcessor):
         
         # 10. 排序
         result = result.sort_values('trade_date').reset_index(drop=True)
+        
+        # ================================================================
+        # 10.5 主键去重（修复重复日期问题）
+        # ================================================================
+        # 某些数据源可能在同一 trade_date 有多条记录（如多个交易所汇总）
+        # 使用 keep='last' 保留最后一条（假设后加载的数据更新更及时）
+        n_before = len(result)
+        result = result.drop_duplicates(subset=['trade_date'], keep='last')
+        n_after = len(result)
+        if n_before > n_after:
+            logger.warning(
+                f"主键去重: 移除了 {n_before - n_after} 行重复的 trade_date 记录"
+            )
+        
+        # 11. float64 → float32（节省内存）
+        result = self.convert_float64_to_float32(result)
         
         logger.info(f"宏观环境宽表处理完成，共 {len(result)} 行，{len(result.columns)} 列")
         return result

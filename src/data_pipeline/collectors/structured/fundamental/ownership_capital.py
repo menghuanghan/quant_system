@@ -435,23 +435,75 @@ class ShareFloatCollector(BaseCollector):
         start_date: Optional[str],
         end_date: Optional[str]
     ) -> pd.DataFrame:
-        """从Tushare获取限售解禁（按月+offset分页，避免6000行截断）"""
+        """从Tushare获取限售解禁（按月+offset分页，截断时自动拆分半月）"""
         import calendar
+        from datetime import datetime as dt, timedelta
         
         pro = self.tushare_api
-        PAGE_LIMIT = 6000  # Tushare 单次返回上限
+        PAGE_LIMIT = 6000   # Tushare 单次返回上限
+        MAX_OFFSET = 96000  # 服务端 offset 上限（保守值，实际约 102000）
         
-        params = {}
+        base_params = {}
         if ts_code:
-            params['ts_code'] = ts_code
+            base_params['ts_code'] = ts_code
         if ann_date:
-            params['ann_date'] = ann_date
+            base_params['ann_date'] = ann_date
         if float_date:
-            params['float_date'] = float_date
+            base_params['float_date'] = float_date
         
-        df = pd.DataFrame()
+        def _fetch_range(sd: str, ed: str) -> pd.DataFrame:
+            """带 offset 分页获取一个日期区间，返回 (df, is_truncated)"""
+            chunks = []
+            offset = 0
+            truncated = False
+            for _ in range(20):
+                if offset >= MAX_OFFSET:
+                    truncated = True
+                    break
+                try:
+                    p = dict(base_params)
+                    p['start_date'] = sd
+                    p['end_date'] = ed
+                    p['limit'] = PAGE_LIMIT
+                    p['offset'] = offset
+                    chunk = pro.share_float(**p)
+                    if chunk is None or chunk.empty:
+                        break
+                    chunks.append(chunk)
+                    if len(chunk) < PAGE_LIMIT:
+                        break
+                    offset += PAGE_LIMIT
+                    time.sleep(0.3)
+                except Exception as e:
+                    logger.debug(f"share_float({sd}-{ed}) offset={offset} 出错: {e}")
+                    if offset > 0:
+                        truncated = True
+                    break
+            df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+            return df, truncated
         
-        # 按月+offset分页获取，确保不丢失数据
+        def _fetch_recursive(sd: str, ed: str, depth: int = 0) -> pd.DataFrame:
+            """递归获取：截断时自动拆成两半"""
+            df, truncated = _fetch_range(sd, ed)
+            if not truncated or depth >= 3:
+                return df
+            # 拆成两半
+            d1 = dt.strptime(sd, '%Y%m%d')
+            d2 = dt.strptime(ed, '%Y%m%d')
+            if (d2 - d1).days <= 1:
+                return df
+            mid = d1 + (d2 - d1) // 2
+            mid_s = mid.strftime('%Y%m%d')
+            mid_n = (mid + timedelta(days=1)).strftime('%Y%m%d')
+            logger.info(f"share_float {sd}-{ed} 数据量超限(>{MAX_OFFSET})，拆分为两半")
+            df1 = _fetch_recursive(sd, mid_s, depth + 1)
+            time.sleep(0.3)
+            df2 = _fetch_recursive(mid_n, ed, depth + 1)
+            parts = [p for p in [df, df1, df2] if not p.empty]
+            return pd.concat(parts, ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
+        
+        result_df = pd.DataFrame()
+        
         if start_date and end_date:
             try:
                 start_year = int(start_date[:4])
@@ -465,56 +517,33 @@ class ShareFloatCollector(BaseCollector):
                     last_day = calendar.monthrange(y, m)[1]
                     sd = f"{y}{m:02d}01"
                     ed = f"{y}{m:02d}{last_day:02d}"
-                    
-                    # 裁剪到用户指定范围
                     if sd < start_date:
                         sd = start_date
                     if ed > end_date:
                         ed = end_date
                     
-                    # offset 分页
-                    offset = 0
-                    for _ in range(20):  # 最多20页，防无限循环
-                        try:
-                            p = dict(params)
-                            p['start_date'] = sd
-                            p['end_date'] = ed
-                            p['limit'] = PAGE_LIMIT
-                            p['offset'] = offset
-                            
-                            chunk = pro.share_float(**p)
-                            if chunk is not None and not chunk.empty:
-                                all_dfs.append(chunk)
-                            if chunk is None or len(chunk) < PAGE_LIMIT:
-                                break  # 本页不满，已到末尾
-                            offset += PAGE_LIMIT
-                            time.sleep(0.3)
-                        except Exception as e:
-                            logger.debug(f"share_float offset={offset} 出错: {e}")
-                            break
+                    month_df = _fetch_recursive(sd, ed)
+                    if not month_df.empty:
+                        all_dfs.append(month_df)
                     
                     time.sleep(0.3)
-                    # 下一个月
                     m += 1
                     if m > 12:
                         m = 1
                         y += 1
                 
                 if all_dfs:
-                    df = pd.concat(all_dfs, ignore_index=True)
-                    df = df.drop_duplicates()
+                    result_df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
             except Exception as e:
                 logger.warning(f"按月分页获取失败，回退到单次请求: {e}")
-                params['start_date'] = start_date
-                params['end_date'] = end_date
-                df = pro.share_float(**params)
+                result_df, _ = _fetch_range(start_date, end_date)
         else:
-            params_call = dict(params)
+            params_call = dict(base_params)
             if start_date:
                 params_call['start_date'] = start_date
             if end_date:
                 params_call['end_date'] = end_date
-            df = pro.share_float(**params_call)
+            result_df = pro.share_float(**params_call)
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
