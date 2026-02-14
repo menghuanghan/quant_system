@@ -10,10 +10,10 @@ tables = [
     # 'dwd_stock_price', 'dwd_stock_fundamental', 'dwd_stock_status',
     # 'dwd_money_flow', 'dwd_chip_structure', 'dwd_stock_industry',
     # 'dwd_event_signal', 'dwd_macro_env'
-    'train'
+    'train_gru'
 ]
 
-N = 30000
+N = 20000
 
 import gc
 gc.collect()

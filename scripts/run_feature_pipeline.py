@@ -6,6 +6,10 @@
     python scripts/run_feature_pipeline.py
     python scripts/run_feature_pipeline.py --no-gpu
     python scripts/run_feature_pipeline.py --dry-run
+    python scripts/run_feature_pipeline.py --postprocess only-lgb
+    python scripts/run_feature_pipeline.py --postprocess only-gru
+    python scripts/run_feature_pipeline.py --postprocess both
+    python scripts/run_feature_pipeline.py --postprocess none
 """
 
 import argparse
@@ -50,6 +54,10 @@ def main():
                         help="使用内存高效模式（逐列计算，中间结果暂存磁盘）")
     parser.add_argument("--no-memory-efficient", action="store_true", 
                         help="禁用内存高效模式")
+    parser.add_argument("--postprocess", "-p", type=str, default="both",
+                        choices=["both", "only-lgb", "only-gru", "none"],
+                        help="后处理模式: both(默认)=输出train_lgb和train_gru, "
+                             "only-lgb=仅LightGBM, only-gru=仅GRU, none=不做后处理")
     
     args = parser.parse_args()
     
@@ -73,10 +81,12 @@ def main():
     
     # 打印配置
     memory_efficient = args.memory_efficient and not args.no_memory_efficient
+    postprocess_mode = args.postprocess
     
     logger.info("📋 流水线配置:")
     logger.info(f"   GPU 加速: {config.use_gpu}")
     logger.info(f"   内存高效模式: {memory_efficient}")
+    logger.info(f"   后处理模式: {postprocess_mode}")
     logger.info(f"   输入目录: {config.data.input_dir}")
     logger.info(f"   输出目录: {config.data.output_dir}")
     logger.info(f"   临时目录: {config.data.temp_dir}")
@@ -99,6 +109,16 @@ def main():
     logger.info(f"   主标签: {config.label.primary_label_days} 日")
     logger.info(f"   标签裁剪: [{config.label.label_clip_lower:.0%}, {config.label.label_clip_upper:.0%}]")
     logger.info("")
+    logger.info(f"📋 后处理配置:")
+    if postprocess_mode == "both":
+        logger.info(f"   输出: train_lgb.parquet + train_gru.parquet")
+    elif postprocess_mode == "only-lgb":
+        logger.info(f"   输出: train_lgb.parquet (仅 LightGBM)")
+    elif postprocess_mode == "only-gru":
+        logger.info(f"   输出: train_gru.parquet (仅 GRU)")
+    else:
+        logger.info(f"   输出: train.parquet (无后处理)")
+    logger.info("")
     
     if args.dry_run:
         logger.info("🏃 Dry Run 模式，不执行实际处理")
@@ -107,7 +127,11 @@ def main():
     # 执行流水线
     try:
         pipeline = FeaturePipeline(config)
-        df = pipeline.run(save_output=True, memory_efficient=memory_efficient)
+        result = pipeline.run(
+            save_output=True, 
+            memory_efficient=memory_efficient,
+            postprocess_mode=postprocess_mode
+        )
         
         logger.info("")
         logger.info("🎉 流水线执行成功!")
@@ -119,8 +143,14 @@ def main():
         for module, module_stats in stats.items():
             if module_stats:
                 logger.info(f"   {module}:")
-                for key, value in module_stats.items():
-                    logger.info(f"      {key}: {value}")
+                if isinstance(module_stats, dict):
+                    for key, value in module_stats.items():
+                        if isinstance(value, dict):
+                            logger.info(f"      {key}:")
+                            for k2, v2 in value.items():
+                                logger.info(f"         {k2}: {v2}")
+                        else:
+                            logger.info(f"      {key}: {value}")
         
         return 0
         

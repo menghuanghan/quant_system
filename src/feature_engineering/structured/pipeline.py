@@ -53,6 +53,7 @@ class FeaturePipeline:
         from .features.feature_generator import FeatureGenerator
         from .labels.label_generator import LabelGenerator
         from .postprocess.post_processor import PostProcessor
+        from .postprocess import PostprocessPipeline, PostprocessMode, PostprocessConfig
         from .preprocess import (
             PreprocessConfig,
             # 核心3表预处理器
@@ -104,13 +105,27 @@ class FeaturePipeline:
         self.feature_generator = FeatureGenerator(self.config.technical, self.use_gpu, ref_data=None)
         # 标签生成器（参考数据延迟加载，用于超额收益等高级标签）
         self.label_generator = LabelGenerator(self.config.label, self.use_gpu, ref_data=None)
+        
+        # 旧版后处理器（向后兼容）
         self.post_processor = PostProcessor(
             self.config.normalization,
             self.config.data,
             self.use_gpu
         )
+        
+        # 新版后处理流水线（LGB + GRU）
+        self.postprocess_pipeline = None  # 延迟初始化，按需创建
+        self._PostprocessPipeline = PostprocessPipeline
+        self._PostprocessMode = PostprocessMode
+        self._PostprocessConfig = PostprocessConfig
     
-    def run(self, save_output: bool = True, streaming_mode: bool = True, memory_efficient: bool = False) -> Any:
+    def run(
+        self, 
+        save_output: bool = True, 
+        streaming_mode: bool = True, 
+        memory_efficient: bool = False,
+        postprocess_mode: str = "both"
+    ) -> Any:
         """
         执行完整流水线
         
@@ -118,39 +133,55 @@ class FeaturePipeline:
         1. 流式预处理+合并：读取→预处理→合并 循环（内存高效）
         2. Feature Eng: 计算 MA, MACD, Volatility 等
         3. Labeling: 生成未来 N 日收益率标签
-        4. Slice: 只保留 2021.01.01 之后的数据
-        5. Normalize: 截面 Z-Score 标准化
-        6. Clean: 丢弃含 NaN 的行
-        7. Save: 输出 train.parquet
+        4. Postprocess: 后处理（公共清洗 + LGB/GRU 专用处理）
+        5. Save: 输出 train_lgb.parquet / train_gru.parquet
+        
+        内存高效模式支持断点续跑：
+        - 如果 merger_preprocess.parquet 和 train.parquet 都存在，直接进入后处理
+        - 如果只有 merger_preprocess.parquet 存在，跳过合并+预处理，进入特征/标签计算
+        - 否则从头开始
         
         Args:
             save_output: 是否保存输出文件
             streaming_mode: 是否使用流式预处理+合并（推荐，内存高效）
             memory_efficient: 是否使用内存高效模式（逐列计算，中间结果暂存磁盘）
+            postprocess_mode: 后处理模式，可选值:
+                - "both": 同时输出 train_lgb.parquet 和 train_gru.parquet
+                - "only-lgb": 仅输出 train_lgb.parquet
+                - "only-gru": 仅输出 train_gru.parquet
+                - "none": 不执行后处理，仅输出 train.parquet
             
         Returns:
-            最终的 DataFrame
+            最终的 DataFrame 或 Dict[str, DataFrame]
         """
         start_time = time.time()
         
         logger.info("=" * 70)
         mode_desc = "[内存高效模式]" if memory_efficient else ("[流式模式]" if streaming_mode else "[标准模式]")
         logger.info(f"🚀 特征工程流水线启动 {mode_desc}")
+        logger.info(f"   后处理模式: {postprocess_mode}")
         logger.info("=" * 70)
         
         if memory_efficient:
-            # 内存高效模式：中间结果暂存磁盘，逐列计算特征/标签
-            df = self._run_memory_efficient_mode()
-            
-            # Step 8: 保存输出
-            if save_output:
-                self._save_output(df)
+            # 内存高效模式：支持断点续跑
+            result = self._run_memory_efficient_mode_with_postprocess(
+                save_output=save_output,
+                postprocess_mode=postprocess_mode
+            )
             
             # 统计信息汇总
             elapsed = time.time() - start_time
-            self._print_summary(df, elapsed)
+            if isinstance(result, dict):
+                # 后处理返回的是 dict
+                sample_df = result.get("lgb")
+                if sample_df is None:
+                    sample_df = result.get("gru")
+                if sample_df is not None:
+                    self._print_summary(sample_df, elapsed)
+            else:
+                self._print_summary(result, elapsed)
             
-            return df
+            return result
         elif streaming_mode:
             # 流式模式：预处理+合并一体化
             df = self._run_streaming_mode()
@@ -357,6 +388,224 @@ class FeaturePipeline:
         gc.collect()
         
         return df
+    
+    def _run_memory_efficient_mode_with_postprocess(
+        self, 
+        save_output: bool = True,
+        postprocess_mode: str = "both"
+    ) -> Any:
+        """
+        内存高效模式（带后处理和断点续跑）
+        
+        断点续跑逻辑：
+        - 如果 train.parquet 存在：直接进入后处理
+        - 如果 merger_preprocess.parquet 存在：跳过合并+预处理，进入特征/标签计算
+        - 否则从头开始
+        
+        Args:
+            save_output: 是否保存输出文件
+            postprocess_mode: 后处理模式 (both, only-lgb, only-gru, none)
+            
+        Returns:
+            处理结果
+        """
+        import gc
+        
+        # 检查中间文件
+        merger_preprocess_path = self.config.data.merger_preprocess_path
+        train_path = self.config.data.output_dir / self.config.data.train_file
+        
+        # ============================
+        # 断点续跑检查
+        # ============================
+        logger.info("=" * 60)
+        logger.info("📋 断点续跑检查")
+        logger.info("=" * 60)
+        
+        skip_merger = False
+        skip_features = False
+        
+        if train_path.exists() and merger_preprocess_path.exists():
+            # 两者都存在，直接进入后处理
+            logger.info(f"  ✓ train.parquet 存在: {train_path}")
+            logger.info(f"  ✓ merger_preprocess.parquet 存在")
+            logger.info(f"  → 跳过合并+预处理和特征/标签计算，直接进入后处理")
+            skip_merger = True
+            skip_features = True
+        elif merger_preprocess_path.exists():
+            # 只有 merger_preprocess 存在
+            logger.info(f"  ✓ merger_preprocess.parquet 存在")
+            logger.info(f"  ✗ train.parquet 不存在")
+            logger.info(f"  → 跳过合并+预处理，进入特征/标签计算")
+            skip_merger = True
+        else:
+            logger.info(f"  ✗ 中间文件不存在，从头开始")
+        
+        # ============================
+        # Step 1: 合并+预处理
+        # ============================
+        if not skip_merger:
+            logger.info("=" * 60)
+            logger.info("📋 Step 1: 流式 加载+预处理+合并 (8表) → 暂存磁盘")
+            logger.info("=" * 60)
+            
+            # 确保临时目录存在
+            temp_dir = self.config.data.temp_dir
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            
+            df = self.merger.process_with_preprocessing(
+                preprocessors=self.preprocessors,
+                filter_universe=True,
+                drop_unnecessary=False,
+                save_result=False
+            )
+            
+            # 保存到磁盘
+            logger.info(f"  💾 暂存到: {merger_preprocess_path}")
+            
+            if self.use_gpu:
+                df_pd = df.to_pandas()
+                df_pd.to_parquet(str(merger_preprocess_path), index=False)
+                file_size = merger_preprocess_path.stat().st_size / (1024 * 1024)
+                logger.info(f"     ✓ 已保存 {len(df_pd):,} 行, {len(df_pd.columns)} 列, {file_size:.1f} MB")
+                del df_pd, df
+            else:
+                df.to_parquet(str(merger_preprocess_path), index=False)
+                file_size = merger_preprocess_path.stat().st_size / (1024 * 1024)
+                logger.info(f"     ✓ 已保存 {len(df):,} 行, {len(df.columns)} 列, {file_size:.1f} MB")
+                del df
+            
+            gc.collect()
+            if self.use_gpu:
+                try:
+                    import cupy as cp
+                    cp.get_default_memory_pool().free_all_blocks()
+                    logger.info("     ✓ 显存已释放")
+                except:
+                    pass
+        
+        # ============================
+        # Step 2-5: 特征+标签计算
+        # ============================
+        if not skip_features:
+            # Step 2: 加载参考数据
+            logger.info("=" * 60)
+            logger.info("📋 Step 2: 加载参考数据")
+            logger.info("=" * 60)
+            
+            ref_data = self.ref_loader.load_all()
+            self.feature_generator.set_ref_data(ref_data)
+            
+            # Step 3: 逐列计算特征
+            logger.info("=" * 60)
+            logger.info("📋 Step 3: 逐列计算特征 (内存高效模式)")
+            logger.info("=" * 60)
+            
+            feature_columns = self.feature_generator.generate_column_by_column(
+                parquet_path=merger_preprocess_path,
+                ref_data=ref_data,
+                use_gpu=self.use_gpu
+            )
+            
+            logger.info(f"  ✅ 特征生成完成: {len(feature_columns)} 列")
+            
+            # Step 4: 逐列计算标签
+            logger.info("=" * 60)
+            logger.info("📋 Step 4: 逐列计算标签 (内存高效模式)")
+            logger.info("=" * 60)
+            
+            self.label_generator.ref_data = ref_data
+            label_columns = self.label_generator.generate_labels_column_by_column(
+                parquet_path=merger_preprocess_path,
+                use_gpu=self.use_gpu
+            )
+            
+            logger.info(f"  ✅ 标签生成完成: {len(label_columns)} 列")
+            
+            # Step 5: 合并所有列
+            logger.info("=" * 60)
+            logger.info("📋 Step 5: 合并特征+标签到最终表")
+            logger.info("=" * 60)
+            
+            if self.use_gpu:
+                import cudf
+                df = cudf.read_parquet(str(merger_preprocess_path))
+            else:
+                import pandas as pd
+                df = pd.read_parquet(str(merger_preprocess_path))
+            
+            df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+            logger.info("  ✓ 已按 ts_code, trade_date 排序以对齐特征/标签列")
+            
+            for col_name, col_data in feature_columns.items():
+                df[col_name] = col_data
+            
+            for col_name, col_data in label_columns.items():
+                df[col_name] = col_data
+            
+            logger.info(f"  ✓ 最终表: {len(df):,} 行, {len(df.columns)} 列")
+            
+            del feature_columns, label_columns
+            gc.collect()
+            
+            # 保存 train.parquet
+            if save_output:
+                self._save_output(df)
+            
+            # 释放内存
+            del df
+            gc.collect()
+            if self.use_gpu:
+                try:
+                    import cupy as cp
+                    cp.get_default_memory_pool().free_all_blocks()
+                except:
+                    pass
+        
+        # ============================
+        # Step 6: 后处理
+        # ============================
+        if postprocess_mode == "none":
+            logger.info("⚠️ 后处理已禁用 (postprocess_mode=none)")
+            # 重新加载 train.parquet 返回
+            if self.use_gpu:
+                import cudf
+                return cudf.read_parquet(str(train_path))
+            else:
+                import pandas as pd
+                return pd.read_parquet(str(train_path))
+        
+        logger.info("=" * 60)
+        logger.info(f"📋 Step 6: 后处理 (模式: {postprocess_mode})")
+        logger.info("=" * 60)
+        
+        # 确定后处理模式
+        mode_map = {
+            "both": self._PostprocessMode.BOTH,
+            "only-lgb": self._PostprocessMode.ONLY_LGB,
+            "only-gru": self._PostprocessMode.ONLY_GRU,
+        }
+        pp_mode = mode_map.get(postprocess_mode, self._PostprocessMode.BOTH)
+        
+        # 初始化后处理流水线
+        pp_config = self._PostprocessConfig.default()
+        pp_config.output_dir = self.config.data.output_dir
+        
+        self.postprocess_pipeline = self._PostprocessPipeline(
+            config=pp_config,
+            use_gpu=self.use_gpu,
+            mode=pp_mode
+        )
+        
+        # 执行后处理
+        result = self.postprocess_pipeline.run_from_file(
+            train_path=train_path,
+            save_output=save_output
+        )
+        
+        self.stats["postprocess"] = self.postprocess_pipeline.get_stats()
+        
+        return result
     
     def _load_data(self):
         """加载三张 DWD 宽表"""
