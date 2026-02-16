@@ -117,15 +117,29 @@ class GRUDataConfig:
     # 直接指定特征列表（优先级高于 JSON 文件）
     selected_features: List[str] = field(default_factory=list)
     
-    # === 行业 Embedding 配置 ===
-    # 是否使用行业 Embedding
-    use_industry_embedding: bool = False
+    # === Embedding 配置 ===
+    # 是否使用 Embedding层处理类别特征
+    use_embedding: bool = False
     
-    # 行业数量（申万一级行业数量 + 1 for unknown）
-    num_industries: int = 32
+    # Embedding 配置（基于数据分析）
+    # market: 4 个值 (0-3)
+    # industry_idx: 110 个值 (0-109)
+    # sw_l1_idx: 32 个值 (0-31)
+    # sw_l2_idx: 129 个值 (-1 到 128)
+    embedding_config: dict = field(default_factory=lambda: {
+        'market': {'num_embeddings': 5, 'embed_dim': 4},      # 0-3 + padding
+        'industry_idx': {'num_embeddings': 112, 'embed_dim': 16},  # 0-109 + padding + unknown
+        'sw_l1_idx': {'num_embeddings': 34, 'embed_dim': 8},   # 0-31 + padding + unknown
+        'sw_l2_idx': {'num_embeddings': 132, 'embed_dim': 12},  # -1→0, 0-128→1-129 + padding
+    })
     
-    # 行业 Embedding 维度
-    industry_embed_dim: int = 8
+    # 使用哪些类别特征（空=使用全部）
+    embedding_features: List[str] = field(default_factory=lambda: ['sw_l1_idx'])
+    
+    # 兼容旧配置
+    use_industry_embedding: bool = False  # deprecated, use use_embedding
+    num_industries: int = 32  # deprecated
+    industry_embed_dim: int = 8  # deprecated
     
     # 额外排除列
     extra_exclude_cols: List[str] = field(default_factory=list)
@@ -177,7 +191,17 @@ class GRUModelConfig:
     # 是否双向
     bidirectional: bool = False
     
-    # 行业 Embedding（可选）
+    # === Embedding 配置 ===
+    use_embedding: bool = False
+    embedding_config: dict = field(default_factory=lambda: {
+        'market': {'num_embeddings': 5, 'embed_dim': 4},
+        'industry_idx': {'num_embeddings': 112, 'embed_dim': 16},
+        'sw_l1_idx': {'num_embeddings': 34, 'embed_dim': 8},
+        'sw_l2_idx': {'num_embeddings': 132, 'embed_dim': 12},
+    })
+    embedding_features: List[str] = field(default_factory=lambda: ['sw_l1_idx'])
+    
+    # 兼容旧配置 (deprecated)
     use_industry_embedding: bool = False
     num_industries: int = 32
     industry_embed_dim: int = 8

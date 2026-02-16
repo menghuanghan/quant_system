@@ -105,8 +105,13 @@ def load_or_train_lgb(target_col: str, retrain: bool = False):
 
 
 def load_or_train_gru(target_col: str, retrain: bool = False, device: str = "cuda"):
-    """加载或训练 GRU 模型（使用特征筛选配置）"""
-    from src.models.deep.config import GRUDataConfig
+    """
+    加载或训练 GRU 模型
+    
+    优先从 models/gru/model_config.json 读取模型配置，确保与训练参数一致
+    """
+    import json
+    from src.models.deep.config import GRUDataConfig, GRUModelConfig
     from src.models.deep.dataset import prepare_data
     from src.models.deep.model import create_model
     from src.models.deep.train import TrainConfig, GRUTrainer, create_dataloader
@@ -115,16 +120,59 @@ def load_or_train_gru(target_col: str, retrain: bool = False, device: str = "cud
     logger.info("📊 GRU 模型")
     logger.info("=" * 60)
     
-    model_path = PROJECT_ROOT / "models" / "gru" / "best_model.pt"
-    feature_json_path = PROJECT_ROOT / "models" / "lgbm" / "top50_features.json"
+    model_dir = PROJECT_ROOT / "models" / "gru"
+    model_path = model_dir / "best_model.pt"
+    config_path = model_dir / "model_config.json"
     
-    # 数据配置（使用特征筛选，与训练脚本一致）
+    # 尝试加载模型配置
+    if config_path.exists():
+        logger.info(f"  ✓ 加载模型配置: {config_path}")
+        with open(config_path, 'r') as f:
+            saved_config = json.load(f)
+        
+        # 使用保存的配置
+        feature_json_path = Path(saved_config.get('feature_json_path', PROJECT_ROOT / "models" / "lgbm" / "top50_features.json"))
+        use_feature_selection = saved_config.get('use_feature_selection', True)
+        window_size = saved_config.get('window_size', 20)
+        
+        # 模型配置
+        hidden_dim = saved_config.get('hidden_dim', 32)
+        num_layers = saved_config.get('num_layers', 1)
+        dropout = saved_config.get('dropout', 0.5)
+        mlp_hidden = saved_config.get('mlp_hidden', 32)
+        use_embedding = saved_config.get('use_embedding', False)
+        embedding_features = saved_config.get('embedding_features', [])
+        
+        logger.info(f"    hidden_dim: {hidden_dim}")
+        logger.info(f"    dropout: {dropout}")
+        logger.info(f"    mlp_hidden: {mlp_hidden}")
+        logger.info(f"    use_embedding: {use_embedding}")
+        if saved_config.get('best_valid_rank_ic'):
+            logger.info(f"    训练时验证 RankIC: {saved_config['best_valid_rank_ic']:.4f}")
+        if saved_config.get('test_rank_ic'):
+            logger.info(f"    训练时测试 RankIC: {saved_config['test_rank_ic']:.4f}")
+    else:
+        # 使用默认配置
+        logger.warning(f"  ⚠️ 未找到配置文件，使用默认配置")
+        feature_json_path = PROJECT_ROOT / "models" / "lgbm" / "top50_features.json"
+        use_feature_selection = True
+        window_size = 20
+        hidden_dim = 32
+        num_layers = 1
+        dropout = 0.6
+        mlp_hidden = 32
+        use_embedding = False
+        embedding_features = []
+    
+    # 数据配置
     data_config = GRUDataConfig(
         target_col=target_col,
-        window_size=20,
+        window_size=window_size,
         use_gpu=True,
-        use_feature_selection=True,
+        use_feature_selection=use_feature_selection,
         feature_selection_json=feature_json_path,
+        use_embedding=use_embedding,
+        embedding_features=embedding_features if use_embedding else [],
     )
     
     # 准备数据
@@ -133,13 +181,17 @@ def load_or_train_gru(target_col: str, retrain: bool = False, device: str = "cud
         device=device,
     )
     
-    # 创建模型（防过拟合配置，与训练一致）
-    model = create_model(
+    # 创建模型配置
+    model_config = GRUModelConfig(
         input_dim=len(feature_cols),
-        hidden_dim=32,
-        num_layers=1,
-        dropout=0.5,
-    ).to(device)
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        dropout=dropout,
+        mlp_hidden=mlp_hidden,
+        use_embedding=use_embedding,
+        embedding_features=embedding_features if use_embedding else [],
+    )
+    model = create_model(config=model_config).to(device)
     
     # 加载或训练模型
     if model_path.exists() and not retrain:

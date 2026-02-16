@@ -46,7 +46,11 @@
     "open",
     "market_total_rqye",
     "pmi_prod",
-    "roc_60"
+    "roc_60",
+    "kc50_close",
+    "kc50_amount",
+    "close"
   ],
-  "count": 47
+  "count": 50,
+  "exclude_categorical": true
 }

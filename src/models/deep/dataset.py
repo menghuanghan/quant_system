@@ -54,6 +54,7 @@ class StockDataset(Dataset):
         dates: Optional[np.ndarray] = None,  # 日期数组 (用于按日计算 IC)
         codes: Optional[np.ndarray] = None,  # 股票代码数组 (用于对齐)
         device: str = "cpu",  # 数据存储设备 (cpu / cuda)
+        categorical_cols: Optional[List[str]] = None,  # 类别特征列名 (用于 Embedding)
     ):
         """
         Args:
@@ -65,11 +66,13 @@ class StockDataset(Dataset):
             dates: 日期数组
             codes: 股票代码数组
             device: 数据存储设备 (预加载到 GPU 可大幅提升训练速度)
+            categorical_cols: 类别特征列名 (用于 Embedding 模型)
         """
         self.window_size = window_size
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.device = device
+        self.categorical_cols = categorical_cols or []
         
         # 保存元数据
         self.dates = dates
@@ -88,6 +91,24 @@ class StockDataset(Dataset):
         self.features = torch.from_numpy(features_np).to(device)
         self.labels = torch.from_numpy(labels_np).to(device)
         
+        # 提取类别特征 (用于 Embedding)
+        self.cat_features = None
+        if self.categorical_cols:
+            cat_data = {}
+            for col in self.categorical_cols:
+                if col in data.columns:
+                    if hasattr(data, 'to_arrow'):
+                        col_data = data[col].to_arrow().to_pandas().values
+                    else:
+                        col_data = data[col].values
+                    # 处理特殊值：sw_l2_idx 有 -1，统一转为正整数索引
+                    if col_data.min() < 0:
+                        col_data = col_data - col_data.min()  # 平移到从 0 开始
+                    cat_data[col] = torch.from_numpy(col_data.astype(np.int64)).to(device)
+            if cat_data:
+                self.cat_features = cat_data
+                logger.info(f"  类别特征: {list(cat_data.keys())}")
+        
         # 关键优化: indices 保留在 CPU (numpy)，避免 __getitem__ 中的 .item() GPU 同步开销
         # 原因: PyTorch DataLoader 每秒调用 __getitem__ 数千次，.item() 会触发 CUDA 同步
         self.indices = indices.astype(np.int64)  # numpy array, 保留在 CPU
@@ -105,7 +126,7 @@ class StockDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         """
         获取单个样本 (GPU 原生切片，零同步开销)
         
@@ -113,8 +134,10 @@ class StockDataset(Dataset):
             idx: 样本索引
             
         Returns:
-            (X, y) 元组
+            如果没有类别特征: (X, y)
+            如果有类别特征: (X, cat_dict, y)
             - X: (window_size, n_features) 张量 (已在 GPU 上)
+            - cat_dict: 类别特征字典 {col_name: (window_size,) tensor}
             - y: 标量张量 (已在 GPU 上)
         """
         # 窗口最后一行的实际索引 (indices 在 CPU，转为 Python int)
@@ -126,7 +149,19 @@ class StockDataset(Dataset):
         X = self.features[start_idx:end_idx + 1]  # (window_size, n_features)
         y = self.labels[end_idx]
         
+        # 如果有类别特征，返回三元组
+        if self.cat_features:
+            cat_dict = {
+                col: self.cat_features[col][start_idx:end_idx + 1]
+                for col in self.cat_features
+            }
+            return X, cat_dict, y
+        
         return X, y
+    
+    def has_categorical(self) -> bool:
+        """是否有类别特征"""
+        return self.cat_features is not None and len(self.cat_features) > 0
     
     def get_dates(self, idx: int) -> Optional[str]:
         """获取样本对应的日期"""
@@ -339,7 +374,17 @@ def prepare_data(
     logger.info(f"  验证集: {len(valid_indices):,}")
     logger.info(f"  测试集: {len(test_indices):,}")
     
-    # 9. 创建数据集 (预加载到指定设备)
+    # 9. 获取类别特征列（用于 Embedding）
+    categorical_cols = None
+    use_embedding = getattr(config, 'use_embedding', False)
+    if use_embedding:
+        embedding_features = getattr(config, 'embedding_features', [])
+        if embedding_features:
+            # 只选择数据中存在的类别特征列
+            categorical_cols = [col for col in embedding_features if col in all_cols]
+            logger.info(f"📊 启用 Embedding，类别特征: {categorical_cols}")
+    
+    # 10. 创建数据集 (预加载到指定设备)
     logger.info(f"📊 预加载数据到设备: {device}")
     
     train_dataset = StockDataset(
@@ -351,6 +396,7 @@ def prepare_data(
         dates=dates_str,
         codes=codes_str,
         device=device,
+        categorical_cols=categorical_cols,
     )
     
     valid_dataset = StockDataset(
@@ -362,6 +408,7 @@ def prepare_data(
         dates=dates_str,
         codes=codes_str,
         device=device,
+        categorical_cols=categorical_cols,
     )
     
     test_dataset = StockDataset(
@@ -373,6 +420,7 @@ def prepare_data(
         dates=dates_str,
         codes=codes_str,
         device=device,
+        categorical_cols=categorical_cols,
     )
     
     logger.info("✅ 数据集准备完成")

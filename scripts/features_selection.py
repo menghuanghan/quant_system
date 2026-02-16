@@ -15,7 +15,7 @@ sorted_idx = importance.argsort()[::-1]
 top50_features = [feature_names[i] for i in sorted_idx[:50]]
 
 # 排除类别特征（纯数值版）
-categorical = ['market', 'industry_idx', 'sw_l1_idx', 'sw_l2_idx']
+categorical = []
 numeric_features = [f for f in top50_features if f not in categorical][:50]
 
 # 保存

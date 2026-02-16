@@ -177,6 +177,10 @@ class GRUTrainer:
         """
         训练一个 epoch
         
+        支持两种数据格式:
+        - (X, y): 纯数值特征
+        - (X, cat_dict, y): 数值特征 + 类别特征字典
+        
         Returns:
             (epoch_loss, epoch_ic)
         """
@@ -187,18 +191,31 @@ class GRUTrainer:
         all_labels = []
         n_batches = 0
         
-        for batch_idx, (X, y) in enumerate(train_loader):
+        for batch_idx, batch_data in enumerate(train_loader):
+            # 解析 batch 数据 (支持两种格式)
+            if len(batch_data) == 2:
+                X, y = batch_data
+                cat_features = None
+            else:
+                X, cat_features, y = batch_data
+            
             # 如果数据不在目标设备上，才做设备转移
             if X.device != torch.device(self.device):
                 X = X.to(self.device, non_blocking=True)
                 y = y.to(self.device, non_blocking=True)
+                if cat_features is not None:
+                    cat_features = {k: v.to(self.device, non_blocking=True) for k, v in cat_features.items()}
             
             self.optimizer.zero_grad()
             
             # 混合精度前向
             if self.scaler is not None:
                 with autocast("cuda"):
-                    pred = self.model(X)
+                    # 根据模型类型调用前向传播
+                    if cat_features is not None and hasattr(self.model, 'embeddings'):
+                        pred = self.model(X, cat_features=cat_features)
+                    else:
+                        pred = self.model(X)
                     loss = self.criterion(pred, y)
                 
                 # 混合精度反向
@@ -212,7 +229,11 @@ class GRUTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                pred = self.model(X)
+                # 根据模型类型调用前向传播
+                if cat_features is not None and hasattr(self.model, 'embeddings'):
+                    pred = self.model(X, cat_features=cat_features)
+                else:
+                    pred = self.model(X)
                 loss = self.criterion(pred, y)
                 loss.backward()
                 grad_clip = getattr(self.config, 'grad_clip', 1.0)
@@ -247,6 +268,10 @@ class GRUTrainer:
         """
         验证
         
+        支持两种数据格式:
+        - (X, y): 纯数值特征
+        - (X, cat_dict, y): 数值特征 + 类别特征字典
+        
         Returns:
             (loss, ic, rank_ic)
         """
@@ -257,18 +282,33 @@ class GRUTrainer:
         all_labels = []
         n_batches = 0
         
-        for X, y in valid_loader:
+        for batch_data in valid_loader:
+            # 解析 batch 数据 (支持两种格式)
+            if len(batch_data) == 2:
+                X, y = batch_data
+                cat_features = None
+            else:
+                X, cat_features, y = batch_data
+            
             # 如果数据不在目标设备上，才做设备转移
             if X.device != torch.device(self.device):
                 X = X.to(self.device, non_blocking=True)
                 y = y.to(self.device, non_blocking=True)
+                if cat_features is not None:
+                    cat_features = {k: v.to(self.device, non_blocking=True) for k, v in cat_features.items()}
             
             if self.config.use_amp and self.device == "cuda":
                 with autocast("cuda"):
-                    pred = self.model(X)
+                    if cat_features is not None and hasattr(self.model, 'embeddings'):
+                        pred = self.model(X, cat_features=cat_features)
+                    else:
+                        pred = self.model(X)
                     loss = self.criterion(pred, y)
             else:
-                pred = self.model(X)
+                if cat_features is not None and hasattr(self.model, 'embeddings'):
+                    pred = self.model(X, cat_features=cat_features)
+                else:
+                    pred = self.model(X)
                 loss = self.criterion(pred, y)
             
             total_loss += loss.item()
@@ -391,20 +431,39 @@ class GRUTrainer:
         """
         预测
         
+        支持两种数据格式:
+        - (X, y): 纯数值特征
+        - (X, cat_dict, y): 数值特征 + 类别特征字典
+        
         Returns:
             预测值数组
         """
         self.model.eval()
         
         all_preds = []
-        for X, _ in loader:
+        for batch_data in loader:
+            # 解析 batch 数据 (支持两种格式)
+            if len(batch_data) == 2:
+                X, _ = batch_data
+                cat_features = None
+            else:
+                X, cat_features, _ = batch_data
+            
             X = X.to(self.device)
+            if cat_features is not None:
+                cat_features = {k: v.to(self.device) for k, v in cat_features.items()}
             
             if self.config.use_amp and self.device == "cuda":
                 with autocast("cuda"):
-                    pred = self.model(X)
+                    if cat_features is not None and hasattr(self.model, 'embeddings'):
+                        pred = self.model(X, cat_features=cat_features)
+                    else:
+                        pred = self.model(X)
             else:
-                pred = self.model(X)
+                if cat_features is not None and hasattr(self.model, 'embeddings'):
+                    pred = self.model(X, cat_features=cat_features)
+                else:
+                    pred = self.model(X)
             
             all_preds.append(pred.cpu().numpy())
         
