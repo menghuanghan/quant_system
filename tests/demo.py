@@ -10,10 +10,10 @@ tables = [
     # 'dwd_stock_price', 'dwd_stock_fundamental', 'dwd_stock_status',
     # 'dwd_money_flow', 'dwd_chip_structure', 'dwd_stock_industry',
     # 'dwd_event_signal', 'dwd_macro_env'
-    'train_gru'
+    'train_lgb'
 ]
 
-N = 20000
+N = 40000
 
 import gc
 gc.collect()
@@ -22,6 +22,7 @@ for name in tables:
     path = dwd_dir / f'{name}.parquet'
     df = pd.read_parquet(path)
     total = len(df)
+    cols = len(df.columns)
     
     # 前 N 行
     head_df = df.head(N)
@@ -44,7 +45,7 @@ for name in tables:
         size_kb = p.stat().st_size / 1024
         print(f'  {p.name}: {size_kb:.0f} KB')
     
-    print(f'✓ {name} 完成 (总行数: {total:,})')
+    print(f'✓ {name} 完成 (总行数: {total:,}, 列数: {cols})')
     print()
 
 print('全部完成！')

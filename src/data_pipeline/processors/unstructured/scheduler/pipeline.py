@@ -151,6 +151,7 @@ class PDFPipeline(BasePipeline):
             
             if not extract_result.success or not extract_result.content_text:
                 # 如果提取失败，尝试使用标题
+                self.logger.warning(f"内容提取失败: {extract_result.error_message}, 尝试使用标题")
                 if title:
                     content = title
                     result.content_extracted = True
@@ -174,6 +175,7 @@ class PDFPipeline(BasePipeline):
             
             if not summary_result.success:
                 # 摘要失败时，使用标题或截断内容
+                self.logger.warning(f"摘要生成失败: {summary_result.error_message}, 使用标题或截断内容")
                 if title:
                     summary = title
                 else:

@@ -9,11 +9,27 @@ LightGBM 量化因子模型模块
 - Analysis: 特征重要性与 SHAP 分析
 """
 
-from .config import LGBMConfig
-from .data_loader import DataLoader
-from .metrics import ic_eval, rank_ic
-from .trainer import LGBMTrainer
-from .analysis import ModelAnalyzer
+# 延迟导入以避免不必要的依赖加载
+def __getattr__(name):
+    if name == "LGBMConfig":
+        from .config import LGBMConfig
+        return LGBMConfig
+    elif name == "DataLoader":
+        from .data_loader import DataLoader
+        return DataLoader
+    elif name == "ic_eval":
+        from .metrics import ic_eval
+        return ic_eval
+    elif name == "rank_ic":
+        from .metrics import rank_ic
+        return rank_ic
+    elif name == "LGBMTrainer":
+        from .trainer import LGBMTrainer
+        return LGBMTrainer
+    elif name == "ModelAnalyzer":
+        from .analysis import ModelAnalyzer
+        return ModelAnalyzer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "LGBMConfig",

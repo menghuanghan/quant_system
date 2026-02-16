@@ -5,6 +5,11 @@
 1. 3D 张量构建 (N, L, F) - N样本数, L窗口长度, F特征数
 2. 滑动窗口索引映射 (不预展开, 内存友好)
 3. cuDF + DLPack 零拷贝加速
+
+改造说明（2026.02）:
+- 适配全域数据 train_gru.parquet
+- 使用动态特征识别
+- 支持 datetime64 日期格式
 """
 
 import logging
@@ -16,49 +21,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .config import GRUDataConfig, get_gru_feature_columns, ID_COLS, LABEL_COLS, AUX_COLS, CATEGORICAL_FEATURES
+
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DataConfig:
-    """数据配置"""
-    
-    # 数据路径
-    data_path: Path = Path("/home/menghuanghan/quant_system/data/features/structured/train.parquet")
-    
-    # 窗口长度 (对应一个月交易日)
-    window_size: int = 20
-    
-    # 特征筛选: 只使用 _zscore 后缀的列
-    # 原因: 神经网络对输入尺度极度敏感
-    zscore_only: bool = True
-    
-    # 目标列
-    target_col: str = "ret_5d"
-    
-    # Purging（隔离带）: 防止标签泄露
-    # 由于 ret_5d 使用未来 5 天的收益，需要在训练/验证边界预留间隔
-    purge_days: int = 5  # 隔离天数 (应 >= 标签预测天数)
-    
-    # 排除列
-    exclude_cols: List[str] = field(default_factory=lambda: [
-        "ts_code", "trade_date",
-        "ret_1d", "ret_5d", "ret_10d", "ret_20d",
-        "label_1d", "label_5d", "label_10d", "label_20d",
-        "lag_days", "market",
-    ])
-    
-    # 时间切分 (Purging 后的有效边界)
-    # 原始边界: train_end + purge_days = gap 结束
-    train_start: str = "2021-01-01"
-    train_end: str = "2023-12-25"  # 提前 5 天，留出 2023-12-26~12-31 作为隔离带
-    valid_start: str = "2024-01-01"
-    valid_end: str = "2024-12-25"  # 提前 5 天
-    test_start: str = "2025-01-01"
-    test_end: str = "2025-12-31"
-    
-    # GPU 加速
-    use_gpu: bool = True
+# DataConfig 保留兼容性别名
+DataConfig = GRUDataConfig
 
 
 class StockDataset(Dataset):
@@ -229,7 +198,7 @@ def build_index_map(
 
 
 def prepare_data(
-    config: DataConfig,
+    config: GRUDataConfig,
     device: str = "cpu",  # 数据预加载设备
 ) -> Tuple[StockDataset, StockDataset, StockDataset, List[str]]:
     """
@@ -244,6 +213,8 @@ def prepare_data(
     Returns:
         train_dataset, valid_dataset, test_dataset, feature_cols
     """
+    import json
+    
     logger.info("=" * 60)
     logger.info("📊 准备深度学习数据集")
     logger.info("=" * 60)
@@ -253,35 +224,83 @@ def prepare_data(
         try:
             import cudf
             df = cudf.read_parquet(str(config.data_path))
+            use_cudf = True
             logger.info(f"✓ cuDF 加载数据: {len(df):,} 行")
         except ImportError:
             import pandas as pd
             df = pd.read_parquet(str(config.data_path))
+            use_cudf = False
             logger.info(f"✓ Pandas 加载数据: {len(df):,} 行")
     else:
         import pandas as pd
         df = pd.read_parquet(str(config.data_path))
+        use_cudf = False
         logger.info(f"✓ Pandas 加载数据: {len(df):,} 行")
     
-    # 2. 筛选特征列
+    # 2. 特征选择（新增：支持 LightGBM 强特征筛选）
     all_cols = df.columns.tolist()
     
-    if config.zscore_only:
-        # 只使用 _zscore 后缀的列
-        feature_cols = [c for c in all_cols if c.endswith('_zscore')]
-        logger.info(f"✓ Z-Score 特征筛选: {len(feature_cols)} 个特征")
+    use_feature_selection = getattr(config, 'use_feature_selection', False)
+    selected_features = getattr(config, 'selected_features', [])
+    feature_selection_json = getattr(config, 'feature_selection_json', None)
+    
+    if use_feature_selection:
+        # 优先使用直接指定的特征列表
+        if selected_features:
+            feature_cols = [f for f in selected_features if f in all_cols]
+            logger.info(f"✓ 使用指定特征列表: {len(feature_cols)} 个")
+        elif feature_selection_json and Path(feature_selection_json).exists():
+            # 从 JSON 文件加载特征列表
+            with open(feature_selection_json, 'r') as f:
+                feature_data = json.load(f)
+            top_features = feature_data.get('top50', feature_data.get('features', []))
+            feature_cols = [f for f in top_features if f in all_cols]
+            logger.info(f"✓ 从 {feature_selection_json} 加载特征: {len(feature_cols)} 个")
+        else:
+            logger.warning("⚠️ 启用特征筛选但未指定特征列表，回退到全特征")
+            extra_exclude = config.extra_exclude_cols if hasattr(config, 'extra_exclude_cols') else []
+            feature_cols = get_gru_feature_columns(
+                all_cols, exclude_cols=extra_exclude,
+                exclude_categorical=config.exclude_categorical if hasattr(config, 'exclude_categorical') else True
+            )
     else:
-        # 排除指定列
-        exclude_set = set(config.exclude_cols)
-        feature_cols = [c for c in all_cols if c not in exclude_set]
+        # 使用动态特征识别（排除法）
+        extra_exclude = config.extra_exclude_cols if hasattr(config, 'extra_exclude_cols') else []
+        feature_cols = get_gru_feature_columns(
+            all_cols,
+            exclude_cols=extra_exclude,
+            exclude_categorical=config.exclude_categorical if hasattr(config, 'exclude_categorical') else True
+        )
     
-    logger.info(f"  特征列: {feature_cols[:5]}... (共 {len(feature_cols)} 个)")
+    # 过滤非数值列
+    numeric_types = ['float32', 'float64', 'Float32', 'Float64', 'int32', 'int64', 'int8']
+    numeric_cols = df.select_dtypes(include=numeric_types).columns.tolist()
+    feature_cols = [c for c in feature_cols if c in numeric_cols]
     
-    # 3. 按 ts_code + trade_date 排序
+    logger.info(f"✓ 特征列: {len(feature_cols)} 个")
+    logger.info(f"  前 10 个特征: {feature_cols[:10]}...")
+    
+    # 3. 数据类型转换 & inf 处理
+    # float64 -> float32
+    float64_cols = df.select_dtypes(include=['float64', 'Float64']).columns.tolist()
+    if float64_cols:
+        for col in float64_cols:
+            df[col] = df[col].astype('float32')
+        logger.info(f"✓ float64 -> float32: {len(float64_cols)} 列")
+    
+    # inf -> NaN
+    for col in feature_cols:
+        if col in df.columns:
+            if use_cudf:
+                df[col] = df[col].replace([float('inf'), float('-inf')], np.nan)
+            else:
+                df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+    
+    # 4. 按 ts_code + trade_date 排序
     df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
     logger.info("✓ 数据已按 ts_code + trade_date 排序")
     
-    # 4. 时间切分
+    # 5. 日期处理
     if hasattr(df, 'to_arrow'):
         dates = df['trade_date'].to_arrow().to_pandas().values
         codes = df['ts_code'].to_arrow().to_pandas().values
@@ -289,26 +308,28 @@ def prepare_data(
         dates = df['trade_date'].values
         codes = df['ts_code'].values
     
-    # 转换为字符串比较
-    dates_str = np.array([str(d)[:10] for d in dates])
+    # 处理 datetime64 格式
+    if hasattr(dates[0], 'strftime'):
+        dates_str = np.array([d.strftime('%Y-%m-%d') for d in dates])
+    else:
+        dates_str = np.array([str(d)[:10] for d in dates])
     codes_str = np.array([str(c) for c in codes])
     
+    # 6. 时间切分
     train_mask = (dates_str >= config.train_start) & (dates_str <= config.train_end)
     valid_mask = (dates_str >= config.valid_start) & (dates_str <= config.valid_end)
     test_mask = (dates_str >= config.test_start) & (dates_str <= config.test_end)
     
     logger.info(f"📅 时间切分 (Purging={config.purge_days}天):")
     logger.info(f"  训练集: {config.train_start} ~ {config.train_end}")
-    logger.info(f"  隔离带: {config.train_end} + {config.purge_days}天")
     logger.info(f"  验证集: {config.valid_start} ~ {config.valid_end}")
-    logger.info(f"  隔离带: {config.valid_end} + {config.purge_days}天")
     logger.info(f"  测试集: {config.test_start} ~ {config.test_end}")
     
-    # 5. 构建索引映射
+    # 7. 构建索引映射
     logger.info("📊 构建索引映射...")
     all_indices, stock_bounds = build_index_map(df, window_size=config.window_size)
     
-    # 6. 按时间过滤有效索引
+    # 8. 按时间过滤有效索引
     train_indices = all_indices[train_mask[all_indices]]
     valid_indices = all_indices[valid_mask[all_indices]]
     test_indices = all_indices[test_mask[all_indices]]
@@ -318,7 +339,7 @@ def prepare_data(
     logger.info(f"  验证集: {len(valid_indices):,}")
     logger.info(f"  测试集: {len(test_indices):,}")
     
-    # 7. 创建数据集 (预加载到指定设备)
+    # 9. 创建数据集 (预加载到指定设备)
     logger.info(f"📊 预加载数据到设备: {device}")
     
     train_dataset = StockDataset(

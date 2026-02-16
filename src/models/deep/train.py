@@ -6,6 +6,11 @@ GRU 训练模块
 2. AdamW 优化器 + CosineAnnealingLR
 3. 早停 (监控 Validation RankIC)
 4. RTX 5070 优化 (大 Batch Size)
+
+改造说明（2026.02）:
+- 适配新配置系统
+- 支持可配置的梯度裁剪
+- 完善日志输出
 """
 
 import logging
@@ -13,7 +18,7 @@ import time
 import gc
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -24,13 +29,14 @@ from torch.amp import GradScaler, autocast
 from .model import GRUModel, ModelConfig, create_model
 from .loss import CombinedLoss, ICLoss, compute_ic, compute_rank_ic
 from .dataset import StockDataset
+from .config import GRUTrainConfig, GRUConfig
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TrainConfig:
-    """训练配置"""
+    """训练配置（保留兼容性）"""
     
     # 基础配置
     epochs: int = 100
@@ -46,21 +52,25 @@ class TrainConfig:
     lr_min: float = 1e-5
     
     # 损失函数类型
-    loss_type: str = "combined"  # combined / ic_only
+    loss_type: str = "combined"  # combined / ic_only / mse
     # 当 loss_type="combined" 时使用以下权重
-    mse_weight: float = 0.7
-    ic_weight: float = 0.3
+    mse_weight: float = 0.5
+    ic_weight: float = 0.5
     
     # 早停
-    patience: int = 10  # 连续多少 epoch 验证 IC 不提升就停止
-    min_epochs: int = 1  # 最少训练轮数，在此之前不检查早停
+    patience: int = 15  # 增加耐心
+    min_epochs: int = 5  # 最少训练轮数
     
     # 混合精度
     use_amp: bool = True
     
+    # 梯度裁剪
+    grad_clip: float = 1.0
+    
     # 保存
     save_dir: Path = Path("/home/menghuanghan/quant_system/models/gru")
     save_best: bool = True
+    model_name: str = "gru_excess_ret_5d"
     
     # 日志
     log_interval: int = 100  # 每多少 batch 打印一次
@@ -194,9 +204,10 @@ class GRUTrainer:
                 # 混合精度反向
                 self.scaler.scale(loss).backward()
                 
-                # 梯度裁剪
+                # 梯度裁剪（使用配置参数）
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                grad_clip = getattr(self.config, 'grad_clip', 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
                 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -204,7 +215,8 @@ class GRUTrainer:
                 pred = self.model(X)
                 loss = self.criterion(pred, y)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                grad_clip = getattr(self.config, 'grad_clip', 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
                 self.optimizer.step()
             
             total_loss += loss.item()
