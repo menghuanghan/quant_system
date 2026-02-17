@@ -63,13 +63,73 @@ def parse_args():
         help="日志级别",
     )
     
+    # 随机种子配置（可复现性）
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子 (default: 42)",
+    )
+    parser.add_argument(
+        "--multi-seed",
+        action="store_true",
+        help="启用多种子训练模式（训练多个模型用于 Seed Ensemble）",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[42, 100, 888],
+        help="多种子训练时的种子列表 (default: 42 100 888)",
+    )
+    
     return parser.parse_args()
 
 
 def main():
     """主函数"""
+    import gc
+    
     args = parse_args()
     setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
+    
+    # 多种子训练模式
+    if args.multi_seed:
+        logger.info("=" * 60)
+        logger.info("🎲 多种子训练模式（Seed Ensemble）")
+        logger.info("=" * 60)
+        logger.info(f"种子列表: {args.seeds}")
+        
+        for seed in args.seeds:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🌱 使用种子 {seed} 开始训练...")
+            logger.info("=" * 60)
+            # 修改参数使用当前种子
+            args.seed = seed
+            train_single_lgbm(args, seed_suffix=f"_seed{seed}")
+            
+            # 释放 GPU 内存（防止 OOM）
+            gc.collect()
+            logger.info("🗑️ 已释放内存")
+        
+        logger.info("\n" + "=" * 60)
+        logger.info("✅ 多种子训练完成！")
+        logger.info(f"   已保存模型: lgbm_{args.target}_seed*.pkl")
+        logger.info("   请在融合脚本中启用 --lgb-seed-ensemble 选项")
+        logger.info("=" * 60)
+    else:
+        # 单种子训练模式 - 使用带种子后缀的文件名
+        train_single_lgbm(args, seed_suffix=f"_seed{args.seed}")
+
+def train_single_lgbm(args, seed_suffix: str = ""):
+    """
+    训练单个 LightGBM 模型
+    
+    Args:
+        args: 命令行参数
+        seed_suffix: 模型文件名后缀（多种子模式使用）
+    """
     logger = logging.getLogger(__name__)
     
     logger.info("=" * 60)
@@ -84,10 +144,19 @@ def main():
         config = LGBMConfig.default()
         logger.info("使用 GPU 模式")
     
-    # 设置目标列
+    # 设置目标列和模型名称（支持多种子模式）
     config.data.target_col = args.target
-    config.train.model_name = f"lgbm_{args.target}"
+    if seed_suffix:
+        config.train.model_name = f"lgbm_{args.target}{seed_suffix}"
+    else:
+        config.train.model_name = f"lgbm_{args.target}"
     logger.info(f"目标列: {args.target}")
+    
+    # 设置随机种子（确保可复现性）
+    config.params.seed = args.seed
+    config.params.bagging_seed = args.seed
+    config.params.feature_fraction_seed = args.seed
+    logger.info(f"🎲 随机种子: {args.seed}")
     
     # 设置数据路径
     if args.data_path:

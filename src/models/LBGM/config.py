@@ -188,6 +188,9 @@ class LGBMParams:
     # 其他
     verbose: int = -1  # 静默模式
     seed: int = 42
+    bagging_seed: int = 42  # 采样随机种子
+    feature_fraction_seed: int = 42  # 特征采样随机种子
+    deterministic: bool = True  # 确定性模式，保证可复现
     force_row_wise: bool = True  # GPU 模式下使用行方向
     
     def to_dict(self) -> Dict[str, Any]:
@@ -211,6 +214,9 @@ class LGBMParams:
             "bagging_freq": self.bagging_freq,
             "verbose": self.verbose,
             "seed": self.seed,
+            "bagging_seed": self.bagging_seed,
+            "feature_fraction_seed": self.feature_fraction_seed,
+            "deterministic": self.deterministic,
             "force_row_wise": self.force_row_wise,
         }
 

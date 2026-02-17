@@ -6,16 +6,20 @@ GRU 训练模块
 2. AdamW 优化器 + CosineAnnealingLR
 3. 早停 (监控 Validation RankIC)
 4. RTX 5070 优化 (大 Batch Size)
+5. 可复现性 (固定随机种子)
 
 改造说明（2026.02）:
 - 适配新配置系统
 - 支持可配置的梯度裁剪
 - 完善日志输出
+- 添加 seed_everything 函数确保可复现性
 """
 
 import logging
 import time
 import gc
+import os
+import random
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -32,6 +36,25 @@ from .dataset import StockDataset
 from .config import GRUTrainConfig, GRUConfig
 
 logger = logging.getLogger(__name__)
+
+
+def seed_everything(seed: int = 42):
+    """
+    固定所有随机源，确保训练可复现
+    
+    Args:
+        seed: 随机种子
+    """
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # 以下两行会让训练变慢，但能保证完全一致
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.info(f"🎲 随机种子已固定: {seed}")
 
 
 @dataclass
@@ -71,6 +94,7 @@ class TrainConfig:
     save_dir: Path = Path("/home/menghuanghan/quant_system/models/gru")
     save_best: bool = True
     model_name: str = "gru_excess_ret_5d"
+    best_model_prefix: str = "best_model"  # 最佳模型文件名前缀（支持多种子模式）
     
     # 日志
     log_interval: int = 100  # 每多少 batch 打印一次
@@ -381,9 +405,10 @@ class GRUTrainer:
                 self.best_valid_ic = valid_rank_ic
                 self.patience_counter = 0
                 
-                # 保存最佳模型
+                # 保存最佳模型（使用 best_model_prefix 支持多种子模式）
                 if self.config.save_best:
-                    self.save_model("best_model.pt")
+                    best_model_filename = f"{self.config.best_model_prefix}.pt"
+                    self.save_model(best_model_filename)
                     logger.info(f"  💾 保存最佳模型 (RankIC: {valid_rank_ic:.4f})")
             else:
                 self.patience_counter += 1

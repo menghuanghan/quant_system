@@ -37,7 +37,7 @@ import torch
 from src.models.deep.config import GRUDataConfig, GRUModelConfig, CATEGORICAL_FEATURES
 from src.models.deep.dataset import prepare_data
 from src.models.deep.model import create_model
-from src.models.deep.train import GRUTrainer, TrainConfig, create_dataloader
+from src.models.deep.train import GRUTrainer, TrainConfig, create_dataloader, seed_everything
 from src.models.deep.loss import compute_ic, compute_rank_ic
 
 
@@ -51,16 +51,18 @@ def setup_logging(level: str = "INFO"):
 
 
 def generate_feature_selection(
-    lgbm_model_path: Path,
+    lgbm_model_paths: list,
     output_json_path: Path,
     exclude_categorical: bool = True,
     top_n: int = 50,
 ) -> list:
     """
-    从 LightGBM 模型生成 Top N 特征列表
+    从 LightGBM 模型生成 Top N 特征列表（委员会投票机制）
+    
+    对所有 LightGBM 模型的特征重要性进行平均，选出综合排名最高的特征。
     
     Args:
-        lgbm_model_path: LightGBM 模型路径 (.pkl)
+        lgbm_model_paths: LightGBM 模型路径列表 (.pkl)
         output_json_path: 输出 JSON 路径
         exclude_categorical: 是否排除类别特征
         top_n: 保留的特征数量
@@ -70,21 +72,49 @@ def generate_feature_selection(
     """
     logger = logging.getLogger(__name__)
     
-    logger.info(f"📊 生成特征筛选文件...")
-    logger.info(f"  LightGBM 模型: {lgbm_model_path}")
+    logger.info(f"📊 生成特征筛选文件（委员会投票）...")
+    logger.info(f"  模型数量: {len(lgbm_model_paths)}")
     logger.info(f"  排除类别特征: {exclude_categorical}")
     
-    # 加载 LightGBM 模型
-    with open(lgbm_model_path, 'rb') as f:
-        model = pickle.load(f)
+    from collections import defaultdict
+    import numpy as np
     
-    # 获取特征重要性 (使用 gain)
-    importance = model.feature_importance(importance_type='gain')
-    feature_names = model.feature_name()
+    # 收集所有模型的特征重要性
+    feature_importance_sum = defaultdict(float)
+    model_count = 0
     
-    # 排序获取 Top N
-    sorted_idx = importance.argsort()[::-1]
-    top_features = [feature_names[i] for i in sorted_idx[:top_n * 2]]  # 预留更多
+    for model_path in lgbm_model_paths:
+        logger.info(f"  加载模型: {model_path.name}")
+        
+        # 加载 LightGBM 模型
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        
+        # 获取特征重要性 (使用 gain)
+        importance = model.feature_importance(importance_type='gain')
+        feature_names = model.feature_name()
+        
+        # 累加重要性
+        for name, imp in zip(feature_names, importance):
+            feature_importance_sum[name] += imp
+        
+        model_count += 1
+    
+    # 计算平均重要性
+    feature_importance_avg = {
+        name: imp / model_count 
+        for name, imp in feature_importance_sum.items()
+    }
+    
+    # 按平均重要性排序
+    sorted_features = sorted(
+        feature_importance_avg.items(), 
+        key=lambda x: x[1], 
+        reverse=True
+    )
+    
+    # 获取 Top N 特征
+    top_features = [f[0] for f in sorted_features[:top_n * 2]]  # 预留更多
     
     # 是否排除类别特征
     if exclude_categorical:
@@ -100,6 +130,9 @@ def generate_feature_selection(
         'features': selected_features,
         'count': len(selected_features),
         'exclude_categorical': exclude_categorical,
+        'model_count': model_count,
+        'model_paths': [str(p.name) for p in lgbm_model_paths],
+        'feature_importance': {f: feature_importance_avg.get(f, 0) for f in selected_features},
     }
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_json_path, 'w') as f:
@@ -113,27 +146,49 @@ def generate_feature_selection(
 
 def ensure_feature_selection(
     feature_json_path: Path,
-    lgbm_model_path: Path,
+    lgbm_model_dir: Path,
+    target_col: str,
     use_embedding: bool,
     force_regenerate: bool = False,
 ) -> None:
     """
     确保特征筛选文件存在，不存在则自动生成
     
+    使用委员会投票机制：自动查找所有 LightGBM 模型文件，
+    计算特征重要性平均值，选出综合排名最高的特征。
+    
     Args:
         feature_json_path: 特征 JSON 文件路径
-        lgbm_model_path: LightGBM 模型路径
+        lgbm_model_dir: LightGBM 模型目录
+        target_col: 目标列名（用于匹配模型文件）
         use_embedding: 是否启用 Embedding（决定是否排除类别特征）
         force_regenerate: 强制重新生成
     """
+    import glob
     logger = logging.getLogger(__name__)
     
-    # 检查 LightGBM 模型是否存在
-    if not lgbm_model_path.exists():
+    # 使用 glob 模式匹配所有 LightGBM 模型文件
+    # 匹配模式: lgbm_{target}_seed*.pkl
+    pattern = lgbm_model_dir / f"lgbm_{target_col}_seed*.pkl"
+    model_files = list(lgbm_model_dir.glob(f"lgbm_{target_col}_seed*.pkl"))
+    
+    # 如果没有找到 seed 模型，尝试匹配默认模型文件
+    if not model_files:
+        default_model = lgbm_model_dir / f"lgbm_{target_col}.pkl"
+        if default_model.exists():
+            model_files = [default_model]
+    
+    # 检查是否找到模型文件
+    if not model_files:
         raise FileNotFoundError(
-            f"LightGBM 模型不存在: {lgbm_model_path}\n"
-            "请先运行 LightGBM 训练: python scripts/run_lgb_train.py"
+            f"未找到 LightGBM 模型文件！\n"
+            f"  已尝试匹配: {pattern}\n"
+            f"  请先运行 LightGBM 训练: python scripts/run_lgb_train.py"
         )
+    
+    logger.info(f"📂 找到 {len(model_files)} 个 LightGBM 模型文件:")
+    for f in model_files:
+        logger.info(f"    - {f.name}")
     
     # 检查特征文件是否存在
     need_regenerate = force_regenerate or not feature_json_path.exists()
@@ -150,10 +205,16 @@ def ensure_feature_selection(
         if existing_exclude != current_exclude:
             logger.warning(f"⚠️ 特征文件配置不匹配 (exclude_categorical: {existing_exclude} → {current_exclude})")
             need_regenerate = True
+        
+        # 如果模型数量变化，需要重新生成
+        existing_model_count = existing.get('model_count', 1)
+        if existing_model_count != len(model_files):
+            logger.warning(f"⚠️ 模型数量变化 ({existing_model_count} → {len(model_files)})")
+            need_regenerate = True
     
     if need_regenerate:
         generate_feature_selection(
-            lgbm_model_path=lgbm_model_path,
+            lgbm_model_paths=model_files,
             output_json_path=feature_json_path,
             exclude_categorical=not use_embedding,  # Embedding 启用时不排除
             top_n=50,
@@ -264,6 +325,26 @@ def parse_args():
         help="梯度裁剪阈值 (default: 1.0)",
     )
     
+    # 随机种子配置（可复现性）
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子 (default: 42)",
+    )
+    parser.add_argument(
+        "--multi-seed",
+        action="store_true",
+        help="启用多种子训练模式（训练多个模型用于 Seed Ensemble）",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[42, 100, 888],
+        help="多种子训练时的种子列表 (default: 42 100 888)",
+    )
+    
     # 其他配置
     parser.add_argument(
         "--window-size",
@@ -299,6 +380,86 @@ def main():
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
     
+    # 多种子训练模式
+    if args.multi_seed:
+        import subprocess
+        import sys
+        
+        logger.info("=" * 60)
+        logger.info("🎲 多种子训练模式（Seed Ensemble）")
+        logger.info("=" * 60)
+        logger.info(f"种子列表: {args.seeds}")
+        logger.info("使用 subprocess 运行每个种子，确保内存完全释放")
+        
+        for idx, seed in enumerate(args.seeds):
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🌱 使用种子 {seed} 开始训练... ({idx + 1}/{len(args.seeds)})")
+            logger.info("=" * 60)
+            
+            # 构建单种子训练命令
+            cmd = [
+                sys.executable, str(Path(__file__)),
+                "--seed", str(seed),
+                "--target", args.target,
+                "--batch-size", str(args.batch_size),
+                "--epochs", str(args.epochs),
+                "--hidden-dim", str(args.hidden_dim),
+                "--num-layers", str(args.num_layers),
+                "--dropout", str(args.dropout),
+                "--weight-decay", str(args.weight_decay),
+                "--patience", str(args.patience),
+                "--lr", str(args.lr),
+                "--grad-clip", str(args.grad_clip),
+                "--window-size", str(args.window_size),
+                "--log-level", args.log_level,
+            ]
+            
+            # 添加可选参数
+            if args.use_feature_selection:
+                cmd.append("--use-feature-selection")
+                cmd.extend(["--feature-json", args.feature_json])
+                # 只在第一个种子运行时重新生成特征文件
+                if args.regenerate_features and idx == 0:
+                    cmd.append("--regenerate-features")
+            if args.use_embedding:
+                cmd.append("--use-embedding")
+                cmd.extend(["--embedding-features"] + args.embedding_features)
+            if args.data_path:
+                cmd.extend(["--data-path", args.data_path])
+            if args.cpu:
+                cmd.append("--cpu")
+            
+            # 运行子进程（继承 stdout/stderr）
+            result = subprocess.run(cmd)
+            
+            if result.returncode != 0:
+                logger.error(f"❌ 种子 {seed} 训练失败 (返回码: {result.returncode})")
+            else:
+                logger.info(f"✅ 种子 {seed} 训练完成")
+        
+        logger.info("\n" + "=" * 60)
+        logger.info("✅ 多种子训练完成！")
+        logger.info(f"   已保存模型: gru_{args.target}_seed*.pt")
+        logger.info("   请在融合脚本中启用 --seed-ensemble 选项")
+        logger.info("=" * 60)
+    else:
+        # 单种子训练模式 - 使用带种子后缀的文件名
+        train_single_model(args, seed_suffix=f"_seed{args.seed}")
+
+
+def train_single_model(args, seed_suffix: str = ""):
+    """
+    训练单个模型
+    
+    Args:
+        args: 命令行参数
+        seed_suffix: 模型文件名后缀（多种子模式使用）
+    """
+    logger = logging.getLogger(__name__)
+    
+    # 固定随机种子（可复现性）
+    seed_everything(args.seed)
+    
     logger.info("=" * 60)
     logger.info("🤖 GRU 模型训练（防过拟合优化版）")
     logger.info("=" * 60)
@@ -324,12 +485,13 @@ def main():
     # 启用特征筛选
     if args.use_feature_selection:
         feature_json_path = Path(args.feature_json)
-        lgbm_model_path = PROJECT_ROOT / "models" / "lgbm" / "lgbm_excess_ret_5d.pkl"
+        lgbm_model_dir = PROJECT_ROOT / "models" / "lgbm"
         
-        # 自动检查/生成特征筛选文件
+        # 自动检查/生成特征筛选文件（委员会投票机制）
         ensure_feature_selection(
             feature_json_path=feature_json_path,
-            lgbm_model_path=lgbm_model_path,
+            lgbm_model_dir=lgbm_model_dir,
+            target_col=args.target,
             use_embedding=args.use_embedding,
             force_regenerate=args.regenerate_features,
         )
@@ -386,6 +548,12 @@ def main():
     train_config.grad_clip = args.grad_clip  # 梯度裁剪
     train_config.model_name = f"gru_{args.target}"
     
+    # 多种子模式：设置不同的 best_model 文件名
+    if seed_suffix:
+        train_config.best_model_prefix = f"best_model{seed_suffix}"
+    
+    logger.info(f"  随机种子: {args.seed}")
+    
     logger.info("=" * 60)
     logger.info("📋 防过拟合配置")
     logger.info("=" * 60)
@@ -438,8 +606,15 @@ def main():
     logger.info(f"测试集 IC: {test_ic:.4f}")
     logger.info(f"测试集 RankIC: {test_rank_ic:.4f}")
     
-    # 保存最终模型
-    trainer.save_model(f"final_{args.target}.pt")
+    # 保存最终模型（支持多种子模式）
+    if seed_suffix:
+        # 多种子模式：保存为 gru_{target}_seed{N}.pt
+        trainer.save_model(f"gru_{args.target}{seed_suffix}.pt")
+        # 同时保存最佳模型
+        best_model_name = f"best_model{seed_suffix}.pt"
+    else:
+        trainer.save_model(f"final_{args.target}.pt")
+        best_model_name = "best_model.pt"
     
     # 保存模型配置（供融合脚本使用）
     model_config_dict = {
@@ -454,6 +629,7 @@ def main():
         'feature_json_path': str(Path(args.feature_json)) if args.use_feature_selection else None,
         'target_col': args.target,
         'window_size': args.window_size,
+        'seed': args.seed,  # 记录使用的种子
         # 训练配置（参考用）
         'train_config': {
             'weight_decay': args.weight_decay,
@@ -466,7 +642,12 @@ def main():
         'test_rank_ic': float(test_rank_ic),
     }
     
-    config_save_path = train_config.save_dir / "model_config.json"
+    # 配置文件名（多种子模式使用不同文件名）
+    if seed_suffix:
+        config_save_path = train_config.save_dir / f"model_config{seed_suffix}.json"
+    else:
+        config_save_path = train_config.save_dir / "model_config.json"
+    
     with open(config_save_path, 'w') as f:
         json.dump(model_config_dict, f, indent=2, ensure_ascii=False)
     logger.info(f"💾 模型配置已保存: {config_save_path}")

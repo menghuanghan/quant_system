@@ -50,6 +50,15 @@ def parse_args():
                         help="强制重新训练 LightGBM")
     parser.add_argument("--retrain-gru", action="store_true",
                         help="强制重新训练 GRU")
+    
+    # 种子融合（Seed Ensemble）参数
+    parser.add_argument("--gru-seed-ensemble", action="store_true",
+                        help="启用 GRU 多种子融合（加载所有 best_model_seed*.pt）")
+    parser.add_argument("--lgb-seed-ensemble", action="store_true",
+                        help="启用 LightGBM 多种子融合（加载所有 lgbm_*_seed*.pkl）")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 100, 888],
+                        help="种子列表，用于种子融合 (default: 42 100 888)")
+    
     return parser.parse_args()
 
 
@@ -97,6 +106,80 @@ def load_or_train_lgb(target_col: str, retrain: bool = False):
     logger.info(f"  ✓ 预测完成: {len(lgb_pred):,} 条")
     
     # 清理训练数据
+    del X_train, y_train, X_valid, y_valid, X_test
+    loader.cleanup()
+    gc.collect()
+    
+    return lgb_pred, y_test, test_info
+
+
+def load_lgb_seed_ensemble(target_col: str, seeds: list[int], device: str = "cuda"):
+    """
+    加载多种子 LightGBM 模型并进行 Seed Ensemble（预测平均）
+    
+    Args:
+        target_col: 目标列名
+        seeds: 种子列表
+        device: 设备（用于数据加载）
+        
+    Returns:
+        lgb_pred: 平均后的预测值
+        y_test: 测试集标签
+        test_info: 测试集信息
+    """
+    from src.models.LBGM.config import LGBMConfig
+    from src.models.LBGM.data_loader import DataLoader
+    
+    logger.info("=" * 60)
+    logger.info("📊 LightGBM Seed Ensemble")
+    logger.info("=" * 60)
+    logger.info(f"  种子列表: {seeds}")
+    
+    model_dir = PROJECT_ROOT / "models" / "lgbm"
+    
+    # 加载数据（只需要一次）
+    config = LGBMConfig.default()
+    config.data.target_col = target_col
+    
+    loader = DataLoader(config.data, use_gpu=True)
+    loader.load()
+    
+    X_train, y_train, X_valid, y_valid, X_test, y_test = loader.split()
+    test_info = loader.get_test_info()
+    
+    # 加载所有种子模型并预测
+    all_predictions = []
+    loaded_seeds = []
+    
+    for seed in seeds:
+        model_path = model_dir / f"lgbm_{target_col}_seed{seed}.pkl"
+        if model_path.exists():
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
+            pred = model.predict(X_test)
+            all_predictions.append(pred)
+            loaded_seeds.append(seed)
+            logger.info(f"  ✓ 已加载 seed={seed}: {model_path.name}")
+    
+    if not all_predictions:
+        # 尝试加载默认模型
+        default_path = model_dir / f"lgbm_{target_col}.pkl"
+        if default_path.exists():
+            logger.warning(f"  ⚠️ 未找到种子模型，使用默认模型: {default_path.name}")
+            with open(default_path, "rb") as f:
+                model = pickle.load(f)
+            lgb_pred = model.predict(X_test)
+        else:
+            raise FileNotFoundError(f"未找到任何 LightGBM 模型文件")
+    else:
+        # 计算平均预测
+        lgb_pred = np.mean(all_predictions, axis=0)
+        logger.info(f"  ✓ Seed Ensemble 完成: {len(loaded_seeds)} 个模型")
+        logger.info(f"  ✓ 使用的种子: {loaded_seeds}")
+    
+    logger.info(f"  ✓ 预测完成: {len(lgb_pred):,} 条")
+    
+    # 清理
     del X_train, y_train, X_valid, y_valid, X_test
     loader.cleanup()
     gc.collect()
@@ -264,6 +347,197 @@ def load_or_train_gru(target_col: str, retrain: bool = False, device: str = "cud
     return gru_pred, gru_label, {"dates": gru_dates, "codes": gru_codes}
 
 
+def load_gru_seed_ensemble(target_col: str, seeds: list[int], device: str = "cuda"):
+    """
+    加载多种子 GRU 模型并进行 Seed Ensemble（预测平均）
+    
+    Args:
+        target_col: 目标列名
+        seeds: 种子列表
+        device: 设备
+        
+    Returns:
+        gru_pred: 平均后的预测值
+        gru_label: 测试集标签
+        gru_info: 测试集信息
+    """
+    import json
+    from src.models.deep.config import GRUDataConfig, GRUModelConfig
+    from src.models.deep.dataset import prepare_data
+    from src.models.deep.model import create_model
+    from src.models.deep.train import create_dataloader
+    
+    logger.info("=" * 60)
+    logger.info("📊 GRU Seed Ensemble")
+    logger.info("=" * 60)
+    logger.info(f"  种子列表: {seeds}")
+    
+    model_dir = PROJECT_ROOT / "models" / "gru"
+    
+    # 首先从任意一个种子配置文件读取模型参数（所有种子应该使用相同配置）
+    config_loaded = False
+    for seed in seeds:
+        config_path = model_dir / f"model_config_seed{seed}.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                saved_config = json.load(f)
+            config_loaded = True
+            logger.info(f"  ✓ 加载配置: {config_path.name}")
+            break
+    
+    if not config_loaded:
+        # 尝试加载默认配置
+        config_path = model_dir / "model_config.json"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                saved_config = json.load(f)
+            logger.warning(f"  ⚠️ 使用默认配置: {config_path.name}")
+        else:
+            raise FileNotFoundError("未找到任何 GRU 模型配置文件")
+    
+    # 解析配置
+    feature_json_path = Path(saved_config.get('feature_json_path', PROJECT_ROOT / "models" / "lgbm" / "top50_features.json"))
+    use_feature_selection = saved_config.get('use_feature_selection', True)
+    window_size = saved_config.get('window_size', 20)
+    hidden_dim = saved_config.get('hidden_dim', 32)
+    num_layers = saved_config.get('num_layers', 1)
+    dropout = saved_config.get('dropout', 0.5)
+    mlp_hidden = saved_config.get('mlp_hidden', 32)
+    use_embedding = saved_config.get('use_embedding', False)
+    embedding_features = saved_config.get('embedding_features', [])
+    
+    logger.info(f"    hidden_dim: {hidden_dim}")
+    logger.info(f"    dropout: {dropout}")
+    logger.info(f"    mlp_hidden: {mlp_hidden}")
+    
+    # 准备数据（只需要一次）
+    data_config = GRUDataConfig(
+        target_col=target_col,
+        window_size=window_size,
+        use_gpu=True,
+        use_feature_selection=use_feature_selection,
+        feature_selection_json=feature_json_path,
+        use_embedding=use_embedding,
+        embedding_features=embedding_features if use_embedding else [],
+    )
+    
+    train_dataset, valid_dataset, test_dataset, feature_cols = prepare_data(
+        config=data_config,
+        device=device,
+    )
+    
+    # 创建测试 DataLoader
+    test_loader = create_dataloader(test_dataset, batch_size=2048, shuffle=False)
+    
+    # 加载所有种子模型并预测
+    all_predictions = []
+    loaded_seeds = []
+    gru_labels = None
+    
+    for seed in seeds:
+        model_path = model_dir / f"best_model_seed{seed}.pt"
+        if model_path.exists():
+            # 创建模型
+            model_config = GRUModelConfig(
+                input_dim=len(feature_cols),
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                mlp_hidden=mlp_hidden,
+                use_embedding=use_embedding,
+                embedding_features=embedding_features if use_embedding else [],
+            )
+            model = create_model(config=model_config).to(device)
+            
+            # 加载权重
+            checkpoint = torch.load(model_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.eval()
+            
+            # 预测
+            seed_preds = []
+            seed_labels = []
+            
+            with torch.no_grad():
+                for batch in test_loader:
+                    x, y = batch
+                    pred = model(x)
+                    seed_preds.append(pred.cpu().numpy())
+                    seed_labels.append(y.cpu().numpy())
+            
+            pred = np.concatenate(seed_preds).flatten()
+            all_predictions.append(pred)
+            loaded_seeds.append(seed)
+            
+            # 保存标签（所有种子共用）
+            if gru_labels is None:
+                gru_labels = np.concatenate(seed_labels).flatten()
+            
+            logger.info(f"  ✓ 已加载 seed={seed}: {model_path.name}")
+    
+    if not all_predictions:
+        # 尝试加载默认模型
+        default_path = model_dir / "best_model.pt"
+        if default_path.exists():
+            logger.warning(f"  ⚠️ 未找到种子模型，使用默认模型: {default_path.name}")
+            
+            model_config = GRUModelConfig(
+                input_dim=len(feature_cols),
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                mlp_hidden=mlp_hidden,
+                use_embedding=use_embedding,
+                embedding_features=embedding_features if use_embedding else [],
+            )
+            model = create_model(config=model_config).to(device)
+            
+            checkpoint = torch.load(default_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            model.eval()
+            
+            gru_preds = []
+            gru_labels_list = []
+            
+            with torch.no_grad():
+                for batch in test_loader:
+                    x, y = batch
+                    pred = model(x)
+                    gru_preds.append(pred.cpu().numpy())
+                    gru_labels_list.append(y.cpu().numpy())
+            
+            gru_pred = np.concatenate(gru_preds).flatten()
+            gru_labels = np.concatenate(gru_labels_list).flatten()
+        else:
+            raise FileNotFoundError(f"未找到任何 GRU 模型文件")
+    else:
+        # 计算平均预测
+        gru_pred = np.mean(all_predictions, axis=0)
+        logger.info(f"  ✓ Seed Ensemble 完成: {len(loaded_seeds)} 个模型")
+        logger.info(f"  ✓ 使用的种子: {loaded_seeds}")
+    
+    logger.info(f"  ✓ 预测完成: {len(gru_pred):,} 条")
+    
+    # 获取测试集信息
+    if hasattr(test_dataset, 'dates'):
+        gru_dates = test_dataset.dates
+        if hasattr(gru_dates, 'cpu'):
+            gru_dates = gru_dates.cpu().numpy()
+        else:
+            gru_dates = np.asarray(gru_dates)
+    else:
+        gru_dates = None
+    
+    gru_codes = test_dataset.codes if hasattr(test_dataset, 'codes') else None
+    
+    # 清理
+    del train_dataset, valid_dataset, test_loader
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return gru_pred, gru_labels, {"dates": gru_dates, "codes": gru_codes}
+
+
 def main():
     args = parse_args()
     
@@ -273,16 +547,28 @@ def main():
     logger.info(f"  目标: {args.target}")
     logger.info(f"  权重: LightGBM={args.lgb_weight}, GRU={args.gru_weight}")
     
+    # 显示种子融合配置
+    if args.lgb_seed_ensemble:
+        logger.info(f"  LightGBM Seed Ensemble: 启用 (seeds={args.seeds})")
+    if args.gru_seed_ensemble:
+        logger.info(f"  GRU Seed Ensemble: 启用 (seeds={args.seeds})")
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Step 1: LightGBM
-    lgb_pred, lgb_label, lgb_test_info = load_or_train_lgb(args.target, args.retrain_lgb)
+    if args.lgb_seed_ensemble:
+        lgb_pred, lgb_label, lgb_test_info = load_lgb_seed_ensemble(args.target, args.seeds, device)
+    else:
+        lgb_pred, lgb_label, lgb_test_info = load_or_train_lgb(args.target, args.retrain_lgb)
     lgb_label = np.asarray(lgb_label, dtype=np.float64)
     lgb_dates = lgb_test_info.get("dates")
     lgb_codes = lgb_test_info.get("codes")
     
     # Step 2: GRU
-    gru_pred, gru_label, gru_test_info = load_or_train_gru(args.target, args.retrain_gru, device)
+    if args.gru_seed_ensemble:
+        gru_pred, gru_label, gru_test_info = load_gru_seed_ensemble(args.target, args.seeds, device)
+    else:
+        gru_pred, gru_label, gru_test_info = load_or_train_gru(args.target, args.retrain_gru, device)
     gru_label = np.asarray(gru_label, dtype=np.float64)
     gru_dates = gru_test_info.get("dates")
     
