@@ -167,5 +167,5 @@ logs/
 .continue
 
 temp/
-reports/
-models/
+/reports/
+/models/
