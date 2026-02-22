@@ -57,11 +57,6 @@ class FeatureConfig:
         "sw_l1_idx", 
         "sw_l2_idx",
         "market",
-        "pmi_regime",
-        "lpr_trend",
-        "money_regime",
-        "risk_appetite",
-        "macro_regime",
     ])
     
     # 标签列前缀（训练时需要排除的列）
@@ -71,6 +66,61 @@ class FeatureConfig:
         "excess_ret_", 
         "rank_ret_",
         "sharpe_",
+    ])
+    
+    # ==================== 宏观/无截面方差特征（需剔除）====================
+    # 这些特征在同一天内所有股票数值相同，对横截面模型无区分度
+    # 会导致模型被这些无意义特征主导，产生"降维打击"效应
+    drop_macro_prefixes: List[str] = field(default_factory=lambda: [
+        # 宏观经济指标
+        "gdp_",
+        "cpi_",
+        "ppi_",
+        "pmi",           # pmi, pmi_prod, pmi_new_order, pmi_regime
+        "m2",            # m2, m2_yoy
+        "lpr_",          # lpr_1y, lpr_5y, lpr_trend
+        "macro_",        # 【新增】macro_amount_shibor, macro_vol_m2 等宏观聚合特征
+        # 利率/货币市场
+        "shibor_",       # shibor_on, shibor_1w, shibor_1m, shibor_3m, shibor_6m, shibor_1y
+        # 市场总体指标（无截面方差）
+        "market_total_", # market_total_rzye, market_total_rqye, market_total_rzrqye
+        "market_congestion",
+        "stock_bond_spread",
+        "break_net_ratio",
+        "buffett_",      # buffett_indicator, buffett_quantile_*
+        "pb_median",
+        "pb_ew",
+        "pb_quantile_",
+        # 陆股通总体流向（无截面方差）
+        "hsgt_north",    # hsgt_north, hsgt_north_ma5, hsgt_north_ma20
+        "hsgt_south",
+        "hsgt_hgt",
+        "hsgt_sgt",
+        "hsgt_ggt_",
+        "mf_north_",     # 【新增】mf_north_net 等北向资金总体流向
+        # 指数行情（无截面方差）
+        "sh300_",        # sh300_pct_chg, sh300_amplitude, sh300_turnover, sh300_close, sh300_vol, sh300_amount
+        "zz500_",
+        "zz1000_",
+        "cyb_",
+        "sz50_",
+        "kc50_",
+        "rs_",           # 【新增】rs_csi500, rs_hs300 相对指数强度（无截面方差）
+        # 股指期货（无截面方差）
+        "if_",           # if_total_oi, if_close, if_basis_rate
+        "ic_",
+        "ih_",
+        "im_",
+        # 货币市场流动性（无截面方差）
+        "liquidity_gc001_",
+        "liquidity_r001_",
+        # 纯时序特征（无截面方差）
+        "lag_days",      # 【新增】距上一交易日天数
+        # 宏观衍生状态（无截面方差）
+        "money_regime",
+        "risk_appetite",
+        "macro_score",
+        "macro_regime",
     ])
     
     # 默认训练标签列表
@@ -89,24 +139,24 @@ class LGBConfig:
     
     # 基础参数
     seed: int = 42
-    num_boost_round: int = 2000
-    early_stopping_rounds: int = 50
+    num_boost_round: int = 3000           # 增加最大迭代轮数
+    early_stopping_rounds: int = 100      # 增加早停轮数，让模型学得更久
     verbose_eval: int = 100
     
-    # 核心防过拟合参数
+    # 核心防过拟合参数 - 强制模型慢慢学，多看个股特征
     max_depth: int = 6                    # 树深度 4~7
     num_leaves: int = 31                  # 叶子数 15~63
-    min_data_in_leaf: int = 300           # 叶子最小样本数 200~500
-    feature_fraction: float = 0.7         # 列抽样 0.6~0.8
+    min_data_in_leaf: int = 300           # 叶子最小样本数，防止对单只股票过拟合
+    feature_fraction: float = 0.5         # 列抽样【关键】降低到0.5，强制挖掘深层Alpha
     bagging_fraction: float = 0.8         # 行抽样 0.7~0.9
     bagging_freq: int = 1                 # bagging 频率
     
-    # 学习率
-    learning_rate: float = 0.05
+    # 学习率【关键】降低到0.01，让模型慢慢学
+    learning_rate: float = 0.01
     
-    # 正则化
-    lambda_l1: float = 0.1
-    lambda_l2: float = 1.0
+    # 正则化（适当降低，让模型有能力学习）
+    lambda_l1: float = 0.05
+    lambda_l2: float = 0.5
     
     # 目标函数（动态根据标签类型选择）
     objective_regression: str = "huber"   # 连续标签用 huber

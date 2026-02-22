@@ -6,10 +6,12 @@ LightGBM 模型专属模块
 - LGBQuantModel: LightGBM 模型封装
 - LGBTrainer: 训练调度器
 - InferenceEngine: 实盘推断引擎
+- TrainingReportGenerator: 训练报告生成器
 """
 
 from .dataset import FoldInfo, TimeSeriesSplitter
 from .lgb_model import LGBQuantModel
+from .report_generator import TrainingReportGenerator
 from .trainer import InferenceEngine, LGBTrainer
 
 __all__ = [
@@ -18,4 +20,5 @@ __all__ = [
     "LGBQuantModel",
     "LGBTrainer",
     "InferenceEngine",
+    "TrainingReportGenerator",
 ]

@@ -142,6 +142,26 @@ def parse_args():
         help="滚动步长（月），默认3",
     )
     
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="不生成训练报告",
+    )
+    
+    parser.add_argument(
+        "--data-start-date",
+        type=str,
+        default="2021-01-01",
+        help="训练数据开始日期，格式 YYYY-MM-DD，默认 2021-01-01",
+    )
+    
+    parser.add_argument(
+        "--data-end-date",
+        type=str,
+        default="2025-12-31",
+        help="训练数据结束日期，格式 YYYY-MM-DD，默认 2025-12-31",
+    )
+    
     return parser.parse_args()
 
 
@@ -180,6 +200,8 @@ def main():
     config.split_config.train_window_months = args.train_window
     config.split_config.valid_window_months = args.valid_window
     config.split_config.step_months = args.step
+    config.split_config.data_start_date = args.data_start_date
+    config.split_config.data_end_date = args.data_end_date
     
     # 列出可用标签
     if args.list_targets:
@@ -204,6 +226,8 @@ def main():
     logger.info(f"验证窗口: {args.valid_window} 月") 
     logger.info(f"滚动步长: {args.step} 月")
     logger.info(f"GPU 数据加速: {not args.no_gpu_df}")
+    logger.info(f"生成报告: {not args.no_report}")
+    logger.info(f"数据日期范围: {config.split_config.data_start_date} ~ {config.split_config.data_end_date}")
     logger.info("=" * 60)
     
     # 创建训练器
@@ -233,6 +257,7 @@ def main():
         mode=mode,
         save_models=not args.no_save,
         save_oof=not args.no_save,
+        generate_report=not args.no_report,
     )
     
     # 评估

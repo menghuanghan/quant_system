@@ -107,6 +107,12 @@ class LGBQuantModel(BaseModel):
                 if col.startswith(prefix):
                     exclude_cols.add(col)
         
+        # 【关键】排除纯宏观特征（无截面方差，会降维打击）
+        for col in X.columns:
+            for prefix in self.feature_config.drop_macro_prefixes:
+                if col.startswith(prefix):
+                    exclude_cols.add(col)
+        
         # 如果指定了当前目标列，也需要排除
         if target_col:
             exclude_cols.add(target_col)
@@ -190,7 +196,7 @@ class LGBQuantModel(BaseModel):
         valid_sets = [dtrain]
         valid_names = ["train"]
         
-        if X_valid is not None and y_valid is not None:
+        if X_valid is not None and y_valid is not None and len(y_valid) > 0:
             X_valid_clean, _ = self._prepare_features(X_valid, target_col)
             dvalid = lgb.Dataset(
                 X_valid_clean,
@@ -203,6 +209,12 @@ class LGBQuantModel(BaseModel):
             valid_sets.append(dvalid)
             valid_names.append("valid")
             logger.info(f"Validation set: {len(y_valid)} samples")
+        else:
+            # 【修复】无验证集时使用 warning 级别，提醒可能过拟合
+            logger.warning(
+                "No validation set provided - early stopping will be disabled! "
+                "Model may overfit. This is expected for single_full mode."
+            )
         
         # 训练回调
         callbacks = [

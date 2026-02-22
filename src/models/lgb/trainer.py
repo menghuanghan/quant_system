@@ -87,6 +87,8 @@ class LGBTrainer:
         self.oof_results: Dict[str, List[pd.DataFrame]] = {}  # target_col -> list of fold oof
         self.models: Dict[str, List[LGBQuantModel]] = {}      # target_col -> list of fold models
         self.feature_importance: Dict[str, pd.DataFrame] = {} # target_col -> importance df
+        self.fold_info_dict: Dict[str, List[Dict[str, Any]]] = {}  # target_col -> fold info list
+        self.model_train_info: Dict[str, List[Dict[str, Any]]] = {}  # target_col -> train info list
         
         logger.info(f"LGBTrainer initialized (use_gpu_df={self.use_gpu_df})")
     
@@ -113,10 +115,36 @@ class LGBTrainer:
             self.df = pd.read_parquet(path)
             logger.info(f"Data loaded: shape={self.df.shape}")
         
+        # 按日期过滤数据（使用 config 中的日期范围）
+        self._filter_by_date_range()
+        
         # 预处理：修复类别特征负值（CUDA 模式需要）
         self._fix_categorical_negative_values()
         
         return self.df
+    
+    def _filter_by_date_range(self) -> None:
+        """
+        按 config 中的日期范围过滤数据
+        """
+        date_col = "trade_date"
+        start_date = self.config.split_config.data_start_date
+        end_date = self.config.split_config.data_end_date
+        
+        original_count = len(self.df)
+        self.df = self.df[
+            (self.df[date_col] >= start_date)
+            & (self.df[date_col] <= end_date)
+        ].copy()
+        filtered_count = len(self.df)
+        
+        actual_min = self.df[date_col].min()
+        actual_max = self.df[date_col].max()
+        
+        logger.info(
+            f"Date filter: {original_count:,} -> {filtered_count:,} records "
+            f"(range: {start_date} ~ {end_date}, actual: {actual_min} ~ {actual_max})"
+        )
     
     def _fix_categorical_negative_values(self) -> None:
         """
@@ -202,37 +230,38 @@ class LGBTrainer:
         
         公式：Target_norm = clip((Target - Mean) / Std, -3, 3)
         
+        注意：必须基于传入的 df 参数计算，而非 self.df_gpu，
+        因为 df 可能已经被过滤（如 _filter_valid_samples）
+        
         Args:
-            df: 输入 DataFrame
+            df: 输入 DataFrame（可能是过滤后的子集）
             target_col: 标签列名
             date_col: 日期列名
             
         Returns:
-            normalized: 标准化后的标签 Series
+            normalized: 标准化后的标签 Series（与 df 行数一致）
         """
         label_config = self.config.label_config
         
-        if self.use_gpu_df and self.df_gpu is not None:
-            # GPU 加速版本
-            target = self.df_gpu[target_col]
-            dates = self.df_gpu[date_col]
+        if self.use_gpu_df and HAS_CUDF:
+            # GPU 加速版本 - 【修复】使用传入的 df 而非 self.df_gpu
+            df_gpu = cudf.DataFrame.from_pandas(df[[date_col, target_col]])
+            
+            # 【修复】添加行索引，确保 merge 后能恢复原顺序
+            df_gpu["_row_id"] = cudf.Series(range(len(df_gpu)))
             
             # 按日期分组计算截面均值和标准差
-            grouped = cudf.DataFrame({
-                "date": dates, 
-                "target": target
-            }).groupby("date")
-            
-            stats = grouped.agg({"target": ["mean", "std"]})
-            stats.columns = ["mean", "std"]
-            stats = stats.reset_index()
+            stats = df_gpu.groupby(date_col)[target_col].agg(["mean", "std"]).reset_index()
+            stats.columns = [date_col, "mean", "std"]
             
             # 合并回原数据
-            merged = cudf.DataFrame({"date": dates, "target": target})
-            merged = merged.merge(stats, on="date", how="left")
+            merged = df_gpu.merge(stats, on=date_col, how="left")
+            
+            # 【修复】恢复原始行顺序
+            merged = merged.sort_values("_row_id").reset_index(drop=True)
             
             # Z-Score
-            normalized = (merged["target"] - merged["mean"]) / merged["std"].replace(0, 1)
+            normalized = (merged[target_col] - merged["mean"]) / merged["std"].replace(0, 1)
             
             # Clip
             normalized = normalized.clip(label_config.clip_min, label_config.clip_max)
@@ -314,7 +343,7 @@ class LGBTrainer:
         target_col: str,
         mode: Optional[SplitMode] = None,
         save_models: bool = True,
-    ) -> Tuple[List[pd.DataFrame], List[LGBQuantModel]]:
+    ) -> Tuple[List[pd.DataFrame], List[LGBQuantModel], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         训练单个标签的所有 Fold
         
@@ -324,7 +353,7 @@ class LGBTrainer:
             save_models: 是否保存模型
             
         Returns:
-            (oof_list, models): OOF 预测列表和模型列表
+            (oof_list, models, fold_info_list, train_info_list): OOF 预测、模型、Fold信息、训练信息
         """
         if self.df is None:
             raise ValueError("Data not loaded. Call load_data() first.")
@@ -365,6 +394,8 @@ class LGBTrainer:
         oof_list = []
         models = []
         feature_importance_list = []
+        fold_info_list = []  # 收集 Fold 信息
+        train_info_list = []  # 收集训练信息
         
         # 遍历所有 Fold
         for fold_info in splitter.split(mode=mode):
@@ -423,6 +454,19 @@ class LGBTrainer:
             importance["fold"] = fold_idx
             feature_importance_list.append(importance)
             
+            # 收集 Fold 信息
+            fold_info_list.append({
+                "fold_idx": fold_idx,
+                "train_start": fold_info.train_start.strftime("%Y-%m-%d"),
+                "train_end": fold_info.train_end.strftime("%Y-%m-%d"),
+                "valid_start": fold_info.valid_start.strftime("%Y-%m-%d"),
+                "valid_end": fold_info.valid_end.strftime("%Y-%m-%d"),
+                "train_samples": len(fold_info.train_indices),
+                "valid_samples": len(fold_info.valid_indices),
+                "gap_days": fold_info.gap_days,
+            })
+            train_info_list.append(model.train_info.copy())
+            
             # 保存模型
             if save_models:
                 model_dir = self.config.model_save_dir / mode.value
@@ -442,7 +486,7 @@ class LGBTrainer:
             avg_importance["importance_pct"] = avg_importance["importance"] / avg_importance["importance"].sum() * 100
             self.feature_importance[target_col] = avg_importance
         
-        return oof_list, models
+        return oof_list, models, fold_info_list, train_info_list
     
     def train(
         self,
@@ -450,6 +494,7 @@ class LGBTrainer:
         mode: Optional[SplitMode] = None,
         save_models: bool = True,
         save_oof: bool = True,
+        generate_report: bool = True,
     ) -> Dict[str, pd.DataFrame]:
         """
         训练多个标签
@@ -459,6 +504,7 @@ class LGBTrainer:
             mode: 切分模式
             save_models: 是否保存模型
             save_oof: 是否保存 OOF 预测
+            generate_report: 是否生成训练报告
             
         Returns:
             oof_dict: {target_col: oof_df} 字典
@@ -481,7 +527,7 @@ class LGBTrainer:
                 continue
             
             # 训练
-            oof_list, models = self.train_single_target(
+            oof_list, models, fold_info_list, train_info_list = self.train_single_target(
                 target_col=target_col,
                 mode=mode,
                 save_models=save_models,
@@ -490,6 +536,8 @@ class LGBTrainer:
             # 存储结果
             self.oof_results[target_col] = oof_list
             self.models[target_col] = models
+            self.fold_info_dict[target_col] = fold_info_list
+            self.model_train_info[target_col] = train_info_list
             
             # 合并 OOF
             if oof_list:
@@ -498,23 +546,45 @@ class LGBTrainer:
                 oof_df["target"] = target_col
                 oof_dict[target_col] = oof_df
         
-        # 保存 OOF
+        # 保存 OOF（按模式保存到对应子目录，防止不同模式互相覆盖）
         if save_oof and oof_dict:
             all_oof = pd.concat(oof_dict.values(), ignore_index=True)
-            oof_path = self.config.oof_save_path
-            oof_path.parent.mkdir(parents=True, exist_ok=True)
+            # 【修复】保存到模式对应的子目录: models/lgb/{mode}/oof_predictions.parquet
+            mode_dir = self.config.model_save_dir / mode.value
+            mode_dir.mkdir(parents=True, exist_ok=True)
+            oof_path = mode_dir / "oof_predictions.parquet"
             all_oof.to_parquet(oof_path, index=False)
             logger.info(f"OOF predictions saved to {oof_path}")
         
-        # 保存特征重要性
+        # 保存特征重要性（按模式保存到对应子目录）
         if self.feature_importance:
-            importance_path = self.config.model_save_dir / "feature_importance.parquet"
+            # 【修复】保存到模式对应的子目录: models/lgb/{mode}/feature_importance.parquet
+            mode_dir = self.config.model_save_dir / mode.value
+            mode_dir.mkdir(parents=True, exist_ok=True)
+            importance_path = mode_dir / "feature_importance.parquet"
             all_importance = pd.concat([
                 df.assign(target=target) 
                 for target, df in self.feature_importance.items()
             ], ignore_index=True)
             all_importance.to_parquet(importance_path, index=False)
             logger.info(f"Feature importance saved to {importance_path}")
+        
+        # 生成训练报告
+        if generate_report and oof_dict:
+            try:
+                from .report_generator import TrainingReportGenerator
+                
+                report_generator = TrainingReportGenerator(
+                    config=self.config,
+                    oof_dict=oof_dict,
+                    feature_importance=self.feature_importance,
+                    fold_info_dict=self.fold_info_dict,
+                    model_train_info=self.model_train_info,
+                )
+                report_path = report_generator.generate_report()
+                logger.info(f"Training report generated: {report_path}")
+            except Exception as e:
+                logger.warning(f"Failed to generate training report: {e}")
         
         logger.info("=" * 60)
         logger.info("Training completed!")
@@ -550,12 +620,22 @@ class LGBTrainer:
             
         Returns:
             importance_df: 特征重要性 DataFrame
+            
+        Raises:
+            ValueError: 如果指定的 target_col 不存在
         """
         if not self.feature_importance:
             raise ValueError("No feature importance. Run train() first.")
         
         if target_col:
-            return self.feature_importance.get(target_col)
+            # 【修复】添加存在性检查，避免返回 None
+            if target_col not in self.feature_importance:
+                available = list(self.feature_importance.keys())
+                raise ValueError(
+                    f"Feature importance for '{target_col}' not found. "
+                    f"Available targets: {available}"
+                )
+            return self.feature_importance[target_col]
         
         # 所有标签的平均
         all_df = pd.concat(self.feature_importance.values(), ignore_index=True)
