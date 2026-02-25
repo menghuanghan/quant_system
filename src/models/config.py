@@ -6,7 +6,8 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+import logging
 import os
 
 
@@ -314,3 +315,288 @@ DEFAULT_SPLIT_CONFIG = SplitConfig()
 DEFAULT_FEATURE_CONFIG = FeatureConfig()
 DEFAULT_LABEL_CONFIG = LabelConfig()
 DEFAULT_TRAIN_CONFIG = TrainConfig()
+
+_logger = logging.getLogger(__name__)
+
+
+# ====================== GRU 列分类定义 ======================
+
+ID_COLS = ["ts_code", "trade_date"]
+
+LABEL_COLS = [
+    "ret_1d", "ret_5d", "ret_10d", "ret_20d",
+    "label_1d", "label_5d", "label_10d", "label_20d",
+    "excess_ret_5d", "excess_ret_10d",
+    "rank_ret_5d", "rank_ret_10d",
+    "sharpe_5d", "sharpe_10d", "sharpe_20d",
+    "label_bin_5d",
+]
+
+AUX_COLS = [
+    "is_tradable",
+    "is_risky",
+    "is_limit",
+    "return_1d",
+]
+
+CATEGORICAL_FEATURES = [
+    "market",
+    "industry_idx",
+    "sw_l1_idx",
+    "sw_l2_idx",
+]
+
+
+def get_gru_feature_columns(
+    all_columns: List[str],
+    target_cols: List[str],
+    exclude_cols: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    动态识别 GRU 特征列（排除法）
+
+    排除: ID列 + 全部标签列 + 辅助列 + 类别特征 + 自定义排除列
+    """
+    exclude_set: Set[str] = set(ID_COLS + LABEL_COLS + AUX_COLS + CATEGORICAL_FEATURES)
+    if exclude_cols:
+        exclude_set.update(exclude_cols)
+    feature_cols = [col for col in all_columns if col not in exclude_set]
+    _logger.info(
+        f"GRU 动态特征识别: 总列数={len(all_columns)}, "
+        f"排除={len(exclude_set)}, 特征={len(feature_cols)}"
+    )
+    return feature_cols
+
+
+def get_gru_selected_features(
+    all_columns: List[str],
+    mode: str = "rolling",
+    top_n: int = 50,
+    feature_importance_dir: Optional[Path] = None,
+) -> List[str]:
+    """
+    GRU 特征选择（LGB Top N + 宏观特征）
+
+    策略:
+    1. 读取 LightGBM feature_importance.parquet → 按 importance 降序取 Top N
+    2. 从 Top N 中排除类别特征和辅助/掩码列（CATEGORICAL_FEATURES + AUX_COLS）
+    3. 追加所有宏观特征（FeatureConfig.drop_macro_prefixes 匹配的列），
+       因为宏观特征被 LGB 剔除，但对 GRU 时序建模有价值
+    4. 取交集：仅保留 all_columns 中实际存在的列
+    5. 去重并保持顺序
+
+    Args:
+        all_columns: 数据文件中的全部列名
+        mode: 训练模式 ("rolling" / "expanding" / "single_full")
+        top_n: 取 LGB 重要性排名前 N 的特征
+        feature_importance_dir: 特征重要性文件所在目录（默认 models/lgb/{mode}/）
+
+    Returns:
+        selected: 筛选后的特征列名列表
+    """
+    import pandas as pd
+
+    # ---- 1. 确定 feature_importance 路径 ----
+    if feature_importance_dir is None:
+        # rolling / expanding 共用 rolling 路径
+        lgb_mode = "single_full" if mode == "single_full" else "rolling"
+        fi_path = MODELS_DIR / "lgb" / lgb_mode / "feature_importance.parquet"
+    else:
+        fi_path = Path(feature_importance_dir) / "feature_importance.parquet"
+
+    # 不可用类别
+    exclude_set: Set[str] = set(
+        ID_COLS + LABEL_COLS + AUX_COLS + CATEGORICAL_FEATURES
+    )
+
+    # ---- 2. 读取 LGB Top N ----
+    lgb_top_features: List[str] = []
+    if fi_path.exists():
+        fi_df = pd.read_parquet(fi_path)
+        # 取跨 target 的平均重要性去重排序
+        avg_imp = (
+            fi_df.groupby("feature")["importance"]
+            .mean()
+            .sort_values(ascending=False)
+        )
+        # 排除类别 / 辅助列
+        for feat in avg_imp.index:
+            if feat not in exclude_set:
+                lgb_top_features.append(feat)
+            if len(lgb_top_features) >= top_n:
+                break
+        _logger.info(
+            f"LGB Top {top_n} 特征已加载 (from {fi_path}): "
+            f"实际获得 {len(lgb_top_features)} 个"
+        )
+    else:
+        _logger.warning(
+            f"feature_importance 文件未找到: {fi_path}，"
+            f"将回退到全量排除法"
+        )
+        return get_gru_feature_columns(all_columns, [], None)
+
+    # ---- 3. 收集宏观特征 ----
+    macro_prefixes = FeatureConfig().drop_macro_prefixes
+    macro_features = []
+    for col in all_columns:
+        if col in exclude_set:
+            continue
+        for prefix in macro_prefixes:
+            if col.startswith(prefix):
+                macro_features.append(col)
+                break
+
+    _logger.info(f"宏观特征: {len(macro_features)} 个")
+
+    # ---- 4. 合并去重，取 all_columns 交集 ----
+    all_columns_set = set(all_columns)
+    seen: Set[str] = set()
+    selected: List[str] = []
+
+    # LGB Top N 优先
+    for f in lgb_top_features:
+        if f in all_columns_set and f not in seen:
+            selected.append(f)
+            seen.add(f)
+
+    # 宏观特征追加
+    for f in macro_features:
+        if f in all_columns_set and f not in seen:
+            selected.append(f)
+            seen.add(f)
+
+    _logger.info(
+        f"GRU 特征选择完成: LGB_Top{top_n}={len(lgb_top_features)}, "
+        f"宏观={len(macro_features)}, 合计={len(selected)}"
+    )
+    return selected
+
+
+# ====================== GRU 数据配置 ======================
+
+@dataclass
+class GRUDataConfig:
+    """GRU 数据配置"""
+    data_path: Path = FEATURES_DIR / "train_gru.parquet"
+    seq_len: int = 20
+    target_cols: List[str] = field(default_factory=lambda: [
+        "rank_ret_5d",
+        "excess_ret_5d",
+        "sharpe_5d",
+    ])
+    data_start_date: str = "2021-01-01"
+    data_end_date: str = "2025-12-31"
+    use_gpu: bool = True
+
+
+# ====================== GRU 时序切分配置 ======================
+
+@dataclass
+class GRUSplitConfig:
+    """GRU 时序切分配置"""
+    train_window_months: int = 24
+    valid_window_months: int = 3
+    step_months: int = 3
+    mode: str = "rolling"  # rolling / expanding / single_full
+
+
+# ====================== GRU 网络结构配置 ======================
+
+@dataclass
+class GRUNetworkConfig:
+    """GRU 神经网络配置"""
+    num_features: int = 250       # 运行时从数据决定
+    hidden_size: int = 64
+    num_layers: int = 2
+    dropout: float = 0.1
+    use_attention: bool = True
+    num_targets: int = 3          # 运行时从 target_cols 决定
+
+
+# ====================== GRU 训练配置 ======================
+
+@dataclass
+class GRUTrainConfig:
+    """GRU 训练配置"""
+    epochs: int = 100
+    batch_size: int = 2048
+    num_workers: int = 0
+
+    # AdamW
+    learning_rate: float = 5e-4
+    weight_decay: float = 1e-4
+
+    # OneCycleLR
+    max_lr: float = 1e-3
+    pct_start: float = 0.3
+    div_factor: float = 25.0
+    final_div_factor: float = 1e4
+
+    # 多任务损失权重
+    loss_weights: Dict[str, float] = field(default_factory=lambda: {
+        "rank_ret_5d": 0.6,
+        "excess_ret_5d": 0.2,
+        "sharpe_5d": 0.2,
+    })
+    # 每个任务损失类型: mse / huber
+    loss_types: Dict[str, str] = field(default_factory=lambda: {
+        "rank_ret_5d": "mse",
+        "excess_ret_5d": "huber",
+        "sharpe_5d": "huber",
+    })
+    use_uncertainty_weighting: bool = False
+
+    # 早停（以 Rank IC 为准）
+    patience: int = 15
+    min_epochs: int = 10
+
+    # AMP
+    use_amp: bool = True
+
+    # 梯度裁剪
+    grad_clip: float = 1.0
+
+    # 保存目录
+    save_dir: Path = MODELS_DIR / "gru"
+
+    # 随机种子
+    seed: int = 42
+    # single_full 模式多种子列表
+    multi_seeds: List[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
+
+    log_interval: int = 50
+
+
+# ====================== GRU 推断配置 ======================
+
+@dataclass
+class GRUInferenceConfig:
+    """GRU 实盘推断配置"""
+    rolling_weight: float = 0.4
+    full_weight: float = 0.6
+    rolling_models_dir: Path = MODELS_DIR / "gru" / "rolling"
+    full_models_dir: Path = MODELS_DIR / "gru" / "single_full"
+
+
+# ====================== GRU 总配置 ======================
+
+@dataclass
+class GRUConfig:
+    """GRU 总配置"""
+    data: GRUDataConfig = field(default_factory=GRUDataConfig)
+    split: GRUSplitConfig = field(default_factory=GRUSplitConfig)
+    network: GRUNetworkConfig = field(default_factory=GRUNetworkConfig)
+    train: GRUTrainConfig = field(default_factory=GRUTrainConfig)
+    inference: GRUInferenceConfig = field(default_factory=GRUInferenceConfig)
+
+    def __post_init__(self):
+        self.train.save_dir.mkdir(parents=True, exist_ok=True)
+        self.network.num_targets = len(self.data.target_cols)
+
+    @classmethod
+    def default(cls) -> "GRUConfig":
+        return cls()
+
+
+DEFAULT_GRU_CONFIG = GRUConfig()

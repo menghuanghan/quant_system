@@ -71,7 +71,9 @@ class PDFExtractor(BaseExtractor, TextCleaningMixin):
         user_agent: Optional[str] = None,
         extract_images: bool = False,
         extract_tables: bool = True,
-        max_pages: Optional[int] = None
+        max_pages: Optional[int] = None,
+        extraction_timeout: int = 60,
+        timeout_fallback_pages: int = 20
     ):
         """
         Args:
@@ -81,11 +83,15 @@ class PDFExtractor(BaseExtractor, TextCleaningMixin):
             extract_images: 是否提取图片中的文字(OCR)，暂不支持
             extract_tables: 是否尝试提取表格
             max_pages: 最大处理页数，None表示全部
+            extraction_timeout: 文本提取超时时间（秒），默认60秒
+            timeout_fallback_pages: 超时后回退处理的页数，默认20页
         """
         super().__init__(timeout, max_retries, user_agent)
         self.extract_images = extract_images
         self.extract_tables = extract_tables
         self.max_pages = max_pages
+        self.extraction_timeout = extraction_timeout
+        self.timeout_fallback_pages = timeout_fallback_pages
         self._fitz = None
     
     @property
@@ -257,6 +263,8 @@ class PDFExtractor(BaseExtractor, TextCleaningMixin):
             ExtractorResult: 提取结果
         """
         start_time = time.time()
+        is_timeout_truncated = False
+        actual_pages_processed = 0
         
         try:
             # 使用内存流打开PDF
@@ -268,9 +276,32 @@ class PDFExtractor(BaseExtractor, TextCleaningMixin):
             max_pages = self.max_pages or page_count
             pages_to_process = min(page_count, max_pages)
             
+            # 对于超大PDF（>100页），记录警告
+            if page_count > 100:
+                logger.warning(
+                    f"Large PDF detected: {page_count} pages, "
+                    f"processing up to {pages_to_process} pages with {self.extraction_timeout}s timeout"
+                )
+            
             # 提取文本
             text_parts = []
             for page_num in range(pages_to_process):
+                # 检查是否超时
+                elapsed = time.time() - start_time
+                if elapsed > self.extraction_timeout:
+                    # 超时：如果已处理的页数少于fallback页数，继续处理到fallback页数
+                    if page_num < self.timeout_fallback_pages:
+                        # 继续处理，直到达到fallback页数
+                        pass
+                    else:
+                        # 超时且已超过fallback页数，停止处理
+                        logger.warning(
+                            f"PDF extraction timeout after {elapsed:.1f}s at page {page_num}/{pages_to_process}. "
+                            f"Truncating to {page_num} pages."
+                        )
+                        is_timeout_truncated = True
+                        break
+                
                 page = doc[page_num]
                 
                 # 提取页面文本
@@ -289,11 +320,17 @@ class PDFExtractor(BaseExtractor, TextCleaningMixin):
                 
                 if page_text.strip():
                     text_parts.append(page_text)
+                
+                actual_pages_processed = page_num + 1
             
             doc.close()
             
             # 合并文本
             raw_text = '\n\n'.join(text_parts)
+            
+            # 如果超时截断，在文本开头添加标记
+            if is_timeout_truncated:
+                raw_text = f"[注：由于文档过大（{page_count}页），仅提取前{actual_pages_processed}页内容]\n\n" + raw_text
             
             # 清洗文本
             clean_text = self._clean_pdf_text(raw_text, source_type)
