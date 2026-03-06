@@ -174,6 +174,11 @@ def parse_args():
         help="不进行 OOF 评估",
     )
     parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="不生成训练报告",
+    )
+    parser.add_argument(
         "--no-gpu",
         action="store_true",
         help="禁用 GPU",
@@ -240,6 +245,9 @@ def main():
     config.split.train_window_months = args.train_window
     config.split.valid_window_months = args.valid_window
     config.split.step_months = args.step
+    # 同步日期边界到 SplitConfig（Splitter 使用逻辑边界而非物理数据边界）
+    config.split.data_start_date = args.data_start_date
+    config.split.data_end_date = args.data_end_date
 
     # 网络
     config.network.hidden_size = args.hidden_size
@@ -284,16 +292,19 @@ def main():
     logger.info(f"模式: {args.mode}")
     logger.info(f"目标标签: {args.targets}")
     logger.info(f"序列长度: {args.seq_len}")
-    logger.info(f"训练窗口: {args.train_window} 月")
-    logger.info(f"验证窗口: {args.valid_window} 月")
-    logger.info(f"滑动步长: {args.step} 月")
+    if args.mode != "single_full":
+        logger.info(f"训练窗口: {args.train_window} 月")
+        logger.info(f"验证窗口: {args.valid_window} 月")
+        logger.info(f"滑动步长: {args.step} 月")
+    else:
+        logger.info(f"Single_Full: 训练用全部数据(保留最后1月做早停)")
     logger.info(f"Epochs: {args.epochs}")
     logger.info(f"Batch Size: {args.batch_size}")
     logger.info(f"Hidden Size: {args.hidden_size}")
     logger.info(f"Num Layers: {args.num_layers}")
     logger.info(f"Learning Rate: {args.learning_rate}")
     logger.info(f"GPU: {not args.no_gpu}")
-    logger.info(f"数据范围: {args.data_start_date} ~ {args.data_end_date}")
+    logger.info(f"数据范围(逻辑边界): {args.data_start_date} ~ {args.data_end_date}")
     logger.info(f"损失权重: {loss_weights}")
     logger.info(f"损失类型: {loss_types}")
     logger.info("=" * 60)
@@ -322,6 +333,7 @@ def main():
         mode=args.mode,
         save_models=not args.no_save,
         save_oof=not args.no_save,
+        generate_report=not args.no_report,
     )
 
     # ---- OOF 评估 ----

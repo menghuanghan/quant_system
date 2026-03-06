@@ -46,6 +46,7 @@ from .dataset import (
     create_dataloader,
 )
 from .gru_model import GRUModel, set_seed
+from .report_generator import GRUReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,7 @@ class GRUTrainer:
         mode: Optional[str] = None,
         save_models: bool = True,
         save_oof: bool = True,
+        generate_report: bool = True,
     ) -> pd.DataFrame:
         """
         训练入口
@@ -286,6 +288,7 @@ class GRUTrainer:
             mode: 训练模式 (rolling / expanding / single_full)
             save_models: 是否持久化模型
             save_oof: 是否保存 OOF
+            generate_report: 是否生成训练报告
 
         Returns:
             oof_df: 全局 OOF 预测 DataFrame
@@ -301,29 +304,52 @@ class GRUTrainer:
         logger.info("=" * 60)
 
         if mode == "single_full":
-            return self._train_single_full(save_models, save_oof)
+            oof_df, fold_train_info = self._train_single_full(save_models, save_oof)
         else:
-            return self._train_fold_mode(mode, save_models, save_oof)
+            oof_df, fold_train_info = self._train_fold_mode(mode, save_models, save_oof)
+
+        # 生成训练报告
+        if generate_report and not oof_df.empty:
+            try:
+                report_gen = GRUReportGenerator(
+                    config=self.config,
+                    oof_df=oof_df,
+                    fold_train_info=fold_train_info,
+                )
+                report_path = report_gen.generate_report()
+                logger.info(f"训练报告已生成: {report_path}")
+            except Exception as e:
+                logger.warning(f"训练报告生成失败: {e}", exc_info=True)
+
+        return oof_df
 
     def _train_fold_mode(
         self,
         mode: str,
         save_models: bool,
         save_oof: bool,
-    ) -> pd.DataFrame:
-        """Rolling / Expanding 模式训练"""
+    ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+        """Rolling / Expanding 模式训练
+
+        Returns:
+            (oof_df, fold_train_info)
+        """
         config = self.config
         target_cols = config.data.target_cols
         seed = config.train.seed
         device = str(self.feature_tensor.device)
         set_seed(seed)
 
-        # 1) 初始化切分器
+        fold_train_info: List[Dict[str, Any]] = []
+
+        # 1) 初始化切分器（传入逻辑日期边界）
         splitter = GRUTimeSeriesSplitter(
             df=self.df,
             target_cols=target_cols,
             config=config.split,
             seq_len=config.data.seq_len,
+            data_start_date=config.data.data_start_date,
+            data_end_date=config.data.data_end_date,
         )
 
         oof_list = []
@@ -375,8 +401,32 @@ class GRUTrainer:
                 use_attention=config.network.use_attention,
             )
 
-            # 训练
+            # 训练（计时）
+            fold_t0 = time.time()
             model.fit(train_loader, X_valid=valid_loader)
+            fold_time = time.time() - fold_t0
+
+            # 收集 fold 训练元信息
+            epochs_trained = model.train_info.get("epochs_trained", 0)
+            best_epoch = epochs_trained - model.patience_counter
+            fold_train_info.append({
+                "fold_idx": fold_idx,
+                "train_start": fold_info.train_start.strftime("%Y-%m-%d"),
+                "train_end": fold_info.train_end.strftime("%Y-%m-%d"),
+                "valid_start": fold_info.valid_start.strftime("%Y-%m-%d"),
+                "valid_end": fold_info.valid_end.strftime("%Y-%m-%d"),
+                "train_samples": len(fold_info.train_indices),
+                "valid_samples": len(fold_info.valid_indices),
+                "epochs_trained": epochs_trained,
+                "best_epoch": best_epoch,
+                "best_rank_ic": model.best_rank_ic,
+                "train_time_s": fold_time,
+                "history": {
+                    "train_loss": list(model.history["train_loss"]),
+                    "valid_loss": list(model.history["valid_loss"]),
+                    "valid_rank_ic": list(model.history["valid_rank_ic"]),
+                },
+            })
 
             # 验证集预测
             preds = model.predict(valid_loader)  # (N_valid, num_targets)
@@ -435,31 +485,37 @@ class GRUTrainer:
             all_oof.to_parquet(oof_path, index=False)
             logger.info(f"OOF 已保存: {oof_path}")
 
-        return all_oof
+        return all_oof, fold_train_info
 
     def _train_single_full(
         self,
         save_models: bool,
         save_oof: bool,
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
         """
         Single_Full 模式训练
 
         多种子融合: 用 multi_seeds 中的每个种子分别训练，
         实盘预测时取所有模型的算术平均。
         OOF 中的预测也取多种子平均。
+
+        Returns:
+            (oof_df, fold_train_info)
         """
         config = self.config
         target_cols = config.data.target_cols
         seeds = config.train.multi_seeds
         device = str(self.feature_tensor.device)
+        fold_train_info: List[Dict[str, Any]] = []
 
-        # 1) 获取唯一 Fold（single_full 只产出1个）
+        # 1) 获取唯一 Fold（single_full 只产出1个，使用逻辑日期边界）
         splitter = GRUTimeSeriesSplitter(
             df=self.df,
             target_cols=target_cols,
             config=config.split,
             seq_len=config.data.seq_len,
+            data_start_date=config.data.data_start_date,
+            data_end_date=config.data.data_end_date,
         )
         fold_info = next(splitter.split(mode="single_full"))
 
@@ -513,8 +569,32 @@ class GRUTrainer:
                 use_attention=config.network.use_attention,
             )
 
-            # 训练
+            # 训练（计时）
+            seed_t0 = time.time()
             model.fit(train_loader, X_valid=valid_loader)
+            seed_time = time.time() - seed_t0
+
+            # 收集种子训练元信息
+            epochs_trained = model.train_info.get("epochs_trained", 0)
+            best_epoch = epochs_trained - model.patience_counter
+            fold_train_info.append({
+                "seed": seed,
+                "train_start": fold_info.train_start.strftime("%Y-%m-%d"),
+                "train_end": fold_info.train_end.strftime("%Y-%m-%d"),
+                "valid_start": fold_info.valid_start.strftime("%Y-%m-%d"),
+                "valid_end": fold_info.valid_end.strftime("%Y-%m-%d"),
+                "train_samples": len(fold_info.train_indices),
+                "valid_samples": len(fold_info.valid_indices),
+                "epochs_trained": epochs_trained,
+                "best_epoch": best_epoch,
+                "best_rank_ic": model.best_rank_ic,
+                "train_time_s": seed_time,
+                "history": {
+                    "train_loss": list(model.history["train_loss"]),
+                    "valid_loss": list(model.history["valid_loss"]),
+                    "valid_rank_ic": list(model.history["valid_rank_ic"]),
+                },
+            })
 
             # 验证集预测
             preds = model.predict(valid_loader)
@@ -581,7 +661,7 @@ class GRUTrainer:
         del valid_ds_meta
         gc.collect()
 
-        return oof_df
+        return oof_df, fold_train_info
 
 
 class GRUInferenceEngine:

@@ -499,6 +499,9 @@ class GRUSplitConfig:
     valid_window_months: int = 3
     step_months: int = 3
     mode: str = "rolling"  # rolling / expanding / single_full
+    # 逻辑日期边界（与 GRUDataConfig 同步，由 Trainer 设置）
+    data_start_date: str = "2021-01-01"
+    data_end_date: str = "2025-12-31"
 
 
 # ====================== GRU 网络结构配置 ======================

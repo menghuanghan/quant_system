@@ -38,6 +38,7 @@ from .gru_model import (
     set_seed,
 )
 from .trainer import GRUTrainer, GRUInferenceEngine
+from .report_generator import GRUReportGenerator
 
 __all__ = [
     # Config (from parent config.py)
@@ -69,4 +70,6 @@ __all__ = [
     # Trainer
     "GRUTrainer",
     "GRUInferenceEngine",
+    # Report
+    "GRUReportGenerator",
 ]
