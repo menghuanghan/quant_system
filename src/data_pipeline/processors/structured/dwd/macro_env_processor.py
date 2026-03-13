@@ -602,15 +602,32 @@ class MacroEnvProcessor(BaseProcessor):
         logger.info("加载核心指数数据...")
         
         index_dir = DATA_SOURCE_PATHS.index_daily_dir
+        
+        # 支持合并后的单文件格式和原始目录格式
+        merged_file = index_dir.with_suffix('.parquet')
+        if not index_dir.exists() and merged_file.exists():
+            all_index_df = self.read_parquet(merged_file)
+        else:
+            all_index_df = None
+        
         all_dfs = []
         
         for fname, (prefix, name) in self.CORE_INDICES.items():
-            path = index_dir / f"{fname}.parquet"
-            if not path.exists():
-                logger.warning(f"指数文件不存在: {path}")
-                continue
+            if all_index_df is not None:
+                # 从合并后的单文件中按ts_code筛选（文件名用_分隔，ts_code用.分隔）
+                if 'ts_code' in all_index_df.columns:
+                    ts_code = fname.replace('_', '.', 1)
+                    df = all_index_df[all_index_df['ts_code'] == ts_code].copy()
+                else:
+                    logger.warning(f"合并文件中缺少ts_code列，无法筛选 {fname}")
+                    continue
+            else:
+                path = index_dir / f"{fname}.parquet"
+                if not path.exists():
+                    logger.warning(f"指数文件不存在: {path}")
+                    continue
+                df = self.read_parquet(path)
             
-            df = self.read_parquet(path)
             if len(df) == 0:
                 continue
             
@@ -676,14 +693,30 @@ class MacroEnvProcessor(BaseProcessor):
             '131810_SZ': 'r001',   # 深交所 R-001
         }
         
+        # 支持合并后的单文件格式和原始目录格式
+        merged_file = repo_dir.with_suffix('.parquet')
+        if not repo_dir.exists() and merged_file.exists():
+            all_repo_df = self.read_parquet(merged_file)
+        else:
+            all_repo_df = None
+        
         all_dfs = []
         for fname, prefix in repo_codes.items():
-            path = repo_dir / f"{fname}.parquet"
-            if not path.exists():
-                logger.warning(f"回购利率文件不存在: {path}")
-                continue
+            if all_repo_df is not None:
+                # 从合并后的单文件中按ts_code筛选（文件名用_分隔，ts_code用.分隔）
+                if 'ts_code' in all_repo_df.columns:
+                    ts_code = fname.replace('_', '.', 1)
+                    df = all_repo_df[all_repo_df['ts_code'] == ts_code].copy()
+                else:
+                    logger.warning(f"合并文件中缺少ts_code列，无法筛选 {fname}")
+                    continue
+            else:
+                path = repo_dir / f"{fname}.parquet"
+                if not path.exists():
+                    logger.warning(f"回购利率文件不存在: {path}")
+                    continue
+                df = self.read_parquet(path)
             
-            df = self.read_parquet(path)
             if len(df) == 0:
                 continue
             
@@ -735,59 +768,89 @@ class MacroEnvProcessor(BaseProcessor):
         
         fut_dir = DATA_SOURCE_PATHS.fut_daily_dir
         
+        # 支持合并后的单文件格式和原始目录格式
+        merged_file = fut_dir.with_suffix('.parquet')
+        if not fut_dir.exists() and merged_file.exists():
+            all_fut_df = self.read_parquet(merged_file)
+            if len(all_fut_df) > 0:
+                all_fut_df = self.normalize_date_column(all_fut_df, 'trade_date')
+                all_fut_pd = all_fut_df.to_pandas()
+            else:
+                all_fut_pd = None
+        else:
+            all_fut_pd = None
+        
         results = []
         
         for fut_code, config in self.FUTURES_CONFIG.items():
             spot_index = config['spot_index']
             spot_col = f"{self.CORE_INDICES.get(spot_index, ('idx', ''))[0]}_close"
             
-            # 加载该品种的所有合约
-            if not fut_dir.exists():
-                logger.warning(f"期货目录不存在: {fut_dir}")
-                continue
-            
-            # 找到所有该品种的合约文件
-            contract_files = [
-                f for f in os.listdir(fut_dir) 
-                if f.startswith(f'{fut_code}') and f.endswith('.parquet') and '_CFX' in f
-            ]
-            
-            if not contract_files:
-                continue
+            if all_fut_pd is not None:
+                # 从合并后的单文件中筛选该品种的CFX合约（ts_code格式如IC1901.CFX）
+                if 'ts_code' in all_fut_pd.columns:
+                    mask = all_fut_pd['ts_code'].str.startswith(fut_code) & all_fut_pd['ts_code'].str.contains('.CFX', na=False)
+                    contract_data = all_fut_pd[mask]
+                else:
+                    contract_data = pd.DataFrame()
+            else:
+                # 原始目录格式
+                if not fut_dir.exists():
+                    logger.warning(f"期货目录不存在: {fut_dir}")
+                    continue
+                contract_files = [
+                    f for f in os.listdir(fut_dir) 
+                    if f.startswith(f'{fut_code}') and f.endswith('.parquet') and '_CFX' in f
+                ]
+                if not contract_files:
+                    continue
+                contract_data = None
             
             # 加载所有合约并聚合
             daily_data = {}  # {trade_date: {'total_oi': 0, 'main_close': 0, 'main_oi': 0}}
             
-            for cf in contract_files:
-                path = fut_dir / cf
-                try:
-                    df = self.read_parquet(path)
-                    if len(df) == 0:
+            if all_fut_pd is not None:
+                # 从合并后的DataFrame中聚合
+                for _, row in contract_data.iterrows():
+                    td = row['trade_date']
+                    if td not in daily_data:
+                        daily_data[td] = {'total_oi': 0, 'main_close': 0, 'main_oi': 0}
+                    if 'oi' in row and not pd.isna(row['oi']):
+                        daily_data[td]['total_oi'] += row['oi']
+                        if row['oi'] > daily_data[td]['main_oi']:
+                            daily_data[td]['main_oi'] = row['oi']
+                            daily_data[td]['main_close'] = row.get('close', 0)
+            else:
+                for cf in contract_files:
+                    path = fut_dir / cf
+                    try:
+                        df = self.read_parquet(path)
+                        if len(df) == 0:
+                            continue
+                        
+                        df = self.normalize_date_column(df, 'trade_date')
+                        
+                        # cuDF -> pandas 进行聚合（小数据量）
+                        df_pd = df.to_pandas()
+                        
+                        for _, row in df_pd.iterrows():
+                            td = row['trade_date']
+                            if td not in daily_data:
+                                daily_data[td] = {'total_oi': 0, 'main_close': 0, 'main_oi': 0}
+                            
+                            # 累加持仓量
+                            if 'oi' in row and not pd.isna(row['oi']):
+                                daily_data[td]['total_oi'] += row['oi']
+                            
+                            # 找主力合约（持仓量最大）
+                            if 'oi' in row and not pd.isna(row['oi']):
+                                if row['oi'] > daily_data[td]['main_oi']:
+                                    daily_data[td]['main_oi'] = row['oi']
+                                    daily_data[td]['main_close'] = row.get('close', 0)
+                                    
+                    except Exception as e:
+                        logger.debug(f"加载期货文件失败 {cf}: {e}")
                         continue
-                    
-                    df = self.normalize_date_column(df, 'trade_date')
-                    
-                    # cuDF -> pandas 进行聚合（小数据量）
-                    df_pd = df.to_pandas()
-                    
-                    for _, row in df_pd.iterrows():
-                        td = row['trade_date']
-                        if td not in daily_data:
-                            daily_data[td] = {'total_oi': 0, 'main_close': 0, 'main_oi': 0}
-                        
-                        # 累加持仓量
-                        if 'oi' in row and not pd.isna(row['oi']):
-                            daily_data[td]['total_oi'] += row['oi']
-                        
-                        # 找主力合约（持仓量最大）
-                        if 'oi' in row and not pd.isna(row['oi']):
-                            if row['oi'] > daily_data[td]['main_oi']:
-                                daily_data[td]['main_oi'] = row['oi']
-                                daily_data[td]['main_close'] = row.get('close', 0)
-                                
-                except Exception as e:
-                    logger.debug(f"加载期货文件失败 {cf}: {e}")
-                    continue
             
             if not daily_data:
                 continue

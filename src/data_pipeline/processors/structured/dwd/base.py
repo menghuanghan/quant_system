@@ -206,6 +206,11 @@ class BaseProcessor(ABC):
         """
         dir_path = Path(dir_path)
         if not dir_path.exists():
+            # 目录不存在时，检查是否有同名的合并后parquet文件
+            parquet_file = dir_path.with_suffix('.parquet')
+            if parquet_file.exists():
+                logger.info(f"使用合并后的文件: {parquet_file}")
+                return self.read_parquet(parquet_file, columns=columns)
             logger.warning(f"目录不存在: {dir_path}")
             return cudf.DataFrame()
         

@@ -146,8 +146,8 @@ class EventSignalProcessor(BaseProcessor):
         dates = df[date_col].to_arrow().to_pylist()
         mapped_dates = [date_mapping.get(d, d) for d in dates]
         
-        # 保持 object/str 类型（与骨架表一致）
-        df['mapped_trade_date'] = cudf.Series(mapped_dates)
+        # 保持 object/str 类型（与骨架表一致），使用 df.index 避免索引对齐错位
+        df['mapped_trade_date'] = cudf.Series(mapped_dates, index=df.index)
         
         # 统计映射情况
         original_set = set(dates)

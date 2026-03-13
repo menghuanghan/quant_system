@@ -2,18 +2,18 @@ import pandas as pd
 from pathlib import Path
 import os
 
-dwd_dir = Path('data/features/structured') #'data/processed/structured/dwd'
-out_dir = Path('data/temp/features') #'data/temp/dwd'
+dwd_dir = Path('data/processed/structured/dwd') #'data/features/structured'
+out_dir = Path('data/temp/dwd') #'data/temp/features'
 out_dir.mkdir(parents=True, exist_ok=True)
 
 tables = [
-    # 'dwd_stock_price', 'dwd_stock_fundamental', 'dwd_stock_status',
-    # 'dwd_money_flow', 'dwd_chip_structure', 'dwd_stock_industry',
-    # 'dwd_event_signal', 'dwd_macro_env'
-    'train_lgb'
+    'dwd_stock_price', 'dwd_stock_fundamental', 'dwd_stock_status',
+    'dwd_money_flow', 'dwd_chip_structure', 'dwd_stock_industry',
+    'dwd_event_signal', 'dwd_macro_env'
+    # 'train_lgb'
 ]
 
-N = 40000
+N = 200000
 
 import gc
 gc.collect()
