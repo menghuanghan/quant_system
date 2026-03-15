@@ -142,7 +142,6 @@ class FeatureGroups:
     industry_fields: List[str] = field(default_factory=lambda: [
         "industry", "industry_idx",
         "sw_l1_code", "sw_l1_name", "sw_l1_idx",
-        "sw_l2_code", "sw_l2_name", "sw_l2_idx",
         "industry_changed",
     ])
     

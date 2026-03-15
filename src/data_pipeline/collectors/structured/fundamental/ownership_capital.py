@@ -650,8 +650,10 @@ class RepurchaseCollector(BaseCollector):
         start_date: Optional[str],
         end_date: Optional[str]
     ) -> pd.DataFrame:
-        """从Tushare获取回购数据"""
+        """从Tushare获取回购数据（支持offset分页，避免单次上限截断）"""
         pro = self.tushare_api
+        PAGE_LIMIT = 2000
+        MAX_OFFSET = 200000
         
         params = {}
         if ts_code:
@@ -663,42 +665,80 @@ class RepurchaseCollector(BaseCollector):
         if end_date:
             params['end_date'] = end_date
         
+        def _fetch_with_pagination(query_params: dict, context: str) -> pd.DataFrame:
+            """按 offset 分页抓取单个查询区间的数据。"""
+            chunks = []
+            offset = 0
+
+            while True:
+                if offset > MAX_OFFSET:
+                    logger.warning(
+                        f"repurchase[{context}] offset 超过上限({MAX_OFFSET})，"
+                        "可能仍有数据未抓取"
+                    )
+                    break
+
+                request_params = dict(query_params)
+                request_params['limit'] = PAGE_LIMIT
+                request_params['offset'] = offset
+
+                try:
+                    chunk = pro.repurchase(**request_params)
+                except Exception as e:
+                    logger.warning(
+                        f"repurchase[{context}] 分页请求失败(offset={offset}): {e}"
+                    )
+                    break
+
+                if chunk is None or chunk.empty:
+                    break
+
+                chunks.append(chunk)
+
+                # 最后一页
+                if len(chunk) < PAGE_LIMIT:
+                    break
+
+                offset += PAGE_LIMIT
+                time.sleep(0.2)
+
+            if not chunks:
+                return pd.DataFrame()
+
+            result = pd.concat(chunks, ignore_index=True)
+            logger.info(f"repurchase[{context}] 抓取完成: {len(result)} 条")
+            return result
+
         df = pd.DataFrame()
-        
-        # 如果提供了时间范围，按年循环获取以避免数据量限制
-        if start_date and end_date:
-            try:
-                # 生成年份范围
-                start_year = int(start_date[:4])
-                end_year = int(end_date[:4])
-                years = range(start_year, end_year + 1)
-                
-                all_dfs = []
-                for year in years:
-                    p = params.copy()
-                    p['start_date'] = f"{year}0101"
-                    p['end_date'] = f"{year}1231"
-                    
-                    # 裁剪起止日期
-                    if p['start_date'] < start_date:
-                        p['start_date'] = start_date
-                    if p['end_date'] > end_date:
-                        p['end_date'] = end_date
-                        
-                    try:
-                        chunk = pro.repurchase(**p)
-                        if not chunk.empty:
-                            all_dfs.append(chunk)
-                    except:
-                        pass
-                
-                if all_dfs:
-                    df = pd.concat(all_dfs, ignore_index=True)
-            except:
-                # 降级到直接查询
-                df = pro.repurchase(**params)
+
+        # ann_date 精确查询优先，避免与日期范围参数混用
+        if ann_date:
+            df = _fetch_with_pagination(params, f"ann_date={ann_date}")
+        # 若提供时间范围，按年分块 + 分页抓取，避免单年命中上限后被截断
+        elif start_date and end_date:
+            start_year = int(start_date[:4])
+            end_year = int(end_date[:4])
+            years = range(start_year, end_year + 1)
+
+            all_dfs = []
+            for year in years:
+                p = params.copy()
+                p['start_date'] = max(start_date, f"{year}0101")
+                p['end_date'] = min(end_date, f"{year}1231")
+
+                if p['start_date'] > p['end_date']:
+                    continue
+
+                context = f"{p['start_date']}-{p['end_date']}"
+                year_df = _fetch_with_pagination(p, context)
+                if not year_df.empty:
+                    all_dfs.append(year_df)
+
+            if all_dfs:
+                df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
         else:
-            df = pro.repurchase(**params)
+            # 无时间范围时也走分页，避免默认2000条截断
+            df = _fetch_with_pagination(params, "full_scan")
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)

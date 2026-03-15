@@ -206,11 +206,16 @@ class MarketDataProcessor(BaseProcessor):
         df['vwap'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=None, amount_unit="yuan")
         df['vwap_hfq'] = calculate_vwap_gpu(df['amount'], df['vol'], adj_factor=adj, amount_unit="yuan")
         
-        # 日收益率（基于后复权价格）- 在全量数据上计算
+        # 日收益率（基于后复权价格）- 使用交易所 pre_close 计算，避免首日被置零
+        # 说明：
+        #   close_hfq = close * adj_factor
+        #   pre_close_hfq = pre_close * adj_factor
+        #   return_1d = close_hfq / pre_close_hfq - 1
+        # 这样即使在输出区间首日（如 2019-01-02）也能得到真实收益率。
         df = df.sort_values(['ts_code', 'trade_date'])
-        df['pre_close_hfq'] = df.groupby('ts_code')['close_hfq'].shift(1)
-        df['return_1d'] = (df['close_hfq'] - df['pre_close_hfq']) / df['pre_close_hfq']
-        df['return_1d'] = df['return_1d'].fillna(0)
+        df['pre_close_hfq'] = df['pre_close'] * adj
+        df['return_1d'] = (df['close_hfq'] / df['pre_close_hfq']) - 1
+        df['return_1d'] = df['return_1d'].where(df['pre_close_hfq'] > 0, cp.nan)
         
         # 换手率
         if 'turnover_rate_f' in df.columns:

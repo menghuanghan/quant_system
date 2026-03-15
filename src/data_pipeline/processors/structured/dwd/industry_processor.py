@@ -9,7 +9,7 @@ IndustryProcessor - 行业分类宽表处理器（纯cuDF GPU版本）
 
 处理逻辑：
     1. 优先使用 stock_list_a 的 industry 字段作为基础行业分类
-    2. 如果 sw_index_member 可用，则补充申万多级行业分类
+    2. 如果 sw_index_member 可用，则补充申万一级行业分类
     3. 如果 sw_index_member 不可用，则根据 industry 字段推断申万一级行业
     4. industry_changed 标记基于行业代码变化计算
 """
@@ -40,19 +40,15 @@ class IndustryProcessor(BaseProcessor):
         # 行业分类（源自 stock_list_a）
         - industry: 行业名称（Tushare 分类，100%覆盖）
         - industry_idx: 行业编码（用于模型训练，-1 表示未分类）
-        # 申万行业分类（可选，如果 sw_index_member 可用）
+        # 申万一级行业分类（可选，如果 sw_index_member 可用）
         - sw_l1_code: 申万一级行业代码
         - sw_l1_name: 申万一级行业名称
-        - sw_l2_code: 申万二级行业代码
-        - sw_l2_name: 申万二级行业名称
-        - sw_l3_code: 申万三级行业代码
-        - sw_l3_name: 申万三级行业名称
         # 行业变更标记
         - industry_changed: 是否发生行业变更
         
     数据质量说明：
         - industry 字段来自 stock_list_a，覆盖率 100%
-        - sw_* 字段来自 sw_index_member，可能部分缺失
+        - sw_l1_* 字段来自 sw_index_member，可能部分缺失
         - industry_idx 使用 -1 标记未分类，避免与真实行业冲突
     """
     
@@ -230,16 +226,14 @@ class IndustryProcessor(BaseProcessor):
             logger.warning(f"有 {unmatched} 条记录未匹配到行业，标记为'未分类'")
             result['industry'] = result['industry'].fillna('未分类')
         
-        # 5. 尝试加载申万多级行业数据补充
+        # 5. 尝试加载申万一级行业数据补充
         sw_member = self._load_sw_index_member()
         
         if len(sw_member) > 0:
-            logger.info("合并申万多级行业数据...")
+            logger.info("合并申万一级行业数据...")
             # 重命名字段
             rename_map = {
                 'l1_code': 'sw_l1_code', 'l1_name': 'sw_l1_name',
-                'l2_code': 'sw_l2_code', 'l2_name': 'sw_l2_name',
-                'l3_code': 'sw_l3_code', 'l3_name': 'sw_l3_name',
             }
             for old_name, new_name in rename_map.items():
                 if old_name in sw_member.columns:
@@ -249,17 +243,16 @@ class IndustryProcessor(BaseProcessor):
             industry_daily = self._expand_interval_to_daily(sw_member)
             
             # 选择需要的字段
-            sw_cols = ['ts_code', 'trade_date', 'sw_l1_code', 'sw_l1_name', 
-                       'sw_l2_code', 'sw_l2_name', 'sw_l3_code', 'sw_l3_name']
+            sw_cols = ['ts_code', 'trade_date', 'sw_l1_code', 'sw_l1_name']
             sw_cols = [c for c in sw_cols if c in industry_daily.columns]
             industry_daily = industry_daily[sw_cols]
             
             # 合并
             result = result.merge(industry_daily, on=['ts_code', 'trade_date'], how='left')
         else:
-            logger.info("申万多级行业数据不可用，仅使用基础行业分类")
+            logger.info("申万一级行业数据不可用，仅使用基础行业分类")
             # 添加空的申万字段
-            for col in ['sw_l1_code', 'sw_l1_name', 'sw_l2_code', 'sw_l2_name', 'sw_l3_code', 'sw_l3_name']:
+            for col in ['sw_l1_code', 'sw_l1_name']:
                 result[col] = None
         
         # 6. 使用 industry 字段推断/填充 sw_l1_name
@@ -313,7 +306,7 @@ class IndustryProcessor(BaseProcessor):
             result = result.drop(columns=['_inferred_sw_l1_code'], errors='ignore')
         
         # 最终填充剩余缺失值
-        sw_name_cols = ['sw_l1_name', 'sw_l2_name', 'sw_l3_name']
+        sw_name_cols = ['sw_l1_name']
         for col in sw_name_cols:
             if col in result.columns:
                 result[col] = result[col].fillna('未分类')
@@ -343,7 +336,7 @@ class IndustryProcessor(BaseProcessor):
             result = result.merge(industry_map_df, on='industry', how='left')
             result['industry_idx'] = result['industry_idx'].fillna(-1).astype('int32')
         
-        # 同样处理申万一级/二级行业编码
+        # 申万一级行业编码
         if 'sw_l1_name' in result.columns:
             unique_l1 = result['sw_l1_name'].unique().to_arrow().to_pylist()
             sorted_l1 = sorted([i for i in unique_l1 if i != '未分类'])
@@ -356,19 +349,6 @@ class IndustryProcessor(BaseProcessor):
             })
             result = result.merge(l1_map_df, on='sw_l1_name', how='left')
             result['sw_l1_idx'] = result['sw_l1_idx'].fillna(-1).astype('int32')
-        
-        if 'sw_l2_name' in result.columns:
-            unique_l2 = result['sw_l2_name'].unique().to_arrow().to_pylist()
-            sorted_l2 = sorted([i for i in unique_l2 if i != '未分类'])
-            l2_map = {name: idx for idx, name in enumerate(sorted_l2)}
-            l2_map['未分类'] = -1
-            
-            l2_map_df = cudf.DataFrame({
-                'sw_l2_name': list(l2_map.keys()),
-                'sw_l2_idx': list(l2_map.values())
-            })
-            result = result.merge(l2_map_df, on='sw_l2_name', how='left')
-            result['sw_l2_idx'] = result['sw_l2_idx'].fillna(-1).astype('int32')
         
         # 9. 排序
         result = result.sort_values(['trade_date', 'ts_code']).reset_index(drop=True)

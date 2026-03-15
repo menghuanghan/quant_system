@@ -121,7 +121,7 @@ class GRUDataChecker:
     
     # 类别特征（idx 列）- 不参与 Z-Score，保持整数
     CATEGORY_COLS = [
-        'industry_idx', 'sw_l1_idx', 'sw_l2_idx', 'sw_l3_idx',
+        'industry_idx', 'sw_l1_idx',
         'market',  # 已编码为整数
     ]
     
@@ -148,7 +148,7 @@ class GRUDataChecker:
     # 日期/字符串列（已在后处理中删除，但保留用于向后兼容）
     EXCLUDE_FROM_NAN_CHECK = [
         'report_date', 'list_date', 'chip_report_date', 'holder_report_date',
-        'industry', 'sw_l1_name', 'sw_l2_name', 'sw_l3_name',
+        'industry', 'sw_l1_name',
     ]
     
     # [已废弃] 原始数值列 - 现在这些列已被 GRU 后处理器 drop 或标准化

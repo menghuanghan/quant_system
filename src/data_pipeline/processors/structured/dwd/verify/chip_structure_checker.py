@@ -55,6 +55,9 @@ class ChipStructureChecker(BaseChecker):
         
         # 3. 筹码报告日期PIT检查
         self._check_chip_report_pit()
+
+        # 4. 股东人数可用日滞后检查（防隐性未来函数）
+        self._check_holder_report_lag()
     
     def _check_hold_ratio_range(self):
         """十大股东占比范围检查"""
@@ -189,4 +192,52 @@ class ChipStructureChecker(BaseChecker):
             severity=CheckSeverity.PASS if future_leak == 0 else CheckSeverity.CRITICAL,
             metric_name="chip_future_leak_count",
             metric_value=future_leak,
+        )
+
+    def _check_holder_report_lag(self):
+        """股东人数可用日滞后检查：trade_date 应严格晚于 holder_report_date"""
+
+        if "holder_report_date" not in self.df.columns:
+            self.add_result(
+                check_name="股东人数可用日滞后检查",
+                passed=True,
+                message="holder_report_date 列不存在，跳过检查",
+                severity=CheckSeverity.INFO,
+            )
+            return
+
+        if "trade_date" not in self.df.columns:
+            return
+
+        df_valid = self.df[
+            self.df["holder_report_date"].notna() &
+            self.df["trade_date"].notna() &
+            self.df["holder_num"].notna()
+        ].copy() if "holder_num" in self.df.columns else self.df[
+            self.df["holder_report_date"].notna() &
+            self.df["trade_date"].notna()
+        ].copy()
+
+        if len(df_valid) == 0:
+            self.add_result(
+                check_name="股东人数可用日滞后检查",
+                passed=True,
+                message="无有效数据",
+                severity=CheckSeverity.INFO,
+            )
+            return
+
+        df_valid["holder_report_date_dt"] = pd.to_datetime(df_valid["holder_report_date"])
+        df_valid["trade_date_dt"] = pd.to_datetime(df_valid["trade_date"])
+
+        # 不满足严格滞后（<=）都视为风险
+        not_lagged = (df_valid["trade_date_dt"] <= df_valid["holder_report_date_dt"]).sum()
+
+        self.add_result(
+            check_name="股东人数可用日滞后检查 (trade_date > holder_report_date)",
+            passed=not_lagged == 0,
+            message=f"非滞后行数(<=): {not_lagged}",
+            severity=CheckSeverity.PASS if not_lagged == 0 else CheckSeverity.CRITICAL,
+            metric_name="holder_report_not_lagged_count",
+            metric_value=not_lagged,
         )

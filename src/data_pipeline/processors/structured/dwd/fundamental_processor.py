@@ -5,9 +5,10 @@ FundamentalProcessor - PIT基本面宽表处理器（纯cuDF GPU版本）
 
 核心处理逻辑：
 1. 财报数据以 ann_date（公告日）为准，而不是 end_date（报告期）
-2. 利润表和现金流量表是YTD累计值，需要先拆分为单季度数据
-3. 单季度数据滚动4季求和得到TTM
-4. 日频数据通过前向填充（ffill）对齐到每个交易日
+2. 为避免公告日盘中不可见性，ann_date 对齐时后移一个交易日
+3. 利润表和现金流量表是YTD累计值，需要先拆分为单季度数据
+4. 单季度数据滚动4季求和得到TTM
+5. 日频数据通过前向填充（ffill）对齐到每个交易日
 """
 
 import logging
@@ -358,8 +359,8 @@ class FundamentalProcessor(BaseProcessor):
             'ts_code': [code for code in stock_codes for _ in trade_dates]
         })
         
-        # 将财务数据按公告日对齐
-        fundamental['trade_date'] = fundamental['ann_date']
+        # 将财务数据按“公告后一个交易日”对齐，避免公告日盘中不可见
+        fundamental = self._shift_ann_date_to_next_trade_date(fundamental, trade_dates)
         
         # **关键修复**：同一股票同一公告日可能有多条记录（不同报告期），需要去重保留最新报告期
         # 先按报告期降序排序，然后去重保留第一条（即最新报告期）
@@ -402,6 +403,58 @@ class FundamentalProcessor(BaseProcessor):
         
         logger.info(f"日频重采样完成，共 {len(result)} 行")
         return result
+
+    def _shift_ann_date_to_next_trade_date(
+        self,
+        fundamental: cudf.DataFrame,
+        trade_dates: list,
+    ) -> cudf.DataFrame:
+        """
+        将 ann_date 映射为“公告后一个交易日”的可用日期。
+
+        映射规则：
+        - ann_date 为交易日：映射到下一交易日
+        - ann_date 为非交易日：映射到 ann_date 之后首个交易日
+        """
+        if len(fundamental) == 0:
+            fundamental['trade_date'] = fundamental['ann_date']
+            return fundamental
+
+        import bisect
+
+        ann_dates = sorted(fundamental['ann_date'].dropna().unique().to_arrow().to_pylist())
+
+        mapped_ann_dates = []
+        mapped_trade_dates = []
+        for ann_date in ann_dates:
+            idx = bisect.bisect_right(trade_dates, ann_date)
+            if idx < len(trade_dates):
+                mapped_ann_dates.append(ann_date)
+                mapped_trade_dates.append(trade_dates[idx])
+
+        if not mapped_ann_dates:
+            logger.warning("ann_date 后移交易日映射后无可用数据")
+            return fundamental.head(0)
+
+        mapping_df = cudf.DataFrame({
+            'ann_date': mapped_ann_dates,
+            'trade_date': mapped_trade_dates,
+        })
+
+        before = len(fundamental)
+        fundamental = fundamental.merge(mapping_df, on='ann_date', how='left')
+
+        dropped = int(fundamental['trade_date'].isna().sum())
+        if dropped > 0:
+            logger.warning(
+                f"ann_date 后移交易日映射: 有 {dropped} 行超出交易日历范围，已丢弃"
+            )
+            fundamental = fundamental.dropna(subset=['trade_date'])
+
+        logger.info(
+            f"ann_date 后移交易日映射完成: {before} -> {len(fundamental)} 行"
+        )
+        return fundamental
     
     def process(self) -> cudf.DataFrame:
         """执行数据处理 - 纯GPU操作"""

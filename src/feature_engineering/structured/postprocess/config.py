@@ -32,10 +32,6 @@ class CommonCleanConfig:
         "industry",       # 使用 industry_idx
         "sw_l1_code",     # 使用 sw_l1_idx
         "sw_l1_name",     # 使用 sw_l1_idx
-        "sw_l2_code",     # 使用 sw_l2_idx
-        "sw_l2_name",     # 使用 sw_l2_idx
-        "sw_l3_code",     # 三级行业过细，直接删除
-        "sw_l3_name",     # 三级行业过细，直接删除
         # 日期字符串列（模型训练不需要）
         "list_date",
         "chip_report_date",
@@ -73,7 +69,7 @@ class LGBConfig:
     
     # 类别特征列（需要转换为 int 或 category）
     category_columns: List[str] = field(default_factory=lambda: [
-        "industry_idx", "sw_l1_idx", "sw_l2_idx",
+        "industry_idx", "sw_l1_idx",
     ])
     
     # 排序字段

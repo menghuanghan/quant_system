@@ -347,7 +347,7 @@ class DataMerger:
         extended_fields = {
             'money_flow': ['net_mf_amount', 'buy_elg_amount'],
             'chip': ['market_congestion', 'top10_hold_ratio'],
-            'industry': ['sw_l1_idx', 'sw_l2_idx'],
+            'industry': ['sw_l1_idx'],
             'event': ['pledge_ratio', 'freeze_ratio'],
             'macro': ['shibor_1m', 'cpi_yoy'],
         }
@@ -425,7 +425,7 @@ class DataMerger:
             drop_cols.extend([c for c in df.columns if pattern in c.lower()])
         
         # 保护关键列
-        protected = ['ts_code', 'trade_date', 'industry_code', 'sw_l1_code', 'sw_l2_code']
+        protected = ['ts_code', 'trade_date', 'industry_code', 'sw_l1_code']
         drop_cols = [c for c in drop_cols if c not in protected]
         
         if drop_cols:

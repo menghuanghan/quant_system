@@ -9,8 +9,9 @@ ChipStructureProcessor - 筹码结构宽表处理器（纯cuDF GPU版本）
 
 处理逻辑：
     1. PIT 对齐：使用 ann_date（公告日）作为生效日期，严禁使用 end_date
-    2. 稀疏转稠密：季度数据通过 ffill 前向填充到每个交易日
-    3. 计算筹码集中度等衍生指标
+    2. 公告可用性修正：ann_date 后移一个交易日作为可交易生效日
+    3. 稀疏转稠密：季度数据通过 ffill 前向填充到每个交易日
+    4. 计算筹码集中度等衍生指标
 """
 
 import logging
@@ -262,8 +263,9 @@ class ChipStructureProcessor(BaseProcessor):
         将低频PIT数据对齐到日频
         
         逻辑：
-        1. 对于每个stock，在ann_date当天及之后的日期都使用该值
-        2. 直到下一个ann_date出现新值
+        1. 将 ann_date 映射到“下一交易日”（防止盘后发布造成当日不可见）
+        2. 对于每个stock，在映射后的可用日及之后使用该值
+        3. 直到下一个可用日出现新值
         
         Args:
             df: 低频数据
@@ -286,18 +288,27 @@ class ChipStructureProcessor(BaseProcessor):
         dates_df = cudf.DataFrame({'trade_date': trade_dates, '_key': 1})
         stocks_df = cudf.DataFrame({'ts_code': stocks, '_key': 1})
         skeleton = dates_df.merge(stocks_df, on='_key').drop(columns=['_key'])
+
+        # 公告日后移一个交易日，作为可交易生效日
+        df = self._map_ann_date_to_next_trade_date(df, ann_date_col, trade_dates)
+        if len(df) == 0:
+            return cudf.DataFrame()
         
-        # **关键修复**：同一股票同一公告日可能有多条记录（不同报告期），需要去重保留最新报告期
+        # **关键修复**：后移映射后，同一股票同一可用日可能有多条记录（如周末公告映射到同一交易日）
+        # 需要去重保留最新记录，避免合并时一对多膨胀
         if report_date_col and report_date_col in df.columns:
-            logger.info(f"去重：按 (ts_code, {ann_date_col}) 保留 {report_date_col} 最新的记录")
-            df = df.sort_values(['ts_code', ann_date_col, report_date_col], ascending=[True, True, False])
-            df = df.drop_duplicates(subset=['ts_code', ann_date_col], keep='first')
+            logger.info(f"去重：按 (ts_code, trade_date) 保留 {report_date_col} 最新的记录")
+            df = df.sort_values(
+                ['ts_code', 'trade_date', ann_date_col, report_date_col],
+                ascending=[True, True, False, False]
+            )
+            df = df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='first')
         else:
-            # 没有报告期字段时，简单去重保留第一条
-            df = df.drop_duplicates(subset=['ts_code', ann_date_col], keep='first')
+            # 没有报告期字段时，按公告日较新的记录保留
+            df = df.sort_values(['ts_code', 'trade_date', ann_date_col], ascending=[True, True, False])
+            df = df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='first')
         
-        # 合并低频数据（按公告日）
-        df = df.rename(columns={ann_date_col: 'trade_date'})
+        # 合并低频数据（按可用日）
         result = skeleton.merge(df, on=['ts_code', 'trade_date'], how='left')
         
         # 前向填充
@@ -307,6 +318,50 @@ class ChipStructureProcessor(BaseProcessor):
                 result[col] = result.groupby('ts_code')[col].ffill()
         
         return result
+
+    def _map_ann_date_to_next_trade_date(
+        self,
+        df: cudf.DataFrame,
+        ann_date_col: str,
+        trade_dates: list,
+    ) -> cudf.DataFrame:
+        """将公告日映射到下一交易日（严格后移一个交易日）。"""
+        if len(df) == 0 or ann_date_col not in df.columns:
+            return df
+
+        import bisect
+
+        ann_dates = sorted(df[ann_date_col].dropna().unique().to_arrow().to_pylist())
+        mapped_ann_dates = []
+        mapped_trade_dates = []
+
+        for ann_date in ann_dates:
+            idx = bisect.bisect_right(trade_dates, ann_date)
+            if idx < len(trade_dates):
+                mapped_ann_dates.append(ann_date)
+                mapped_trade_dates.append(trade_dates[idx])
+
+        if not mapped_ann_dates:
+            logger.warning(f"{ann_date_col} 后移交易日映射后无可用数据")
+            return df.head(0)
+
+        mapping_df = cudf.DataFrame({
+            ann_date_col: mapped_ann_dates,
+            'trade_date': mapped_trade_dates,
+        })
+
+        before = len(df)
+        df = df.merge(mapping_df, on=ann_date_col, how='left')
+
+        dropped = int(df['trade_date'].isna().sum())
+        if dropped > 0:
+            logger.warning(
+                f"{ann_date_col} 后移交易日映射: 有 {dropped} 行超出交易日历范围，已丢弃"
+            )
+            df = df.dropna(subset=['trade_date'])
+
+        logger.info(f"{ann_date_col} 后移交易日映射完成: {before} -> {len(df)} 行")
+        return df
     
     def process(self) -> cudf.DataFrame:
         """处理并生成筹码结构宽表"""

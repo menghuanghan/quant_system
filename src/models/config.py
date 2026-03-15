@@ -56,7 +56,6 @@ class FeatureConfig:
     category_columns: List[str] = field(default_factory=lambda: [
         "industry_idx",
         "sw_l1_idx", 
-        "sw_l2_idx",
         "market",
     ])
     
@@ -343,7 +342,6 @@ CATEGORICAL_FEATURES = [
     "market",
     "industry_idx",
     "sw_l1_idx",
-    "sw_l2_idx",
 ]
 
 

@@ -4,7 +4,7 @@
 核心目标：确保分类覆盖率高，无非法索引
 
 检查项：
-- sw_l1_idx, sw_l2_idx: 有效性检查（统计-1或NaN比例）
+- sw_l1_idx: 有效性检查（统计-1或NaN比例）
 - 索引范围检查 [0, 31]
 - industry_changed: 分布检查（稀疏事件）
 """
@@ -60,7 +60,7 @@ class IndustryChecker(BaseChecker):
     def _check_industry_index_validity(self):
         """行业索引有效性检查"""
         
-        index_cols = ["sw_l1_idx", "sw_l2_idx", "sw_l3_idx"]
+        index_cols = ["sw_l1_idx"]
         
         for col in index_cols:
             if col not in self.df.columns:
@@ -75,12 +75,8 @@ class IndustryChecker(BaseChecker):
             invalid_rate = invalid_count / total if total > 0 else 0
             
             # 一级行业索引应力争 0 缺失
-            if col == "sw_l1_idx":
-                passed = invalid_rate < 0.01  # 允许1%
-                severity = CheckSeverity.PASS if passed else CheckSeverity.ERROR
-            else:
-                passed = invalid_rate < 0.05  # 二三级允许5%
-                severity = CheckSeverity.PASS if passed else CheckSeverity.WARNING
+            passed = invalid_rate < 0.01  # 允许1%
+            severity = CheckSeverity.PASS if passed else CheckSeverity.ERROR
             
             self.add_result(
                 check_name=f"行业索引有效性检查 ({col})",
@@ -119,23 +115,6 @@ class IndustryChecker(BaseChecker):
                     },
                 )
         
-        # 二级行业检查
-        if "sw_l2_idx" in self.df.columns:
-            series = self.df["sw_l2_idx"].dropna()
-            series = series[series >= 0]
-            
-            if len(series) > 0:
-                unique_count = series.nunique()
-                
-                self.add_result(
-                    check_name="二级行业索引分布",
-                    passed=True,
-                    message=f"唯一值数量: {unique_count}",
-                    severity=CheckSeverity.INFO,
-                    metric_name="sw_l2_unique_count",
-                    metric_value=unique_count,
-                )
-    
     def _check_industry_changed(self):
         """行业变更分布检查"""
         

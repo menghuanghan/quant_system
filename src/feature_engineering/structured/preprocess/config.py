@@ -164,7 +164,6 @@ class IndustryConfig:
     index_fields: List[str] = field(default_factory=lambda: [
         "industry_idx",
         "sw_l1_idx",
-        "sw_l2_idx",
     ])
 
 
