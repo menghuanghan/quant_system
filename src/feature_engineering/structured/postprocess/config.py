@@ -75,6 +75,65 @@ class LGBConfig:
     # 排序字段
     sort_by: List[str] = field(default_factory=lambda: ["trade_date", "ts_code"])
 
+    # 若输入已按 sort_by 有序，则跳过重复排序
+    skip_sort_if_already_sorted: bool = True
+
+    # 在排序前剔除宏观/无截面方差特征
+    drop_macro_features_before_sort: bool = True
+
+    # 宏观/无截面方差特征前缀（后处理模块内聚配置，避免依赖模型层）
+    macro_drop_prefixes: List[str] = field(default_factory=lambda: [
+        # 宏观经济指标
+        "gdp_",
+        "cpi_",
+        "ppi_",
+        "pmi",           # pmi, pmi_prod, pmi_new_order, pmi_regime
+        "m2",            # m2, m2_yoy
+        "lpr_",          # lpr_1y, lpr_5y, lpr_trend
+        "macro_",        # macro_amount_shibor, macro_vol_m2 等宏观聚合特征
+        # 利率/货币市场
+        "shibor_",       # shibor_on, shibor_1w, shibor_1m, shibor_3m, shibor_6m, shibor_1y
+        # 市场总体指标（无截面方差）
+        "market_total_", # market_total_rzye, market_total_rqye, market_total_rzrqye
+        "market_congestion",
+        "stock_bond_spread",
+        "break_net_ratio",
+        "buffett_",      # buffett_indicator, buffett_quantile_*
+        "pb_median",
+        "pb_ew",
+        "pb_quantile_",
+        # 陆股通总体流向（无截面方差）
+        "hsgt_north",    # hsgt_north, hsgt_north_ma5, hsgt_north_ma20
+        "hsgt_south",
+        "hsgt_hgt",
+        "hsgt_sgt",
+        "hsgt_ggt_",
+        "mf_north_",     # mf_north_net 等北向资金总体流向
+        # 指数行情（无截面方差）
+        "sh300_",        # sh300_pct_chg, sh300_amplitude, sh300_turnover, sh300_close, sh300_vol, sh300_amount
+        "zz500_",
+        "zz1000_",
+        "cyb_",
+        "sz50_",
+        "kc50_",
+        "rs_",           # rs_csi500, rs_hs300 相对指数强度（无截面方差）
+        # 股指期货（无截面方差）
+        "if_",           # if_total_oi, if_close, if_basis_rate
+        "ic_",
+        "ih_",
+        "im_",
+        # 货币市场流动性（无截面方差）
+        "liquidity_gc001_",
+        "liquidity_r001_",
+        # 纯时序特征（无截面方差）
+        "lag_days",
+        # 宏观衍生状态（无截面方差）
+        "money_regime",
+        "risk_appetite",
+        "macro_score",
+        "macro_regime",
+    ])
+
 
 @dataclass
 class GRUConfig:
@@ -87,8 +146,13 @@ class GRUConfig:
     cut_start: str = "2019-01-01"
     cut_end: str = "2020-06-30"
     
-    # [防泄露] Clip 分位数仅使用训练集计算
-    # 设为 None 则使用全量数据（有轻微泄露风险）
+    # Clip 分位数计算策略：
+    # - global: 使用全量数据计算分位数（工程默认，适配 rolling/single_full 动态切分）
+    # - fixed_train_end: 使用 clip_train_end 之前的数据计算分位数（更严格防泄露）
+    # - disable: 跳过 Clip 去极值
+    clip_mode: str = "global"
+
+    # 当 clip_mode="fixed_train_end" 时生效
     clip_train_end: Optional[str] = "2023-12-31"
     
     # ============ 第一类：需要 DROP 的非平稳列 ============
@@ -179,6 +243,21 @@ class GRUConfig:
     
     # 滚动 Z-Score 窗口（约一年）
     rolling_window: int = 250
+
+    # 滚动 Z-Score 分批列处理大小（降低内存峰值）
+    rolling_zscore_batch_size: int = 8
+
+    # 是否在滚动 Z-Score 后立即执行数据切分
+    # 说明：切分仅依赖 trade_date，前移不会影响保留日期的截面标准化结果，
+    # 但可显著降低后续步骤内存基线。
+    slice_after_rolling: bool = True
+
+    # 是否启用“延迟切分到保存阶段”
+    # 说明：避免在内存中执行整表行过滤导致峰值翻倍；保存时按分块过滤写出。
+    slice_defer_to_save: bool = True
+
+    # 延迟切分时的分块行数（越小峰值越低，越大写出更快）
+    slice_save_chunk_rows: int = 300_000
     
     # 时序填充的特征（先 ffill）
     # 注意：ma_* 列已被 drop，不再需要填充
@@ -289,6 +368,9 @@ class GRUConfig:
     
     # 排序字段（用于时序连续性）
     sort_by: List[str] = field(default_factory=lambda: ["ts_code", "trade_date"])
+
+    # 若输入已按 sort_by 有序，则跳过重复排序
+    skip_sort_if_already_sorted: bool = True
 
 
 @dataclass

@@ -6,8 +6,9 @@ LightGBM 专用后处理模块
 2. 不做归一化/标准化（树模型基于阈值分裂，归一化无效）
 3. 保留异常值（龙虎榜爆发等对捕捉"妖股"有帮助）
 4. 类别特征处理（转 int/category）
-5. 数据排序（trade_date -> ts_code，便于 TimeSeriesSplit）
+5. 剔除宏观/无截面方差特征（与模型训练侧对齐）
 6. 数据切分（剔除 2019-2020）
+7. 数据排序（trade_date -> ts_code，便于 TimeSeriesSplit）
 """
 
 import gc
@@ -62,8 +63,9 @@ class LGBProcessor:
         顺序：
         1. 类别特征处理
         2. NaN 填充策略（保留 NaN 或简单填充）
-        3. 数据排序
+        3. 剔除宏观/无截面方差特征
         4. 数据切分
+        5. 数据排序
         
         Args:
             df: 输入 DataFrame（已经过公共清洗）
@@ -82,12 +84,15 @@ class LGBProcessor:
         
         # Step 2: NaN 填充策略
         df = self._handle_nan(df)
-        
-        # Step 3: 数据排序
-        df = self._sort_data(df)
+
+        # Step 3: 剔除宏观/无截面方差特征
+        df = self._drop_macro_features(df)
         
         # Step 4: 数据切分（剔除 2019-2020）
         df = self._slice_data(df)
+
+        # Step 5: 数据排序
+        df = self._sort_data(df)
         
         final_rows = len(df)
         
@@ -175,24 +180,114 @@ class LGBProcessor:
         
         return df
     
+    def _drop_macro_features(self, df: Any) -> Any:
+        """
+        在后处理阶段前置剔除宏观/无截面方差特征。
+
+        通过后处理配置中的宏观前缀进行剔除，
+        减少后续排序和落盘时的内存占用。
+        """
+        logger.info("  📊 Step 3: 剔除宏观/无截面方差特征")
+
+        if not getattr(self.config, "drop_macro_features_before_sort", True):
+            logger.info("     ✓ 配置已禁用，跳过")
+            self.stats["macro_drop_count"] = 0
+            self.stats["macro_drop_skipped"] = True
+            return df
+
+        macro_prefixes = getattr(self.config, "macro_drop_prefixes", None) or []
+        if not macro_prefixes:
+            logger.warning("     ⚠️ 未配置 macro 前缀，跳过")
+            self.stats["macro_drop_count"] = 0
+            self.stats["macro_drop_skipped"] = True
+            return df
+
+        protected_cols = {"ts_code", "trade_date"}
+        label_prefixes = ("ret_", "label_", "rank_", "excess_ret_", "sharpe_")
+
+        drop_cols = []
+        for col in df.columns:
+            if col in protected_cols:
+                continue
+            if col.startswith(label_prefixes):
+                continue
+            if any(col.startswith(prefix) for prefix in macro_prefixes):
+                drop_cols.append(col)
+
+        if not drop_cols:
+            logger.info("     ✓ 无需剔除")
+            self.stats["macro_drop_count"] = 0
+            self.stats["macro_drop_skipped"] = False
+            return df
+
+        df = df.drop(columns=drop_cols)
+        logger.info(f"     ✓ 剔除列数: {len(drop_cols)}")
+        logger.info(f"     ✓ 示例: {drop_cols[:10]}")
+
+        self.stats["macro_drop_cols"] = drop_cols
+        self.stats["macro_drop_count"] = len(drop_cols)
+        self.stats["macro_drop_skipped"] = False
+        return df
+
     def _sort_data(self, df: Any) -> Any:
         """
         数据排序
         
         先按 trade_date，再按 ts_code 排序，方便 TimeSeriesSplit。
         """
-        logger.info("  📊 Step 3: 数据排序")
+        logger.info("  📊 Step 5: 数据排序")
         
         sort_by = self.config.sort_by
         logger.info(f"     排序字段: {sort_by}")
+
+        skip_if_sorted = getattr(self.config, "skip_sort_if_already_sorted", True)
+        if skip_if_sorted and self._is_already_sorted(df, sort_by):
+            logger.info("     ✓ 输入数据已按目标顺序排列，跳过排序")
+            self.stats["sort_by"] = sort_by
+            self.stats["sort_skipped"] = True
+            return df
         
         df = df.sort_values(sort_by).reset_index(drop=True)
         
         logger.info(f"     ✓ 排序完成")
         
         self.stats["sort_by"] = sort_by
+        self.stats["sort_skipped"] = False
         
         return df
+
+    def _is_already_sorted(self, df: Any, sort_by: List[str]) -> bool:
+        """检查输入数据是否已按指定字段字典序排序。"""
+        if self.use_gpu:
+            # cuDF 下保守处理：直接执行排序，避免比较行为差异
+            return False
+
+        if len(df) <= 1:
+            return True
+
+        if any(col not in df.columns for col in sort_by):
+            return False
+
+        prev_equal = None
+        valid_order = None
+
+        for col in sort_by:
+            series = df[col]
+            prev_series = series.shift(1)
+
+            ge_mask = series >= prev_series
+            eq_mask = series == prev_series
+
+            if prev_equal is None:
+                valid_order = ge_mask.copy()
+                prev_equal = eq_mask.copy()
+            else:
+                valid_order = valid_order & (~prev_equal | ge_mask)
+                prev_equal = prev_equal & eq_mask
+
+        valid_order = valid_order.fillna(False)
+        valid_order.iloc[0] = True
+        return bool(valid_order.all())
     
     def _slice_data(self, df: Any) -> Any:
         """
@@ -201,6 +296,14 @@ class LGBProcessor:
         剔除 2019-2020 的数据（预热期）。
         """
         logger.info("  📊 Step 4: 数据切分")
+
+        # 若上游已按 cut 区间预过滤（only-lgb 模式），则直接跳过
+        if hasattr(df, "attrs") and df.attrs.get("_lgb_prefiltered_cut_applied", False):
+            logger.info("     ✓ 已应用读取阶段预过滤，跳过重复切分")
+            self.stats["slice_removed"] = 0
+            self.stats["slice_final"] = len(df)
+            self.stats["slice_skipped"] = True
+            return df
         
         cut_start = self.config.cut_start
         cut_end = self.config.cut_end
@@ -239,6 +342,7 @@ class LGBProcessor:
         
         self.stats["slice_removed"] = removed_rows
         self.stats["slice_final"] = final_rows
+        self.stats["slice_skipped"] = False
         
         return df
     

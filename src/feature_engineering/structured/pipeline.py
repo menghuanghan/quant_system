@@ -28,6 +28,7 @@ class FeaturePipeline:
         self.config = config
         self.use_gpu = config.use_gpu
         self.stats: Dict[str, Any] = {}
+        self._auto_date_bounds: Optional[Dict[str, Any]] = None
         
         # 初始化 DataFrame 库
         if self.use_gpu:
@@ -46,6 +47,126 @@ class FeaturePipeline:
         
         # 初始化子模块
         self._init_modules()
+
+    def _auto_configure_date_boundaries(self, emit_log: bool = True) -> None:
+        """
+        基于 dwd_stock_price.parquet 自动推导时间边界并覆盖配置。
+
+        规则：
+        1. 读取 trade_date 的最小/最大日期
+        2. 扩展到完整月份边界（月初 ~ 月末）
+        3. 前 warmup_months 为预热期（LGB 剔除）
+        4. 前 gru_warmup_months 为 GRU 预热剔除期
+        """
+        import pandas as pd
+        from pandas.tseries.offsets import DateOffset, MonthEnd
+
+        price_path = self.config.data.price_path
+        if not price_path.exists():
+            raise FileNotFoundError(f"价格表不存在，无法自动推导时间边界: {price_path}")
+
+        date_df = pd.read_parquet(str(price_path), columns=['trade_date'])
+        if date_df.empty:
+            raise ValueError(f"价格表为空，无法自动推导时间边界: {price_path}")
+
+        trade_dates = pd.to_datetime(date_df['trade_date'], errors='coerce').dropna()
+        if trade_dates.empty:
+            raise ValueError("trade_date 列无法解析为有效日期，无法自动推导时间边界")
+
+        min_raw = trade_dates.min()
+        max_raw = trade_dates.max()
+
+        # 对齐完整月份边界
+        full_start = min_raw.to_period('M').to_timestamp(how='start').normalize()
+        full_end = (max_raw + MonthEnd(0)).normalize()
+
+        total_months = (full_end.year - full_start.year) * 12 + (full_end.month - full_start.month) + 1
+
+        warmup_months = int(getattr(self.config.data, 'warmup_months', 24))
+        gru_warmup_months = int(getattr(self.config.data, 'gru_warmup_months', 18))
+
+        if total_months < warmup_months:
+            logger.warning(
+                f"⚠️ 全量月份数({total_months})小于 warmup_months({warmup_months})，"
+                f"LGB 预热剔除区间将退化为全量范围"
+            )
+            warmup_end = full_end
+        else:
+            warmup_end = (full_start + DateOffset(months=warmup_months) - pd.Timedelta(days=1)).normalize()
+
+        if total_months < gru_warmup_months:
+            logger.warning(
+                f"⚠️ 全量月份数({total_months})小于 gru_warmup_months({gru_warmup_months})，"
+                f"GRU 预热剔除区间将退化为全量范围"
+            )
+            gru_cut_end = full_end
+        else:
+            gru_cut_end = (full_start + DateOffset(months=gru_warmup_months) - pd.Timedelta(days=1)).normalize()
+
+        train_start = (warmup_end + pd.Timedelta(days=1)).normalize()
+        train_end = full_end
+        if train_start > train_end:
+            train_start = train_end
+
+        # 覆盖 DataConfig（供日志与下游复用）
+        self.config.data.warmup_start = full_start.strftime('%Y-%m-%d')
+        self.config.data.warmup_end = warmup_end.strftime('%Y-%m-%d')
+        self.config.data.train_start = train_start.strftime('%Y-%m-%d')
+        self.config.data.train_end = train_end.strftime('%Y-%m-%d')
+
+        # 缓存供后处理切分使用
+        self._auto_date_bounds = {
+            'raw_min_date': min_raw.strftime('%Y-%m-%d'),
+            'raw_max_date': max_raw.strftime('%Y-%m-%d'),
+            'full_start': full_start.strftime('%Y-%m-%d'),
+            'full_end': full_end.strftime('%Y-%m-%d'),
+            'total_months': total_months,
+            'warmup_months': warmup_months,
+            'gru_warmup_months': gru_warmup_months,
+            'lgb_cut_start': full_start.strftime('%Y-%m-%d'),
+            'lgb_cut_end': warmup_end.strftime('%Y-%m-%d'),
+            'gru_cut_start': full_start.strftime('%Y-%m-%d'),
+            'gru_cut_end': gru_cut_end.strftime('%Y-%m-%d'),
+            'train_start': train_start.strftime('%Y-%m-%d'),
+            'train_end': train_end.strftime('%Y-%m-%d'),
+        }
+
+        self.stats['auto_date_boundaries'] = self._auto_date_bounds
+
+        if emit_log:
+            logger.info("📅 自动日期边界配置完成:")
+            logger.info(
+                f"   原始 trade_date 范围: {self._auto_date_bounds['raw_min_date']} ~ {self._auto_date_bounds['raw_max_date']}"
+            )
+            logger.info(
+                f"   全量月份窗口: {self._auto_date_bounds['full_start']} ~ {self._auto_date_bounds['full_end']} "
+                f"({total_months} 个月)"
+            )
+            logger.info(
+                f"   LGB 预热剔除区间: [{self._auto_date_bounds['lgb_cut_start']}, {self._auto_date_bounds['lgb_cut_end']}]"
+            )
+            logger.info(
+                f"   GRU 预热剔除区间: [{self._auto_date_bounds['gru_cut_start']}, {self._auto_date_bounds['gru_cut_end']}]"
+            )
+            logger.info(
+                f"   正式期: {self._auto_date_bounds['train_start']} ~ {self._auto_date_bounds['train_end']}"
+            )
+
+    def get_auto_date_boundaries(self, refresh: bool = False, emit_log: bool = False) -> Dict[str, Any]:
+        """
+        获取自动推导后的日期边界。
+
+        Args:
+            refresh: 是否强制重新读取 dwd_stock_price 并推导
+            emit_log: 推导时是否打印日志
+
+        Returns:
+            自动边界字典
+        """
+        if refresh or self._auto_date_bounds is None:
+            self._auto_configure_date_boundaries(emit_log=emit_log)
+
+        return dict(self._auto_date_bounds or {})
     
     def _init_modules(self):
         """初始化各处理模块"""
@@ -161,6 +282,9 @@ class FeaturePipeline:
         logger.info(f"🚀 特征工程流水线启动 {mode_desc}")
         logger.info(f"   后处理模式: {postprocess_mode}")
         logger.info("=" * 70)
+
+        # 运行前自动推导并覆盖日期边界（基于 dwd_stock_price.trade_date）
+        self.get_auto_date_boundaries(refresh=False, emit_log=True)
         
         if memory_efficient:
             # 内存高效模式：支持断点续跑
@@ -590,6 +714,17 @@ class FeaturePipeline:
         # 初始化后处理流水线
         pp_config = self._PostprocessConfig.default()
         pp_config.output_dir = self.config.data.output_dir
+
+        # 使用自动边界覆盖后处理切分区间
+        if self._auto_date_bounds:
+            pp_config.lgb.cut_start = self._auto_date_bounds['lgb_cut_start']
+            pp_config.lgb.cut_end = self._auto_date_bounds['lgb_cut_end']
+            pp_config.gru.cut_start = self._auto_date_bounds['gru_cut_start']
+            pp_config.gru.cut_end = self._auto_date_bounds['gru_cut_end']
+
+            logger.info("  🧭 后处理自动切分边界:")
+            logger.info(f"     LGB: [{pp_config.lgb.cut_start}, {pp_config.lgb.cut_end}]")
+            logger.info(f"     GRU: [{pp_config.gru.cut_start}, {pp_config.gru.cut_end}]")
         
         self.postprocess_pipeline = self._PostprocessPipeline(
             config=pp_config,

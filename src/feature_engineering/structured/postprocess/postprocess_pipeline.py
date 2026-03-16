@@ -201,12 +201,53 @@ class PostprocessPipeline:
             df = cudf.read_parquet(str(train_path))
         else:
             import pandas as pd
-            df = pd.read_parquet(str(train_path))
+            prefilter_applied = False
+            filters = self._build_load_filters()
+
+            if filters:
+                try:
+                    df = pd.read_parquet(str(train_path), filters=filters)
+                    prefilter_applied = True
+                    logger.info("     ✓ only-lgb 模式已按 trade_date 预过滤读取，降低切分峰值内存")
+                except Exception as e:
+                    logger.warning(f"     ⚠️ 预过滤读取失败，回退全量读取: {e}")
+                    df = pd.read_parquet(str(train_path))
+            else:
+                df = pd.read_parquet(str(train_path))
+
+            # 标记：LGB 切分可直接跳过（避免重复构造大掩码）
+            if prefilter_applied and hasattr(df, "attrs"):
+                df.attrs["_lgb_prefiltered_cut_applied"] = True
         
         file_size = train_path.stat().st_size / (1024 * 1024)
         logger.info(f"     ✓ {len(df):,} 行, {len(df.columns)} 列, {file_size:.1f} MB")
         
         return self.run(df, save_output)
+
+    def _build_load_filters(self):
+        """
+        构造读取 parquet 时的过滤条件。
+
+        仅在 only-lgb + pandas 下启用：
+        - LGB 后处理不依赖 2019-2020 的历史窗口统计
+        - 预过滤可减少后续切分时的峰值内存
+        """
+        if self.use_gpu:
+            return None
+
+        if self.mode != PostprocessMode.ONLY_LGB:
+            return None
+
+        import pandas as pd
+
+        cut_start_dt = pd.to_datetime(self.config.lgb.cut_start)
+        cut_end_dt = pd.to_datetime(self.config.lgb.cut_end)
+
+        # DNF: (trade_date < cut_start) OR (trade_date > cut_end)
+        return [
+            [("trade_date", "<", cut_start_dt)],
+            [("trade_date", ">", cut_end_dt)],
+        ]
     
     def _print_summary(self, result: Dict[str, Any], elapsed: float):
         """打印处理摘要"""

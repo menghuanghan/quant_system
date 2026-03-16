@@ -68,61 +68,6 @@ class FeatureConfig:
         "sharpe_",
     ])
     
-    # ==================== 宏观/无截面方差特征（需剔除）====================
-    # 这些特征在同一天内所有股票数值相同，对横截面模型无区分度
-    # 会导致模型被这些无意义特征主导，产生"降维打击"效应
-    drop_macro_prefixes: List[str] = field(default_factory=lambda: [
-        # 宏观经济指标
-        "gdp_",
-        "cpi_",
-        "ppi_",
-        "pmi",           # pmi, pmi_prod, pmi_new_order, pmi_regime
-        "m2",            # m2, m2_yoy
-        "lpr_",          # lpr_1y, lpr_5y, lpr_trend
-        "macro_",        # 【新增】macro_amount_shibor, macro_vol_m2 等宏观聚合特征
-        # 利率/货币市场
-        "shibor_",       # shibor_on, shibor_1w, shibor_1m, shibor_3m, shibor_6m, shibor_1y
-        # 市场总体指标（无截面方差）
-        "market_total_", # market_total_rzye, market_total_rqye, market_total_rzrqye
-        "market_congestion",
-        "stock_bond_spread",
-        "break_net_ratio",
-        "buffett_",      # buffett_indicator, buffett_quantile_*
-        "pb_median",
-        "pb_ew",
-        "pb_quantile_",
-        # 陆股通总体流向（无截面方差）
-        "hsgt_north",    # hsgt_north, hsgt_north_ma5, hsgt_north_ma20
-        "hsgt_south",
-        "hsgt_hgt",
-        "hsgt_sgt",
-        "hsgt_ggt_",
-        "mf_north_",     # 【新增】mf_north_net 等北向资金总体流向
-        # 指数行情（无截面方差）
-        "sh300_",        # sh300_pct_chg, sh300_amplitude, sh300_turnover, sh300_close, sh300_vol, sh300_amount
-        "zz500_",
-        "zz1000_",
-        "cyb_",
-        "sz50_",
-        "kc50_",
-        "rs_",           # 【新增】rs_csi500, rs_hs300 相对指数强度（无截面方差）
-        # 股指期货（无截面方差）
-        "if_",           # if_total_oi, if_close, if_basis_rate
-        "ic_",
-        "ih_",
-        "im_",
-        # 货币市场流动性（无截面方差）
-        "liquidity_gc001_",
-        "liquidity_r001_",
-        # 纯时序特征（无截面方差）
-        "lag_days",      # 【新增】距上一交易日天数
-        # 宏观衍生状态（无截面方差）
-        "money_regime",
-        "risk_appetite",
-        "macro_score",
-        "macro_regime",
-    ])
-    
     # 默认训练标签列表
     default_target_cols: List[str] = field(default_factory=lambda: [
         "rank_ret_5d",      # 5日收益排序
@@ -378,7 +323,7 @@ def get_gru_selected_features(
     策略:
     1. 读取 LightGBM feature_importance.parquet → 按 importance 降序取 Top N
     2. 从 Top N 中排除类别特征和辅助/掩码列（CATEGORICAL_FEATURES + AUX_COLS）
-    3. 追加所有宏观特征（FeatureConfig.drop_macro_prefixes 匹配的列），
+    3. 追加所有宏观特征（读取后处理 LGB 配置中的 macro_drop_prefixes 匹配列），
        因为宏观特征被 LGB 剔除，但对 GRU 时序建模有价值
     4. 取交集：仅保留 all_columns 中实际存在的列
     5. 去重并保持顺序
@@ -435,7 +380,14 @@ def get_gru_selected_features(
         return get_gru_feature_columns(all_columns, [], None)
 
     # ---- 3. 收集宏观特征 ----
-    macro_prefixes = FeatureConfig().drop_macro_prefixes
+    # 使用后处理层的唯一配置源，避免模型层与后处理层双份维护
+    try:
+        from src.feature_engineering.structured.postprocess.config import LGBConfig as PostprocessLGBConfig
+        macro_prefixes = tuple(PostprocessLGBConfig().macro_drop_prefixes)
+    except Exception as e:
+        _logger.warning(f"读取后处理 macro_drop_prefixes 失败，将跳过宏观特征追加: {e}")
+        macro_prefixes = tuple()
+
     macro_features = []
     for col in all_columns:
         if col in exclude_set:

@@ -125,7 +125,6 @@ class TrainingReportGenerator:
         """生成配置部分"""
         split_cfg = self.config.split_config
         lgb_cfg = self.config.lgb_config
-        feature_cfg = self.config.feature_config
         
         # 计算 Fold 数量
         n_folds = len(next(iter(self.fold_info_dict.values()), []))
@@ -162,25 +161,11 @@ class TrainingReportGenerator:
         content += f"| early_stopping_rounds | {lgb_cfg.early_stopping_rounds} | 早停轮数 |\n"
         content += f"| device | {lgb_cfg.device} | 计算设备 |\n"
         
-        # 特征过滤
-        if hasattr(feature_cfg, 'drop_macro_prefixes') and feature_cfg.drop_macro_prefixes:
-            content += """
-### 1.3 特征过滤
-
-**过滤的宏观特征前缀**（截面无区分度）:
-
-"""
-            # 分组显示
-            prefixes = feature_cfg.drop_macro_prefixes
-            for i in range(0, len(prefixes), 6):
-                batch = prefixes[i:i+6]
-                content += "- " + ", ".join(f"`{p}`" for p in batch) + "\n"
-            
-            # 获取实际特征数量
-            if self.feature_importance:
-                first_target = next(iter(self.feature_importance.keys()))
-                n_features = len(self.feature_importance[first_target])
-                content += f"\n**实际使用特征数**: {n_features}\n"
+        # 特征统计
+        if self.feature_importance:
+            first_target = next(iter(self.feature_importance.keys()))
+            n_features = len(self.feature_importance[first_target])
+            content += f"\n### 1.3 特征统计\n\n**实际使用特征数**: {n_features}\n"
         
         content += "\n---\n\n"
         return content

@@ -51,12 +51,21 @@ class DataConfig:
     # 中间结果文件名
     merger_preprocess_file: str = "merger_preprocess.parquet"  # 合并+预处理后的中间表
     
-    # 数据时间范围
-    # 预热期：2019-06-01 ~ 2020-12-31（用于计算 MA250 等长周期指标）
-    warmup_start: str = "2019-06-01"
+    # ============ 自动日期窗口配置 ============
+    # 全量窗口长度（月）：默认 84 个月
+    # 说明：运行时会从 dwd_stock_price.parquet 的 trade_date 自动推导完整月份边界，
+    # 并据此覆盖 warmup_start/warmup_end/train_start/train_end。
+    full_window_months: int = 84
+
+    # 预热期长度（月）：LGB 剔除前 24 个月
+    warmup_months: int = 24
+
+    # GRU 预热剔除长度（月）：剔除前 18 个月
+    gru_warmup_months: int = 18
+
+    # 运行时自动覆盖的时间边界（保留默认值仅用于兼容与初始日志展示）
+    warmup_start: str = "2019-01-01"
     warmup_end: str = "2020-12-31"
-    
-    # 正式期：2021-01-01 ~ 2025-12-31（用于训练/验证/测试）
     train_start: str = "2021-01-01"
     train_end: str = "2025-12-31"
     

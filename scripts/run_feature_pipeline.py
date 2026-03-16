@@ -79,6 +79,15 @@ def main():
     if args.output:
         config.data.train_file = args.output
     
+    # 初始化流水线并预先推导自动日期边界（用于启动日志）
+    pipeline = None
+    auto_bounds = {}
+    try:
+        pipeline = FeaturePipeline(config)
+        auto_bounds = pipeline.get_auto_date_boundaries(emit_log=False)
+    except Exception as e:
+        logger.warning(f"⚠️ 自动日期边界推导失败，回退配置默认值打印: {e}")
+
     # 打印配置
     memory_efficient = args.memory_efficient and not args.no_memory_efficient
     postprocess_mode = args.postprocess
@@ -91,8 +100,24 @@ def main():
     logger.info(f"   输出目录: {config.data.output_dir}")
     logger.info(f"   临时目录: {config.data.temp_dir}")
     logger.info(f"   输出文件: {config.data.train_file}")
-    logger.info(f"   预热期: {config.data.warmup_start} ~ {config.data.warmup_end}")
-    logger.info(f"   正式期: {config.data.train_start} ~ {config.data.train_end}")
+    if auto_bounds:
+        logger.info(
+            f"   原始交易日范围: {auto_bounds['raw_min_date']} ~ {auto_bounds['raw_max_date']}"
+        )
+        logger.info(
+            f"   全量月份窗口: {auto_bounds['full_start']} ~ {auto_bounds['full_end']} "
+            f"({auto_bounds['total_months']} 个月)"
+        )
+        logger.info(
+            f"   预热期(LGB剔除): {auto_bounds['lgb_cut_start']} ~ {auto_bounds['lgb_cut_end']}"
+        )
+        logger.info(
+            f"   预热期(GRU剔除): {auto_bounds['gru_cut_start']} ~ {auto_bounds['gru_cut_end']}"
+        )
+        logger.info(f"   正式期: {auto_bounds['train_start']} ~ {auto_bounds['train_end']}")
+    else:
+        logger.info(f"   预热期: {config.data.warmup_start} ~ {config.data.warmup_end}")
+        logger.info(f"   正式期: {config.data.train_start} ~ {config.data.train_end}")
     logger.info("")
     logger.info(f"📋 股票池过滤:")
     logger.info(f"   剔除停牌: {config.universe.exclude_suspended}")
@@ -126,7 +151,8 @@ def main():
     
     # 执行流水线
     try:
-        pipeline = FeaturePipeline(config)
+        if pipeline is None:
+            pipeline = FeaturePipeline(config)
         result = pipeline.run(
             save_output=True, 
             memory_efficient=memory_efficient,

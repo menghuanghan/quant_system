@@ -107,12 +107,6 @@ class LGBQuantModel(BaseModel):
                 if col.startswith(prefix):
                     exclude_cols.add(col)
         
-        # 【关键】排除纯宏观特征（无截面方差，会降维打击）
-        for col in X.columns:
-            for prefix in self.feature_config.drop_macro_prefixes:
-                if col.startswith(prefix):
-                    exclude_cols.add(col)
-        
         # 如果指定了当前目标列，也需要排除
         if target_col:
             exclude_cols.add(target_col)
