@@ -17,6 +17,11 @@ from datetime import datetime
 
 import pandas as pd
 
+from .financial_statement import (
+    _collect_all_market_in_batches,
+    _get_all_a_share_ts_codes,
+)
+
 from ..base import (
     BaseCollector,
     DataSource,
@@ -136,38 +141,88 @@ class Top10HoldersCollector(BaseCollector):
     
     def collect(
         self,
-        ts_code: str,
+        ts_code: Optional[str] = None,
         period: Optional[str] = None,
         type: str = 'all',
+        ann_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        enable_akshare_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
         采集前十大股东数据
         
         Args:
-            ts_code: 证券代码（必填）
+            ts_code: 证券代码；为空时默认全市场并发采集
             period: 报告期（YYYYMMDD）
             type: 类型（all=全部，top10=前十大，float=流通股东）
+            ann_date: 公告日期
+            start_date: 报告期开始日期
+            end_date: 报告期结束日期
+            enable_akshare_fallback: 是否启用AkShare降级（默认启用）
         
         Returns:
             DataFrame: 标准化的股东数据
         """
         if not ts_code:
-            logger.error("需要指定ts_code")
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="top10_holders",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        ts_code=code,
+                        period=period,
+                        type=type,
+                        ann_date=ann_date,
+                        start_date=start_date,
+                        end_date=end_date,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场股东数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场股东数据采集失败: {e}")
+
+            if enable_akshare_fallback:
+                logger.warning("全市场模式暂不支持AkShare降级，返回空数据")
+
+            logger.error("无法获取股东数据")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
+
         # 使用Tushare
         try:
-            df = self._collect_from_tushare(ts_code, period, type)
+            df = self._collect_from_tushare(
+                ts_code=ts_code,
+                period=period,
+                type=type,
+                ann_date=ann_date,
+                start_date=start_date,
+                end_date=end_date,
+            )
             if not df.empty:
                 logger.info(f"从Tushare成功获取 {len(df)} 条股东数据")
                 return df
+            logger.info("Tushare返回空数据，尝试AkShare降级")
         except Exception as e:
             logger.warning(f"Tushare获取股东数据失败: {e}")
+
+        if not enable_akshare_fallback:
+            logger.info("已禁用AkShare降级，直接返回空数据")
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 降级到AkShare
         try:
-            df = self._collect_from_akshare(ts_code)
+            df = self._collect_from_akshare(
+                ts_code=ts_code,
+                period=period,
+                ann_date=ann_date,
+                start_date=start_date,
+                end_date=end_date,
+            )
             if not df.empty:
                 logger.info(f"从AkShare成功获取 {len(df)} 条股东数据")
                 return df
@@ -182,7 +237,10 @@ class Top10HoldersCollector(BaseCollector):
         self,
         ts_code: str,
         period: Optional[str],
-        type: str
+        type: str,
+        ann_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
     ) -> pd.DataFrame:
         """从Tushare获取股东数据"""
         pro = self.tushare_api
@@ -194,6 +252,12 @@ class Top10HoldersCollector(BaseCollector):
             params = {'ts_code': ts_code}
             if period:
                 params['period'] = period
+            if ann_date:
+                params['ann_date'] = ann_date
+            if start_date:
+                params['start_date'] = start_date
+            if end_date:
+                params['end_date'] = end_date
             df1 = pro.top10_holders(**params)
             if not df1.empty:
                 df1['holder_type'] = '前十大股东'
@@ -204,6 +268,12 @@ class Top10HoldersCollector(BaseCollector):
             params = {'ts_code': ts_code}
             if period:
                 params['period'] = period
+            if ann_date:
+                params['ann_date'] = ann_date
+            if start_date:
+                params['start_date'] = start_date
+            if end_date:
+                params['end_date'] = end_date
             df2 = pro.top10_floatholders(**params)
             if not df2.empty:
                 df2['holder_type'] = '前十大流通股东'
@@ -221,8 +291,15 @@ class Top10HoldersCollector(BaseCollector):
         
         return df[self.OUTPUT_FIELDS]
     
-    def _collect_from_akshare(self, ts_code: str) -> pd.DataFrame:
-        """从AkShare获取股东数据"""
+    def _collect_from_akshare(
+        self,
+        ts_code: str,
+        period: Optional[str] = None,
+        ann_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """从AkShare获取股东数据，并在本地执行日期过滤（历史数据后过滤）。"""
         import akshare as ak
         
         symbol = ts_code.split('.')[0]
@@ -235,15 +312,69 @@ class Top10HoldersCollector(BaseCollector):
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        column_mapping = {
-            '股东名称': 'holder_name',
-            '持股数量': 'hold_amount',
-            '持股比例': 'hold_ratio',
+
+        column_aliases = {
+            'holder_name': ['股东名称', '股东姓名'],
+            'hold_amount': ['持股数量', '持股数(股)', '持股数'],
+            'hold_ratio': ['持股比例', '持股比例(%)'],
+            'hold_float_ratio': ['占流通股比例', '占流通股比例(%)'],
+            'hold_change': ['持股变动', '持股变化'],
+            'end_date': ['截止日期', '报告期', '报告期截止日'],
+            'ann_date': ['公告日期', '公告日'],
         }
-        df = self._standardize_columns(df, column_mapping)
+
+        for target, sources in column_aliases.items():
+            if target in df.columns:
+                continue
+            for source in sources:
+                if source in df.columns:
+                    df[target] = df[source]
+                    break
+
         df['ts_code'] = ts_code
         df['holder_type'] = '前十大股东'
+
+        for date_col in ['ann_date', 'end_date']:
+            if date_col in df.columns:
+                dt = pd.to_datetime(df[date_col], errors='coerce')
+                df[date_col] = dt.dt.strftime('%Y-%m-%d')
+
+        # AkShare不支持与Tushare等价的参数筛选，这里在拉取历史后做本地日期过滤
+        ann_date_compact = ann_date.strip() if ann_date else None
+        period_compact = period.strip() if period else None
+        start_date_compact = start_date.strip() if start_date else None
+        end_date_compact = end_date.strip() if end_date else None
+
+        if 'ann_date' in df.columns:
+            ann_key = pd.to_datetime(df['ann_date'], errors='coerce').dt.strftime('%Y%m%d')
+        else:
+            ann_key = pd.Series([None] * len(df), index=df.index, dtype='object')
+
+        if 'end_date' in df.columns:
+            end_key = pd.to_datetime(df['end_date'], errors='coerce').dt.strftime('%Y%m%d')
+        else:
+            end_key = pd.Series([None] * len(df), index=df.index, dtype='object')
+
+        if ann_date_compact and ann_key.notna().any():
+            df = df[ann_key == ann_date_compact]
+            ann_key = ann_key[df.index]
+            end_key = end_key[df.index]
+
+        if period_compact and end_key.notna().any():
+            df = df[end_key == period_compact]
+            ann_key = ann_key[df.index]
+            end_key = end_key[df.index]
+
+        range_key = ann_key if ann_key.notna().any() else end_key
+        if start_date_compact and range_key.notna().any():
+            df = df[range_key >= start_date_compact]
+            ann_key = ann_key[df.index]
+            end_key = end_key[df.index]
+            range_key = range_key[df.index]
+        if end_date_compact and range_key.notna().any():
+            df = df[range_key <= end_date_compact]
+            ann_key = ann_key[df.index]
+            end_key = end_key[df.index]
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -501,6 +632,34 @@ class ShareFloatCollector(BaseCollector):
             df2 = _fetch_recursive(mid_n, ed, depth + 1)
             parts = [p for p in [df, df1, df2] if not p.empty]
             return pd.concat(parts, ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
+
+        def _fetch_by_params_paginated(query_params: dict) -> pd.DataFrame:
+            """按参数+offset分页（适用于 ann_date / float_date 等精确查询）。"""
+            chunks = []
+            offset = 0
+            for _ in range(20):
+                if offset >= MAX_OFFSET:
+                    break
+                p = dict(query_params)
+                p['limit'] = PAGE_LIMIT
+                p['offset'] = offset
+                try:
+                    chunk = pro.share_float(**p)
+                except Exception as e:
+                    logger.debug(f"share_float params_query offset={offset} 出错: {e}")
+                    break
+
+                if chunk is None or chunk.empty:
+                    break
+
+                chunks.append(chunk)
+                if len(chunk) < PAGE_LIMIT:
+                    break
+
+                offset += PAGE_LIMIT
+                time.sleep(0.3)
+
+            return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
         
         result_df = pd.DataFrame()
         
@@ -537,18 +696,22 @@ class ShareFloatCollector(BaseCollector):
             except Exception as e:
                 logger.warning(f"按月分页获取失败，回退到单次请求: {e}")
                 result_df, _ = _fetch_range(start_date, end_date)
+        elif ann_date:
+            # 公告日精确查询：同样启用分页，避免单次6000上限截断
+            params_call = dict(base_params)
+            result_df = _fetch_by_params_paginated(params_call)
         else:
             params_call = dict(base_params)
             if start_date:
                 params_call['start_date'] = start_date
             if end_date:
                 params_call['end_date'] = end_date
-            result_df = pro.share_float(**params_call)
+            result_df = _fetch_by_params_paginated(params_call)
         
-        if df.empty:
+        if result_df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
-        df = self._convert_date_format(df, ['ann_date', 'float_date'])
+        df = self._convert_date_format(result_df, ['ann_date', 'float_date'])
         
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
@@ -921,19 +1084,27 @@ def get_share_structure(
 
 
 def get_top10_holders(
-    ts_code: str,
+    ts_code: Optional[str] = None,
     period: Optional[str] = None,
     type: str = 'all',
-    **kwargs  # 接受调度器传递的额外参数（如 start_date, end_date）
+    ann_date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    enable_akshare_fallback: bool = False,
+    **kwargs
 ) -> pd.DataFrame:
     """
     获取前十大股东数据
     
     Args:
-        ts_code: 证券代码（必填）
+        ts_code: 证券代码；为空时默认全市场并发采集
         period: 报告期
         type: all=全部，top10=前十大，float=流通股东
-        **kwargs: 其他参数（由调度器传入，会被忽略）
+        ann_date: 公告日期
+        start_date: 报告期开始日期
+        end_date: 报告期结束日期
+        enable_akshare_fallback: 是否启用AkShare降级（默认关闭）
+        **kwargs: 其他参数（兼容保留）
     
     Returns:
         DataFrame: 股东数据
@@ -942,7 +1113,16 @@ def get_top10_holders(
         >>> df = get_top10_holders(ts_code='000001.SZ')
     """
     collector = Top10HoldersCollector()
-    return collector.collect(ts_code=ts_code, period=period, type=type)
+    return collector.collect(
+        ts_code=ts_code,
+        period=period,
+        type=type,
+        ann_date=ann_date,
+        start_date=start_date,
+        end_date=end_date,
+        enable_akshare_fallback=enable_akshare_fallback,
+        **kwargs,
+    )
 
 
 def get_pledge(

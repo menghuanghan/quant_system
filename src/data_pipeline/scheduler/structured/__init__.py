@@ -7,8 +7,9 @@
 """
 
 from . import full
+from . import increment
 
-__all__ = ['full']
+__all__ = ['full', 'increment']
 
 __version__ = '1.0.0'
 __author__ = 'Quant Team'

@@ -9,7 +9,11 @@
 """
 
 import logging
-from typing import Optional, Literal
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Callable, List, Optional, Literal
 from datetime import datetime
 
 import pandas as pd
@@ -27,6 +31,147 @@ logger = logging.getLogger(__name__)
 
 # 报告类型
 ReportType = Literal['1', '2', '3', '4', '11']  # 1=合并报表，2=单季度，3=调整单季，4=调整合并，11=调整前合并
+
+
+# 全市场采集策略（按 Tushare 频控约束）
+ALL_MARKET_BATCH_SIZE = 200
+ALL_MARKET_BATCH_WAIT_SECONDS = 65
+ALL_MARKET_MAX_WORKERS = 200
+
+_A_SHARE_TSCODES_CACHE: Optional[List[str]] = None
+_A_SHARE_TSCODES_CACHE_LOCK = threading.Lock()
+
+
+def _get_project_root() -> Path:
+    return Path(__file__).resolve().parents[5]
+
+
+def _load_a_share_ts_codes_from_local() -> List[str]:
+    """优先从本地 stock_list_a 读取全A股 ts_code 列表。"""
+    stock_file = _get_project_root() / "data" / "raw" / "structured" / "metadata" / "stock_list_a.parquet"
+    if not stock_file.exists():
+        return []
+
+    df = pd.read_parquet(stock_file)
+    if "ts_code" not in df.columns:
+        return []
+
+    return (
+        df["ts_code"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+
+def _load_a_share_ts_codes_from_tushare(source_manager: DataSourceManager) -> List[str]:
+    """本地不存在时，回退从 Tushare 拉取 A 股列表。"""
+    pro = source_manager.tushare_api
+    df = pro.stock_basic(exchange="", list_status="L", fields="ts_code")
+    if df is None or df.empty or "ts_code" not in df.columns:
+        return []
+
+    return (
+        df["ts_code"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+
+def _get_all_a_share_ts_codes(source_manager: DataSourceManager, force_refresh: bool = False) -> List[str]:
+    """获取全A股 ts_code（常驻内存缓存，降低频繁 IO 开销）。"""
+    global _A_SHARE_TSCODES_CACHE
+
+    with _A_SHARE_TSCODES_CACHE_LOCK:
+        if _A_SHARE_TSCODES_CACHE is not None and not force_refresh:
+            return _A_SHARE_TSCODES_CACHE
+
+        codes = _load_a_share_ts_codes_from_local()
+        if not codes:
+            logger.warning("本地 stock_list_a 不可用，改为从Tushare拉取全A股代码")
+            codes = _load_a_share_ts_codes_from_tushare(source_manager)
+
+        codes = sorted(set(codes))
+        _A_SHARE_TSCODES_CACHE = codes
+        logger.info("全A股 ts_code 已缓存，数量=%s", len(codes))
+        return codes
+
+
+def _collect_all_market_in_batches(
+    task_name: str,
+    ts_codes: List[str],
+    fetch_one: Callable[[str], pd.DataFrame],
+    output_fields: List[str],
+) -> pd.DataFrame:
+    """按 200 只/批并发采集，批间休眠 65 秒。"""
+    if not ts_codes:
+        return pd.DataFrame(columns=output_fields)
+
+    total = len(ts_codes)
+    total_batches = (total + ALL_MARKET_BATCH_SIZE - 1) // ALL_MARKET_BATCH_SIZE
+    frames: List[pd.DataFrame] = []
+
+    for batch_idx in range(total_batches):
+        batch_no = batch_idx + 1
+        start = batch_idx * ALL_MARKET_BATCH_SIZE
+        end = min(start + ALL_MARKET_BATCH_SIZE, total)
+        batch_codes = ts_codes[start:end]
+        workers = min(ALL_MARKET_MAX_WORKERS, len(batch_codes))
+
+        logger.info(
+            "%s 全市场采集批次 %s/%s 启动: 本批股票=%s, 线程=%s",
+            task_name,
+            batch_no,
+            total_batches,
+            len(batch_codes),
+            workers,
+        )
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{task_name}_batch{batch_no}") as executor:
+            futures = {executor.submit(fetch_one, code): code for code in batch_codes}
+            for idx, future in enumerate(as_completed(futures), 1):
+                code = futures[future]
+                try:
+                    part = future.result()
+                    if part is not None and not part.empty:
+                        frames.append(part)
+                except Exception as e:
+                    logger.warning("%s 采集失败 ts_code=%s: %s", task_name, code, e)
+
+                if idx % 50 == 0 or idx == len(batch_codes):
+                    logger.info(
+                        "%s 批次 %s/%s 进度: %s/%s",
+                        task_name,
+                        batch_no,
+                        total_batches,
+                        idx,
+                        len(batch_codes),
+                    )
+
+        if batch_no < total_batches:
+            logger.info(
+                "%s 批次 %s/%s 完成，等待 %s 秒后继续下一批",
+                task_name,
+                batch_no,
+                total_batches,
+                ALL_MARKET_BATCH_WAIT_SECONDS,
+            )
+            time.sleep(ALL_MARKET_BATCH_WAIT_SECONDS)
+
+    if not frames:
+        return pd.DataFrame(columns=output_fields)
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates()
+
+    for col in output_fields:
+        if col not in merged.columns:
+            merged[col] = None
+
+    return merged[output_fields]
 
 
 @CollectorRegistry.register("balance_sheet")
@@ -94,6 +239,7 @@ class BalanceSheetCollector(BaseCollector):
         end_date: Optional[str] = None,
         period: Optional[str] = None,
         report_type: Optional[str] = None,
+        enable_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -106,30 +252,54 @@ class BalanceSheetCollector(BaseCollector):
             end_date: 公告结束日期
             period: 报告期（YYYYMMDD，如20231231）
             report_type: 报告类型（1=合并报表）
+            enable_fallback: 是否启用降级数据源（默认False）
         
         Returns:
             DataFrame: 标准化的资产负债表数据
         """
-        # 优先使用Tushare
-        try:
-            df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
-            if not df.empty:
-                logger.info(f"从Tushare成功获取 {len(df)} 条资产负债表数据")
-                return df
-        except Exception as e:
-            logger.warning(f"Tushare获取资产负债表失败: {e}")
-        
-        # 降级到BaoStock
-        try:
-            if ts_code:
-                df = self._collect_from_baostock(ts_code)
+        if ts_code:
+            try:
+                df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
                 if not df.empty:
-                    logger.info(f"从BaoStock成功获取 {len(df)} 条资产负债表数据")
+                    logger.info(f"从Tushare成功获取 {len(df)} 条资产负债表数据")
                     return df
-        except Exception as e:
-            logger.error(f"BaoStock获取资产负债表失败: {e}")
-        
-        logger.error("所有数据源均无法获取资产负债表数据")
+            except Exception as e:
+                logger.warning(f"Tushare获取资产负债表失败: {e}")
+
+            if enable_fallback:
+                try:
+                    df = self._collect_from_baostock(ts_code)
+                    if not df.empty:
+                        logger.info(f"从BaoStock成功获取 {len(df)} 条资产负债表数据")
+                        return df
+                except Exception as e:
+                    logger.error(f"BaoStock获取资产负债表失败: {e}")
+        else:
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="balance_sheet",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        code,
+                        ann_date,
+                        start_date,
+                        end_date,
+                        period,
+                        report_type,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场资产负债表数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场资产负债表采集失败: {e}")
+
+            if enable_fallback:
+                logger.warning("全市场模式暂不支持BaoStock降级，返回空数据")
+
+        logger.error("无法获取资产负债表数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)
@@ -268,6 +438,7 @@ class IncomeStatementCollector(BaseCollector):
         end_date: Optional[str] = None,
         period: Optional[str] = None,
         report_type: Optional[str] = None,
+        enable_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -280,30 +451,54 @@ class IncomeStatementCollector(BaseCollector):
             end_date: 公告结束日期
             period: 报告期
             report_type: 报告类型
+            enable_fallback: 是否启用降级数据源（默认False）
         
         Returns:
             DataFrame: 标准化的利润表数据
         """
-        # 优先使用Tushare
-        try:
-            df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
-            if not df.empty:
-                logger.info(f"从Tushare成功获取 {len(df)} 条利润表数据")
-                return df
-        except Exception as e:
-            logger.warning(f"Tushare获取利润表失败: {e}")
-        
-        # 降级到BaoStock
-        try:
-            if ts_code:
-                df = self._collect_from_baostock(ts_code)
+        if ts_code:
+            try:
+                df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
                 if not df.empty:
-                    logger.info(f"从BaoStock成功获取 {len(df)} 条利润表数据")
+                    logger.info(f"从Tushare成功获取 {len(df)} 条利润表数据")
                     return df
-        except Exception as e:
-            logger.error(f"BaoStock获取利润表失败: {e}")
-        
-        logger.error("所有数据源均无法获取利润表数据")
+            except Exception as e:
+                logger.warning(f"Tushare获取利润表失败: {e}")
+
+            if enable_fallback:
+                try:
+                    df = self._collect_from_baostock(ts_code)
+                    if not df.empty:
+                        logger.info(f"从BaoStock成功获取 {len(df)} 条利润表数据")
+                        return df
+                except Exception as e:
+                    logger.error(f"BaoStock获取利润表失败: {e}")
+        else:
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="income_statement",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        code,
+                        ann_date,
+                        start_date,
+                        end_date,
+                        period,
+                        report_type,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场利润表数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场利润表采集失败: {e}")
+
+            if enable_fallback:
+                logger.warning("全市场模式暂不支持BaoStock降级，返回空数据")
+
+        logger.error("无法获取利润表数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)
@@ -431,6 +626,7 @@ class CashFlowCollector(BaseCollector):
         end_date: Optional[str] = None,
         period: Optional[str] = None,
         report_type: Optional[str] = None,
+        enable_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -443,30 +639,54 @@ class CashFlowCollector(BaseCollector):
             end_date: 公告结束日期
             period: 报告期
             report_type: 报告类型
+            enable_fallback: 是否启用降级数据源（默认False）
         
         Returns:
             DataFrame: 标准化的现金流量表数据
         """
-        # 优先使用Tushare
-        try:
-            df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
-            if not df.empty:
-                logger.info(f"从Tushare成功获取 {len(df)} 条现金流量表数据")
-                return df
-        except Exception as e:
-            logger.warning(f"Tushare获取现金流量表失败: {e}")
-        
-        # 降级到BaoStock
-        try:
-            if ts_code:
-                df = self._collect_from_baostock(ts_code)
+        if ts_code:
+            try:
+                df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period, report_type)
                 if not df.empty:
-                    logger.info(f"从BaoStock成功获取 {len(df)} 条现金流量表数据")
+                    logger.info(f"从Tushare成功获取 {len(df)} 条现金流量表数据")
                     return df
-        except Exception as e:
-            logger.error(f"BaoStock获取现金流量表失败: {e}")
-        
-        logger.error("所有数据源均无法获取现金流量表数据")
+            except Exception as e:
+                logger.warning(f"Tushare获取现金流量表失败: {e}")
+
+            if enable_fallback:
+                try:
+                    df = self._collect_from_baostock(ts_code)
+                    if not df.empty:
+                        logger.info(f"从BaoStock成功获取 {len(df)} 条现金流量表数据")
+                        return df
+                except Exception as e:
+                    logger.error(f"BaoStock获取现金流量表失败: {e}")
+        else:
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="cash_flow",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        code,
+                        ann_date,
+                        start_date,
+                        end_date,
+                        period,
+                        report_type,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场现金流量表数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场现金流量表采集失败: {e}")
+
+            if enable_fallback:
+                logger.warning("全市场模式暂不支持BaoStock降级，返回空数据")
+
+        logger.error("无法获取现金流量表数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)
@@ -598,6 +818,7 @@ class FinancialIndicatorCollector(BaseCollector):
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         period: Optional[str] = None,
+        enable_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -609,30 +830,53 @@ class FinancialIndicatorCollector(BaseCollector):
             start_date: 公告开始日期
             end_date: 公告结束日期
             period: 报告期
+            enable_fallback: 是否启用降级数据源（默认False）
         
         Returns:
             DataFrame: 标准化的财务指标数据
         """
-        # 优先使用Tushare
-        try:
-            df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period)
-            if not df.empty:
-                logger.info(f"从Tushare成功获取 {len(df)} 条财务指标数据")
-                return df
-        except Exception as e:
-            logger.warning(f"Tushare获取财务指标失败: {e}")
-        
-        # 降级到BaoStock
-        try:
-            if ts_code:
-                df = self._collect_from_baostock(ts_code)
+        if ts_code:
+            try:
+                df = self._collect_from_tushare(ts_code, ann_date, start_date, end_date, period)
                 if not df.empty:
-                    logger.info(f"从BaoStock成功获取 {len(df)} 条财务指标数据")
+                    logger.info(f"从Tushare成功获取 {len(df)} 条财务指标数据")
                     return df
-        except Exception as e:
-            logger.error(f"BaoStock获取财务指标失败: {e}")
-        
-        logger.error("所有数据源均无法获取财务指标数据")
+            except Exception as e:
+                logger.warning(f"Tushare获取财务指标失败: {e}")
+
+            if enable_fallback:
+                try:
+                    df = self._collect_from_baostock(ts_code)
+                    if not df.empty:
+                        logger.info(f"从BaoStock成功获取 {len(df)} 条财务指标数据")
+                        return df
+                except Exception as e:
+                    logger.error(f"BaoStock获取财务指标失败: {e}")
+        else:
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="financial_indicator",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        code,
+                        ann_date,
+                        start_date,
+                        end_date,
+                        period,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场财务指标数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场财务指标采集失败: {e}")
+
+            if enable_fallback:
+                logger.warning("全市场模式暂不支持BaoStock降级，返回空数据")
+
+        logger.error("无法获取财务指标数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)
@@ -720,7 +964,8 @@ def get_balance_sheet(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     period: Optional[str] = None,
-    report_type: Optional[str] = None
+    report_type: Optional[str] = None,
+    enable_fallback: bool = False,
 ) -> pd.DataFrame:
     """
     获取资产负债表数据
@@ -742,7 +987,8 @@ def get_balance_sheet(
     collector = BalanceSheetCollector()
     return collector.collect(ts_code=ts_code, ann_date=ann_date,
                             start_date=start_date, end_date=end_date,
-                            period=period, report_type=report_type)
+                            period=period, report_type=report_type,
+                            enable_fallback=enable_fallback)
 
 
 def get_income_statement(
@@ -751,7 +997,8 @@ def get_income_statement(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     period: Optional[str] = None,
-    report_type: Optional[str] = None
+    report_type: Optional[str] = None,
+    enable_fallback: bool = False,
 ) -> pd.DataFrame:
     """
     获取利润表数据
@@ -773,7 +1020,8 @@ def get_income_statement(
     collector = IncomeStatementCollector()
     return collector.collect(ts_code=ts_code, ann_date=ann_date,
                             start_date=start_date, end_date=end_date,
-                            period=period, report_type=report_type)
+                            period=period, report_type=report_type,
+                            enable_fallback=enable_fallback)
 
 
 def get_cash_flow(
@@ -782,7 +1030,8 @@ def get_cash_flow(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     period: Optional[str] = None,
-    report_type: Optional[str] = None
+    report_type: Optional[str] = None,
+    enable_fallback: bool = False,
 ) -> pd.DataFrame:
     """
     获取现金流量表数据
@@ -804,7 +1053,8 @@ def get_cash_flow(
     collector = CashFlowCollector()
     return collector.collect(ts_code=ts_code, ann_date=ann_date,
                             start_date=start_date, end_date=end_date,
-                            period=period, report_type=report_type)
+                            period=period, report_type=report_type,
+                            enable_fallback=enable_fallback)
 
 
 def get_financial_indicator(
@@ -812,7 +1062,8 @@ def get_financial_indicator(
     ann_date: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    period: Optional[str] = None
+    period: Optional[str] = None,
+    enable_fallback: bool = False,
 ) -> pd.DataFrame:
     """
     获取财务指标数据
@@ -833,4 +1084,5 @@ def get_financial_indicator(
     collector = FinancialIndicatorCollector()
     return collector.collect(ts_code=ts_code, ann_date=ann_date,
                             start_date=start_date, end_date=end_date,
-                            period=period)
+                            period=period,
+                            enable_fallback=enable_fallback)

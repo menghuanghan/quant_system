@@ -14,6 +14,11 @@ from datetime import datetime
 
 import pandas as pd
 
+from .financial_statement import (
+    _collect_all_market_in_batches,
+    _get_all_a_share_ts_codes,
+)
+
 from ..base import (
     BaseCollector,
     DataSource,
@@ -370,7 +375,7 @@ class MainBusinessCollector(BaseCollector):
     
     def collect(
         self,
-        ts_code: str,
+        ts_code: Optional[str] = None,
         period: Optional[str] = None,
         type: str = 'P',
         **kwargs
@@ -379,7 +384,7 @@ class MainBusinessCollector(BaseCollector):
         采集主营业务数据
         
         Args:
-            ts_code: 证券代码（必填）
+            ts_code: 证券代码；为空时默认全市场并发采集
             period: 报告期（YYYYMMDD）
             type: 类型（P=产品，D=地区）
         
@@ -387,7 +392,25 @@ class MainBusinessCollector(BaseCollector):
             DataFrame: 标准化的主营业务数据
         """
         if not ts_code:
-            logger.error("采集主营业务需要指定ts_code")
+            try:
+                all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                df = _collect_all_market_in_batches(
+                    task_name="main_business",
+                    ts_codes=all_codes,
+                    fetch_one=lambda code: self._collect_from_tushare(
+                        ts_code=code,
+                        period=period,
+                        type=type,
+                    ),
+                    output_fields=self.OUTPUT_FIELDS,
+                )
+                if not df.empty:
+                    logger.info(f"从Tushare成功获取全市场主营业务数据 {len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"Tushare全市场主营业务采集失败: {e}")
+
+            logger.error("无法获取主营业务数据")
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 使用Tushare
@@ -616,7 +639,7 @@ def get_industry_class(
 
 
 def get_main_business(
-    ts_code: str,
+    ts_code: Optional[str] = None,
     period: Optional[str] = None,
     type: str = 'P',
     **kwargs
@@ -625,7 +648,7 @@ def get_main_business(
     获取主营业务数据
     
     Args:
-        ts_code: 证券代码（必填）
+        ts_code: 证券代码；为空时默认全市场并发采集
         period: 报告期
         type: P=产品，D=地区
     

@@ -422,6 +422,55 @@ class BlockTradeCollector(BaseCollector):
     ) -> pd.DataFrame:
         """从Tushare获取大宗交易"""
         pro = self.tushare_api
+
+        def _fetch_paginated(base_params: dict, context: str = "") -> pd.DataFrame:
+            """使用 limit/offset 分页拉取，避免单次1000条截断。"""
+            limit = 1000
+            offset = 0
+            all_pages = []
+
+            while True:
+                page_params = dict(base_params)
+                page_params["limit"] = limit
+                page_params["offset"] = offset
+
+                page_df = None
+                success = False
+                for attempt in range(3):
+                    try:
+                        page_df = pro.block_trade(**page_params)
+                        success = True
+                        break
+                    except Exception as e:
+                        if "最多访问该接口200次" in str(e):
+                            logger.warning(f"大宗交易触发限流，等待 20s... {context} offset={offset}")
+                            time.sleep(20.0)
+                        else:
+                            logger.warning(
+                                f"大宗交易分页请求失败 ({context}) offset={offset}, "
+                                f"attempt={attempt+1}/3: {e}"
+                            )
+                            time.sleep(2.0)
+
+                if not success:
+                    raise RuntimeError(f"大宗交易分页请求连续失败: {context}, offset={offset}")
+
+                if page_df is None or page_df.empty:
+                    break
+
+                all_pages.append(page_df)
+                page_rows = len(page_df)
+
+                if page_rows < limit:
+                    break
+
+                offset += limit
+                # 翻页时稍作停顿，降低触发频控概率
+                time.sleep(0.05)
+
+            if all_pages:
+                return pd.concat(all_pages, ignore_index=True)
+            return pd.DataFrame()
         
         params = {}
         if ts_code:
@@ -450,26 +499,17 @@ class BlockTradeCollector(BaseCollector):
                     p['trade_date'] = trade_date_str
                     p.pop('start_date', None)
                     p.pop('end_date', None)
-                    
-                    # 内部重试机制
-                    success = False
-                    for attempt in range(3):
-                        try:
-                            chunk_df = pro.block_trade(**p)
-                            if not chunk_df.empty:
-                                all_dfs.append(chunk_df)
-                                logger.info(f"大宗交易采集完成: {trade_date_str} ({len(chunk_df)} 条)")
-                            success = True
-                            break
-                        except Exception as e:
-                            if "最多访问该接口200次" in str(e):
-                                time.sleep(20.0) # 限流了，多等一会儿
-                            else:
-                                logger.warning(f"大宗交易 {trade_date_str} 第 {attempt+1} 次尝试失败: {e}")
-                                time.sleep(2.0)
-                    
-                    if not success:
-                        logger.error(f"大宗交易 {trade_date_str} 采集彻底失败")
+
+                    try:
+                        chunk_df = _fetch_paginated(
+                            p,
+                            context=f"trade_date={trade_date_str}"
+                        )
+                        if not chunk_df.empty:
+                            all_dfs.append(chunk_df)
+                            logger.info(f"大宗交易采集完成: {trade_date_str} ({len(chunk_df)} 条)")
+                    except Exception as e:
+                        logger.error(f"大宗交易 {trade_date_str} 采集彻底失败: {e}")
                     
                     # 即使成功也稍微等一下，防限流 (60s/200 = 0.3s)
                     time.sleep(0.35)
@@ -481,9 +521,9 @@ class BlockTradeCollector(BaseCollector):
                     df = pd.DataFrame()
             except Exception as e:
                 logger.error(f"大宗交易分块逻辑异常: {e}, 尝试直接采集")
-                df = pro.block_trade(**params)
+                df = _fetch_paginated(params, context="fallback_direct")
         else:
-            df = pro.block_trade(**params)
+            df = _fetch_paginated(params, context="direct")
         
         if df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)

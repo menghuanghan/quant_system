@@ -268,6 +268,7 @@ class SuspendInfoCollector(BaseCollector):
         suspend_type: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        enable_akshare_fallback: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         """
@@ -279,6 +280,7 @@ class SuspendInfoCollector(BaseCollector):
             suspend_type: 停复牌类型（S=停牌，R=复牌）
             start_date: 开始日期
             end_date: 结束日期
+            enable_akshare_fallback: 是否启用AkShare降级（默认False，避免网络握手阻塞）
         
         Returns:
             DataFrame: 标准化的停复牌数据
@@ -301,6 +303,12 @@ class SuspendInfoCollector(BaseCollector):
                 return df
         except Exception as e:
             logger.warning(f"Tushare获取停复牌信息失败: {e}")
+
+        # 默认不走AkShare降级，避免 requests/SSL 在部分环境中长时间阻塞
+        # 如确有需要，可显式传入 enable_akshare_fallback=True
+        if not enable_akshare_fallback:
+            logger.warning("停复牌信息未命中Tushare，且未启用AkShare降级，返回空数据")
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
         
         # 降级到AkShare
         try:
@@ -866,6 +874,7 @@ def get_suspend_info(
     suspend_type: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    enable_akshare_fallback: bool = False,
     **kwargs
 ) -> pd.DataFrame:
     """
@@ -877,6 +886,7 @@ def get_suspend_info(
         suspend_type: 停复牌类型（S=停牌，R=复牌）
         start_date: 开始日期
         end_date: 结束日期
+        enable_akshare_fallback: 是否启用AkShare降级（默认False）
     
     Returns:
         DataFrame: 停复牌数据
@@ -888,7 +898,9 @@ def get_suspend_info(
     collector = SuspendInfoCollector()
     return collector.collect(ts_code=ts_code, trade_date=trade_date,
                             suspend_type=suspend_type, start_date=start_date,
-                            end_date=end_date, **kwargs)
+                            end_date=end_date,
+                            enable_akshare_fallback=enable_akshare_fallback,
+                            **kwargs)
 
 
 def get_price_limit_rule(
