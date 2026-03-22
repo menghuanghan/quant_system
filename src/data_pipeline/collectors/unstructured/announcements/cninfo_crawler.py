@@ -37,11 +37,11 @@ class CninfoAnnouncementCrawler(UnstructuredCollector):
     """
     
     # API 端点
-    BASE_URL = "http://www.cninfo.com.cn"
-    SEARCH_API = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
-    STOCK_LIST_API = "http://www.cninfo.com.cn/new/data/szse_stock.json"
-    SSE_STOCK_LIST_API = "http://www.cninfo.com.cn/new/data/sse_stock.json"
-    PDF_BASE_URL = "http://static.cninfo.com.cn/"
+    BASE_URL = "https://www.cninfo.com.cn"
+    SEARCH_API = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+    STOCK_LIST_API = "https://www.cninfo.com.cn/new/data/szse_stock.json"
+    SSE_STOCK_LIST_API = "https://www.cninfo.com.cn/new/data/sse_stock.json"
+    PDF_BASE_URL = "https://static.cninfo.com.cn/"
     
     # 标准输出字段（不含content）
     STANDARD_FIELDS = [
@@ -284,8 +284,8 @@ class CninfoAnnouncementCrawler(UnstructuredCollector):
                 method='POST',
                 data=params,
                 headers=self._disguiser.get_json_headers({
-                    'Referer': 'http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search',
-                    'Origin': 'http://www.cninfo.com.cn',
+                    'Referer': 'https://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search',
+                    'Origin': 'https://www.cninfo.com.cn',
                 }),
                 use_proxy=self._use_proxy,
                 rate_limit=False

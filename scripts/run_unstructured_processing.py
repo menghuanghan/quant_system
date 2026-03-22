@@ -50,6 +50,19 @@
     
     # 指定月份范围
     python scripts/run_unstructured_processing.py --categories news/cctv --year 2021 --start-month 1 --end-month 6
+
+    # ===== 合并功能 =====
+    # 将 data/processed/unstructured/{类型}/{年份}/{月份}.parquet 合并为 类型.parquet
+    python scripts/run_unstructured_processing.py --merge
+
+    # 仅执行合并（不跑处理流程）
+    python scripts/run_unstructured_processing.py --merge-only
+
+    # 仅合并指定类型
+    python scripts/run_unstructured_processing.py --merge-only --merge-categories announcements news/exchange
+
+    # 合并后删除源目录（按月分片目录）
+    python scripts/run_unstructured_processing.py --merge-only --merge-remove-source
 """
 
 import sys
@@ -77,6 +90,7 @@ from src.data_pipeline.processors.unstructured.filter import (
     get_filter_statistics,
     print_filter_statistics,
 )
+from src.data_pipeline.processors.unstructured.merger import UnstructuredDataMerger
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -406,6 +420,47 @@ def run_filter_stats(
     return 0
 
 
+def run_merge(
+    args,
+    logger: logging.Logger,
+    processed_data_dir: Path
+) -> int:
+    """运行非结构化处理结果合并"""
+    merge_categories = None
+    if args.merge_categories:
+        merge_categories = []
+        for cat_str in args.merge_categories:
+            category = parse_category(cat_str)
+            if category is None:
+                logger.error(f"无效的合并类别: {cat_str}")
+                return 1
+            merge_categories.append(category.value)
+
+        # 去重（保留顺序）
+        merge_categories = list(dict.fromkeys(merge_categories))
+
+    logger.info("=" * 80)
+    logger.info("开始执行非结构化处理结果合并")
+    logger.info(f"处理后目录: {processed_data_dir}")
+    logger.info(f"合并类别: {merge_categories or '全部'}")
+    logger.info(f"删除源目录: {args.merge_remove_source}")
+    logger.info("=" * 80)
+
+    merger = UnstructuredDataMerger(processed_dir=str(processed_data_dir))
+    report = merger.merge_all(
+        categories=merge_categories,
+        remove_source_dirs=args.merge_remove_source,
+    )
+
+    print("\n" + "=" * 80)
+    print("非结构化数据合并结果")
+    print("=" * 80)
+    print(report.summary())
+    print("=" * 80)
+
+    return 0 if report.failed_count == 0 else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="非结构化数据处理启动器",
@@ -552,6 +607,29 @@ def main():
         action='store_true',
         help='生成处理报告'
     )
+
+    # ===== 合并功能 =====
+    merge_group = parser.add_argument_group('合并功能')
+    merge_group.add_argument(
+        '--merge',
+        action='store_true',
+        help='处理完成后，将 data/processed/unstructured 下按月文件合并为类型.parquet'
+    )
+    merge_group.add_argument(
+        '--merge-only',
+        action='store_true',
+        help='仅执行合并，不执行处理流程'
+    )
+    merge_group.add_argument(
+        '--merge-categories',
+        nargs='+',
+        help='要合并的数据类别（可多选）：announcements, reports, events, news/exchange, news/cctv, policy/gov, policy/ndrc'
+    )
+    merge_group.add_argument(
+        '--merge-remove-source',
+        action='store_true',
+        help='合并成功后删除源目录（类型/年份/月.parquet 分片目录）'
+    )
     
     args = parser.parse_args()
     
@@ -565,6 +643,10 @@ def main():
     # 路径配置
     raw_data_dir = project_root / "data" / "raw" / "unstructured"
     processed_data_dir = project_root / "data" / "processed" / "unstructured"
+
+    # merge-only 等价于启用 merge，并跳过处理流程
+    if args.merge_only:
+        args.merge = True
     
     # ===== 过滤功能 =====
     if args.filter_stats:
@@ -572,6 +654,10 @@ def main():
     
     if args.filter:
         return run_filter(args, logger, raw_data_dir)
+
+    # ===== 仅合并 =====
+    if args.merge_only:
+        return run_merge(args, logger, processed_data_dir)
     
     # ===== 列出/状态功能 =====
     # 列出可用数据
@@ -595,6 +681,10 @@ def main():
                 print(f"   进度: {status['processed']/status['total_raw']*100:.1f}%")
         print("=" * 80)
         return 0
+
+    # 允许只执行 --merge（不跑处理流程）
+    if args.merge and not args.year and not args.all and not args.categories:
+        return run_merge(args, logger, processed_data_dir)
     
     # 必须指定年份（除非只是list或status）
     if not args.year:
@@ -762,6 +852,12 @@ def main():
         print(f"\n报告已保存: {report_file}")
     
     print("=" * 80)
+
+    # 可选：处理完成后执行合并
+    if args.merge:
+        merge_exit_code = run_merge(args, logger, processed_data_dir)
+        if merge_exit_code != 0:
+            return merge_exit_code
     
     return 0
 

@@ -143,9 +143,9 @@ class CninfoEventCollector(BaseEventCollector):
     SOURCE = EventSource.CNINFO
     
     # API 端点
-    BASE_URL = "http://www.cninfo.com.cn"
-    SEARCH_API = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
-    PDF_BASE_URL = "http://static.cninfo.com.cn/"
+    BASE_URL = "https://www.cninfo.com.cn"
+    SEARCH_API = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+    PDF_BASE_URL = "https://static.cninfo.com.cn/"
     
     def __init__(self, use_proxy: bool = False):
         super().__init__()
@@ -327,8 +327,8 @@ class CninfoEventCollector(BaseEventCollector):
     def _get_headers(self) -> Dict[str, str]:
         """获取请求头"""
         headers = self._disguiser.get_json_headers({
-            'Referer': 'http://www.cninfo.com.cn/new/commonUrl/pageOfSearch',
-            'Origin': 'http://www.cninfo.com.cn',
+            'Referer': 'https://www.cninfo.com.cn/new/commonUrl/pageOfSearch',
+            'Origin': 'https://www.cninfo.com.cn',
         })
         return headers
     

@@ -72,6 +72,13 @@ from .filter import (
     filter_all as filter_announcements_all,
 )
 
+from .merger import (
+    UnstructuredDataMerger,
+    UnstructuredMergeReport,
+    UnstructuredMergeResult,
+    merge_unstructured_processed,
+)
+
 __all__ = [
     # ===== Content Extractor =====
     # 主接口
@@ -151,4 +158,10 @@ __all__ = [
     'filter_announcements_month',
     'filter_announcements_year',
     'filter_announcements_all',
+
+    # ===== Merger =====
+    'UnstructuredDataMerger',
+    'UnstructuredMergeReport',
+    'UnstructuredMergeResult',
+    'merge_unstructured_processed',
 ]

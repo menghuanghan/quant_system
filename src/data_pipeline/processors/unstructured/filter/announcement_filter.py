@@ -350,6 +350,135 @@ class AnnouncementFilter:
         mask = ~df['title'].str.contains(self._title_pattern, regex=True, na=False)
         
         return df[mask]
+
+    def filter_increment_dataframe(
+        self,
+        announcements_df: 'pd.DataFrame',
+        events_df: Optional['pd.DataFrame'] = None,
+    ) -> Tuple['pd.DataFrame', Dict[str, Any]]:
+        """
+        对增量公告DataFrame执行两层过滤（不落盘）。
+
+        适用于增量调度器在进入提取/摘要/打分流水线前的预过滤。
+
+        Args:
+            announcements_df: 当日公告DataFrame（至少包含 original_id、title 列）
+            events_df: 当日事件DataFrame（用于第一层事件过滤，需包含 original_id 列）
+
+        Returns:
+            Tuple[pd.DataFrame, Dict[str, Any]]: 过滤后的DataFrame与统计信息
+        """
+        import pandas as pd
+
+        if announcements_df is None or announcements_df.empty:
+            return pd.DataFrame(), {
+                "original_count": 0,
+                "after_event_filter": 0,
+                "after_title_filter": 0,
+                "final_count": 0,
+                "event_filtered_count": 0,
+                "title_filtered_count": 0,
+                "total_filtered_count": 0,
+                "filter_rate": 0.0,
+            }
+
+        required_cols = {"original_id", "title"}
+        missing_cols = required_cols - set(announcements_df.columns)
+        if missing_cols:
+            raise ValueError(f"公告增量过滤缺少必要列: {sorted(missing_cols)}")
+
+        ann_df = announcements_df.copy()
+        original_count = len(ann_df)
+
+        if self._cudf_available:
+            try:
+                import cudf
+
+                ann_gpu = cudf.from_pandas(ann_df)
+
+                if (
+                    self.config.enable_event_filter
+                    and events_df is not None
+                    and not events_df.empty
+                    and "original_id" in events_df.columns
+                ):
+                    events_gpu = cudf.from_pandas(events_df[["original_id"]])
+                    ann_gpu = self._filter_by_events_gpu(ann_gpu, events_gpu)
+
+                after_event_filter = len(ann_gpu)
+
+                if self.config.enable_title_filter:
+                    ann_gpu = self._filter_by_title_gpu(ann_gpu)
+
+                filtered_df = ann_gpu.to_pandas().reset_index(drop=True)
+                after_title_filter = len(filtered_df)
+            except Exception as e:
+                self.logger.warning(f"增量公告GPU过滤失败，回退CPU: {e}")
+                filtered_df, stats = self._filter_increment_dataframe_cpu(ann_df, events_df)
+                return filtered_df, stats
+        else:
+            filtered_df, stats = self._filter_increment_dataframe_cpu(ann_df, events_df)
+            return filtered_df, stats
+
+        event_filtered_count = original_count - after_event_filter
+        title_filtered_count = after_event_filter - after_title_filter
+        total_filtered_count = original_count - after_title_filter
+        filter_rate = total_filtered_count / original_count if original_count > 0 else 0.0
+
+        stats = {
+            "original_count": int(original_count),
+            "after_event_filter": int(after_event_filter),
+            "after_title_filter": int(after_title_filter),
+            "final_count": int(after_title_filter),
+            "event_filtered_count": int(event_filtered_count),
+            "title_filtered_count": int(title_filtered_count),
+            "total_filtered_count": int(total_filtered_count),
+            "filter_rate": float(filter_rate),
+        }
+        return filtered_df, stats
+
+    def _filter_increment_dataframe_cpu(
+        self,
+        announcements_df: 'pd.DataFrame',
+        events_df: Optional['pd.DataFrame'] = None,
+    ) -> Tuple['pd.DataFrame', Dict[str, Any]]:
+        """CPU路径的增量DataFrame过滤实现。"""
+        ann_df = announcements_df.copy()
+        original_count = len(ann_df)
+
+        if (
+            self.config.enable_event_filter
+            and events_df is not None
+            and not events_df.empty
+            and "original_id" in events_df.columns
+        ):
+            ann_df = self._filter_by_events_cpu(ann_df, events_df)
+
+        after_event_filter = len(ann_df)
+
+        if self.config.enable_title_filter:
+            ann_df = self._filter_by_title_cpu(ann_df)
+
+        ann_df = ann_df.reset_index(drop=True)
+        after_title_filter = len(ann_df)
+
+        event_filtered_count = original_count - after_event_filter
+        title_filtered_count = after_event_filter - after_title_filter
+        total_filtered_count = original_count - after_title_filter
+        filter_rate = total_filtered_count / original_count if original_count > 0 else 0.0
+
+        stats = {
+            "original_count": int(original_count),
+            "after_event_filter": int(after_event_filter),
+            "after_title_filter": int(after_title_filter),
+            "final_count": int(after_title_filter),
+            "event_filtered_count": int(event_filtered_count),
+            "title_filtered_count": int(title_filtered_count),
+            "total_filtered_count": int(total_filtered_count),
+            "filter_rate": float(filter_rate),
+        }
+
+        return ann_df, stats
     
     def filter_month(
         self, 

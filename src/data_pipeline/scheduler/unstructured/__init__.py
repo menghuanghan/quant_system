@@ -3,7 +3,7 @@
 
 提供非结构化数据的采集调度：
 - full: 全量采集调度器
-- increment: 增量采集调度器（待实现）
+- increment: 增量采集调度器
 """
 
 from .full import (
@@ -24,6 +24,15 @@ from .full import (
     get_tasks_sorted_by_priority,
     list_all_tasks,
     get_task_count,
+)
+from .increment import (
+    UnstructuredIncrementTask,
+    UNSTRUCTURED_INCREMENT_TASKS,
+    TASK_NAME_MAP,
+    get_increment_tasks,
+    IncrementTaskResult,
+    IncrementCollectionReport,
+    UnstructuredIncrementScheduler,
 )
 
 
@@ -48,4 +57,13 @@ __all__ = [
     "get_tasks_sorted_by_priority",
     "list_all_tasks",
     "get_task_count",
+
+    # 增量调度器
+    "UnstructuredIncrementTask",
+    "UNSTRUCTURED_INCREMENT_TASKS",
+    "TASK_NAME_MAP",
+    "get_increment_tasks",
+    "IncrementTaskResult",
+    "IncrementCollectionReport",
+    "UnstructuredIncrementScheduler",
 ]
