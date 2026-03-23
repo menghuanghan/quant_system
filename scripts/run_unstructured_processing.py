@@ -63,6 +63,13 @@
 
     # 合并后删除源目录（按月分片目录）
     python scripts/run_unstructured_processing.py --merge-only --merge-remove-source
+
+    # ===== 非结构化DWD功能 =====
+    # 仅构建 dwd_unstructured.parquet
+    python scripts/run_unstructured_processing.py --dwd-only
+
+    # 先处理/合并，再构建 dwd_unstructured.parquet
+    python scripts/run_unstructured_processing.py --all --year 2021 --merge --dwd
 """
 
 import sys
@@ -91,6 +98,10 @@ from src.data_pipeline.processors.unstructured.filter import (
     print_filter_statistics,
 )
 from src.data_pipeline.processors.unstructured.merger import UnstructuredDataMerger
+from src.data_pipeline.processors.unstructured.dwd import (
+    UnstructuredDWDBuilder,
+    UnstructuredDWDConfig,
+)
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -461,6 +472,57 @@ def run_merge(
     return 0 if report.failed_count == 0 else 1
 
 
+def run_dwd(
+    args,
+    logger: logging.Logger,
+    processed_data_dir: Path,
+) -> int:
+    """构建非结构化 DWD 宽表"""
+    structured_dwd_dir = project_root / "data" / "processed" / "structured" / "dwd"
+
+    output_path = Path(args.dwd_output) if args.dwd_output else (processed_data_dir / "dwd_unstructured.parquet")
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+
+    logger.info("=" * 80)
+    logger.info("开始构建非结构化 DWD 宽表")
+    logger.info(f"非结构化输入目录: {processed_data_dir}")
+    logger.info(f"结构化 DWD 目录: {structured_dwd_dir}")
+    logger.info(f"输出文件: {output_path}")
+    logger.info("=" * 80)
+
+    config = UnstructuredDWDConfig(
+        unstructured_processed_dir=str(processed_data_dir),
+        structured_dwd_dir=str(structured_dwd_dir),
+        output_file=str(output_path),
+    )
+    builder = UnstructuredDWDBuilder(config=config)
+    df = builder.run()
+
+    print("\n" + "=" * 80)
+    print("非结构化 DWD 构建完成")
+    print("=" * 80)
+    print(f"输出文件: {output_path}")
+    print(f"行数: {len(df):,}")
+    print(f"列数: {len(df.columns)}")
+    print("特征非空统计:")
+    for col in [
+        "ann_score",
+        "events_score",
+        "ex_score",
+        "reports_score",
+        "market_sentiment",
+        "beta_signal",
+        "gov_score",
+        "ndrc_score",
+    ]:
+        if col in df.columns:
+            print(f"  - {col}: {int(df[col].notna().sum()):,}")
+    print("=" * 80)
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="非结构化数据处理启动器",
@@ -630,6 +692,23 @@ def main():
         action='store_true',
         help='合并成功后删除源目录（类型/年份/月.parquet 分片目录）'
     )
+
+    # ===== 非结构化DWD功能 =====
+    dwd_group = parser.add_argument_group('非结构化DWD功能')
+    dwd_group.add_argument(
+        '--dwd',
+        action='store_true',
+        help='执行非结构化 DWD 构建（生成 dwd_unstructured.parquet）'
+    )
+    dwd_group.add_argument(
+        '--dwd-only',
+        action='store_true',
+        help='仅执行非结构化 DWD 构建，不执行处理流程'
+    )
+    dwd_group.add_argument(
+        '--dwd-output',
+        help='非结构化 DWD 输出路径（默认：data/processed/unstructured/dwd_unstructured.parquet）'
+    )
     
     args = parser.parse_args()
     
@@ -647,6 +726,10 @@ def main():
     # merge-only 等价于启用 merge，并跳过处理流程
     if args.merge_only:
         args.merge = True
+
+    # dwd-only 等价于启用 dwd，并跳过处理流程
+    if args.dwd_only:
+        args.dwd = True
     
     # ===== 过滤功能 =====
     if args.filter_stats:
@@ -657,7 +740,16 @@ def main():
 
     # ===== 仅合并 =====
     if args.merge_only:
-        return run_merge(args, logger, processed_data_dir)
+        merge_code = run_merge(args, logger, processed_data_dir)
+        if merge_code != 0:
+            return merge_code
+        if args.dwd:
+            return run_dwd(args, logger, processed_data_dir)
+        return 0
+
+    # ===== 仅构建非结构化DWD =====
+    if args.dwd_only:
+        return run_dwd(args, logger, processed_data_dir)
     
     # ===== 列出/状态功能 =====
     # 列出可用数据
@@ -683,8 +775,12 @@ def main():
         return 0
 
     # 允许只执行 --merge（不跑处理流程）
-    if args.merge and not args.year and not args.all and not args.categories:
+    if args.merge and not args.year and not args.all and not args.categories and not args.dwd:
         return run_merge(args, logger, processed_data_dir)
+
+    # 允许只执行 --dwd（不跑处理流程）
+    if args.dwd and not args.year and not args.all and not args.categories and not args.merge:
+        return run_dwd(args, logger, processed_data_dir)
     
     # 必须指定年份（除非只是list或status）
     if not args.year:
@@ -858,6 +954,12 @@ def main():
         merge_exit_code = run_merge(args, logger, processed_data_dir)
         if merge_exit_code != 0:
             return merge_exit_code
+
+    # 可选：处理/合并后构建非结构化 DWD
+    if args.dwd:
+        dwd_exit_code = run_dwd(args, logger, processed_data_dir)
+        if dwd_exit_code != 0:
+            return dwd_exit_code
     
     return 0
 

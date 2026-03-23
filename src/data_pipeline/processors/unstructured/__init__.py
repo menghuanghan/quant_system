@@ -79,6 +79,12 @@ from .merger import (
     merge_unstructured_processed,
 )
 
+from .dwd import (
+    UnstructuredDWDConfig,
+    UnstructuredDWDBuilder,
+    build_dwd_unstructured,
+)
+
 __all__ = [
     # ===== Content Extractor =====
     # 主接口
@@ -164,4 +170,9 @@ __all__ = [
     'UnstructuredMergeReport',
     'UnstructuredMergeResult',
     'merge_unstructured_processed',
+
+    # ===== DWD =====
+    'UnstructuredDWDConfig',
+    'UnstructuredDWDBuilder',
+    'build_dwd_unstructured',
 ]
