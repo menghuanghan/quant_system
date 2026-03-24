@@ -3,7 +3,7 @@
 
 完整流程：读取DWD -> 预处理 -> 合并 -> 特征计算 -> 标签生成 -> 标准化 -> 切分 -> 输出
 
-输入：data/processed/structured/dwd/ 下的8张宽表
+输入：data/processed/structured/dwd/ + data/processed/unstructured/ 下的9张宽表
 输出：data/features/structured/train.parquet
 """
 
@@ -181,15 +181,16 @@ class FeaturePipeline:
             PricePreprocessor,
             FundamentalPreprocessor,
             StatusPreprocessor,
-            # 扩展5表预处理器
+            # 扩展6表预处理器（含非结构化）
             MoneyFlowPreprocessor,
             ChipPreprocessor,
             IndustryPreprocessor,
             MacroPreprocessor,
             EventPreprocessor,
+            UnstructuredPreprocessor,
         )
-        
-        # 预处理器 - 8表完整配置
+
+        # 预处理器 - 9表完整配置
         preprocess_config = PreprocessConfig(use_gpu=self.use_gpu)
         
         # 核心3表预处理器
@@ -197,12 +198,13 @@ class FeaturePipeline:
         self.fundamental_preprocessor = FundamentalPreprocessor(preprocess_config)
         self.status_preprocessor = StatusPreprocessor(preprocess_config)
         
-        # 扩展5表预处理器
+        # 扩展6表预处理器（含非结构化）
         self.money_flow_preprocessor = MoneyFlowPreprocessor(preprocess_config)
         self.chip_preprocessor = ChipPreprocessor(preprocess_config)
         self.industry_preprocessor = IndustryPreprocessor(preprocess_config)
         self.macro_preprocessor = MacroPreprocessor(preprocess_config)
         self.event_preprocessor = EventPreprocessor(preprocess_config)
+        self.unstructured_preprocessor = UnstructuredPreprocessor(preprocess_config)
         
         # 预处理器字典（供流式合并使用）
         self.preprocessors = {
@@ -214,6 +216,7 @@ class FeaturePipeline:
             'industry': self.industry_preprocessor,
             'macro': self.macro_preprocessor,
             'event': self.event_preprocessor,
+            'unstructured': self.unstructured_preprocessor,
         }
         
         # 参考数据加载器
@@ -356,13 +359,13 @@ class FeaturePipeline:
         流式预处理+合并模式
         
         内存高效：读取一张表 → 预处理 → 合并 → 释放 → 下一张
-        避免8张表同时驻留显存导致OOM
+        避免多张表同时驻留显存导致OOM
         
         Returns:
             预处理并合并后的DataFrame
         """
         logger.info("=" * 60)
-        logger.info("📋 Step 0-2: 流式 加载+预处理+合并 (8表)")
+        logger.info("📋 Step 0-2: 流式 加载+预处理+合并 (9表)")
         logger.info("=" * 60)
         
         # 使用 merger 的 process_with_preprocessing 方法
@@ -401,7 +404,7 @@ class FeaturePipeline:
         # Step 1: 流式合并+预处理 → 暂存磁盘
         # ============================
         logger.info("=" * 60)
-        logger.info("📋 Step 1: 流式 加载+预处理+合并 (8表) → 暂存磁盘")
+        logger.info("📋 Step 1: 流式 加载+预处理+合并 (9表) → 暂存磁盘")
         logger.info("=" * 60)
         
         df = self.merger.process_with_preprocessing(
@@ -570,7 +573,7 @@ class FeaturePipeline:
         # ============================
         if not skip_merger:
             logger.info("=" * 60)
-            logger.info("📋 Step 1: 流式 加载+预处理+合并 (8表) → 暂存磁盘")
+            logger.info("📋 Step 1: 流式 加载+预处理+合并 (9表) → 暂存磁盘")
             logger.info("=" * 60)
             
             # 确保临时目录存在

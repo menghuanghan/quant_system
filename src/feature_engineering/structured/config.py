@@ -15,6 +15,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]  # 向上3级到项目根目录
 
 # 数据路径
 DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
+UNSTRUCTURED_DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "unstructured"
 PREPROCESSED_DIR = BASE_DIR / "data" / "features" / "preprocessed"  # 预处理后数据
 FEATURE_OUTPUT_DIR = BASE_DIR / "data" / "features" / "structured"
 FEATURE_TEMP_DIR = BASE_DIR / "data" / "features" / "temp"  # 流水线中间结果暂存目录
@@ -36,6 +37,10 @@ class DataConfig:
     industry_table: str = "dwd_stock_industry.parquet"
     event_table: str = "dwd_event_signal.parquet"
     macro_table: str = "dwd_macro_env.parquet"
+
+    # 输入：非结构化 DWD 宽表（路径独立于 structured/dwd）
+    unstructured_input_dir: Path = UNSTRUCTURED_DWD_INPUT_DIR
+    unstructured_table: str = "dwd_unstructured.parquet"
     
     # 参考数据（用于特征生成阶段，不在 Merger 中合并）
     raw_data_dir: Path = BASE_DIR / "data" / "raw" / "structured"
@@ -101,6 +106,10 @@ class DataConfig:
     @property
     def macro_path(self) -> Path:
         return self.input_dir / self.macro_table
+
+    @property
+    def unstructured_path(self) -> Path:
+        return self.unstructured_input_dir / self.unstructured_table
     
     @property
     def merged_path(self) -> Path:

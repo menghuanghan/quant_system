@@ -96,6 +96,8 @@ class LGBConfig:
         # 市场总体指标（无截面方差）
         "market_total_", # market_total_rzye, market_total_rqye, market_total_rzrqye
         "market_congestion",
+        "market_sentiment",
+        "beta_signal",
         "stock_bond_spread",
         "break_net_ratio",
         "buffett_",      # buffett_indicator, buffett_quantile_*
@@ -239,6 +241,19 @@ class GRUConfig:
         "pb_ew", "pb_median", "pb_quantile_10y", "pb_quantile_all",
         # 市场拥挤度
         "market_congestion",
+        # 非结构化市场级信号
+        "market_sentiment", "beta_signal",
+    ])
+
+    # ============ 第二类补充：MaxAbs 缩放（仅用于6个非结构化score）===========
+    # 处理后值范围约束到 [-1, 1]，保留方向与相对强弱
+    maxabs_features: List[str] = field(default_factory=lambda: [
+        "ann_score",
+        "events_score",
+        "ex_score",
+        "reports_score",
+        "gov_score",
+        "ndrc_score",
     ])
     
     # 滚动 Z-Score 窗口（约一年）

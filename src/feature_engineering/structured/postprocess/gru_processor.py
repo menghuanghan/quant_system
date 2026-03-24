@@ -7,7 +7,8 @@ GRU 深度学习专用后处理模块
 3. 截面填充 - ffill 后仍空则用截面中位数或 0
 4. Clip 去极值 - 防止极端值影响梯度
 5. 截面标准化 - Daily Z-Score 消除市场 Beta
-6. 数据切分 - 剔除 2019.01.01-2020.06.30
+6. MaxAbs 缩放 - 非结构化 score 约束到 [-1, 1]
+7. 数据切分 - 剔除 2019.01.01-2020.06.30
 """
 
 import gc
@@ -66,6 +67,7 @@ class GRUProcessor:
         3. 时序填充 + 截面填充
         4. Clip 去极值
         5. 滚动 Z-Score（市场级数据）
+        5.2 MaxAbs 缩放（非结构化 score）
         6. 截面标准化 (Daily Z-Score)（个股级数据）
         7. 确保无 NaN（严禁保留 NaN）
         8. 数据切分
@@ -105,6 +107,10 @@ class GRUProcessor:
         
         # Step 5: 滚动 Z-Score（市场级数据）
         df = self._rolling_zscore(df)
+        gc.collect()  # [内存优化]
+
+        # Step 5.2: MaxAbs 缩放（非结构化6个score）
+        df = self._apply_maxabs_scaling(df)
         gc.collect()  # [内存优化]
 
         # Step 5.5: 数据切分（前移以降低后续步骤内存基线）
@@ -502,6 +508,46 @@ class GRUProcessor:
         self.stats["rolling_zscore_count"] = normalized_count
         self.stats["rolling_window"] = window
         
+        return df
+
+    def _apply_maxabs_scaling(self, df: Any) -> Any:
+        """
+        MaxAbs 缩放
+
+        仅对非结构化 score 列执行：x_scaled = x / max(|x|)
+        目标：保留符号与相对强弱，同时约束数值范围到 [-1, 1]。
+        """
+        logger.info("  📊 Step 5.2: MaxAbs 缩放 (非结构化score)")
+
+        maxabs_cols = [c for c in self.config.maxabs_features if c in df.columns]
+
+        if not maxabs_cols:
+            logger.info("     ✓ 无需MaxAbs缩放的列")
+            self.stats["maxabs_count"] = 0
+            self.stats["maxabs_features"] = []
+            return df
+
+        scaled = []
+        scale_factors = {}
+
+        for col in maxabs_cols:
+            try:
+                max_abs = float(df[col].abs().max())
+                if not np.isfinite(max_abs) or max_abs <= 0:
+                    continue
+
+                df[col] = df[col] / max_abs
+                scaled.append(col)
+                scale_factors[col] = max_abs
+            except Exception as e:
+                logger.debug(f"     {col} MaxAbs 缩放失败: {e}")
+
+        logger.info(f"     ✓ MaxAbs完成: {len(scaled)}/{len(maxabs_cols)}")
+
+        self.stats["maxabs_count"] = len(scaled)
+        self.stats["maxabs_features"] = scaled
+        self.stats["maxabs_scale_factors"] = scale_factors
+
         return df
     
     def _cross_sectional_zscore(self, df: Any) -> Any:

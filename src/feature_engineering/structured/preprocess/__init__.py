@@ -12,8 +12,8 @@
 注意：
 - 金额单位统一已在 DWD 层完成（所有金额字段已转换为元）
 - 数据类型压缩已在 DWD 层完成（float64 → float32）
-- Preprocess 阶段不做 Log 变换（保持原始物理意义）
-- Log 变换应在 Feature Transformation 阶段进行
+- 大部分结构化表在 Preprocess 阶段不做 Log 变换（保持原始物理意义）
+- 非结构化表的 6 个 score 在 Preprocess 阶段执行 signed-log（压缩长尾并保留符号）
 
 使用 RAPIDS cuDF 进行 GPU 加速处理。
 """
@@ -32,6 +32,7 @@ from .chip_preprocessor import ChipPreprocessor
 from .industry_preprocessor import IndustryPreprocessor
 from .macro_preprocessor import MacroPreprocessor
 from .event_preprocessor import EventPreprocessor
+from .unstructured_preprocessor import UnstructuredPreprocessor
 
 __all__ = [
     # 配置
@@ -47,4 +48,5 @@ __all__ = [
     "IndustryPreprocessor",
     "MacroPreprocessor",
     "EventPreprocessor",
+    "UnstructuredPreprocessor",
 ]

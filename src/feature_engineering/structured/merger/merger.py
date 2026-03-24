@@ -1,5 +1,5 @@
 """
-DWD表合并器 - 支持8表合并的升级版（内存优化版）
+DWD表合并器 - 支持9表合并的升级版（内存优化版）
 ==================================
 
 合并策略：主骨架 + 多维左连接 + 宏观广播
@@ -8,7 +8,7 @@ DWD表合并器 - 支持8表合并的升级版（内存优化版）
 - 宏观广播：macro_env 仅按 trade_date 广播（截面共享）
 
 内存优化策略（解决 WSL 内存爆炸问题）：
-1. 流式合并：加载一张表 → 合并 → 立即释放，避免8表同时驻留内存
+1. 流式合并：加载一张表 → 合并 → 立即释放，避免多表同时驻留内存
 2. 显式GC：merge后调用 gc.collect() + cupy.get_default_memory_pool().free_all_blocks()
 3. 内存下压：float64 → float32 减少 50% 内存占用
 4. 分批模式：可选按年份分批处理，进一步降低峰值内存
@@ -34,15 +34,16 @@ logger = logging.getLogger(__name__)
 
 class DataMerger:
     """
-    DWD表合并器 - 处理8表合并逻辑
+    DWD表合并器 - 处理9表合并逻辑
     
     支持的表：
     - 核心3表：price, fundamental, status
     - 扩展5表：money_flow, chip_structure, stock_industry, event_signal, macro_env
+    - 非结构化1表：unstructured
     """
     
     # 面板表（按 ts_code + trade_date 合并）
-    PANEL_TABLES = ['fundamental', 'status', 'money_flow', 'chip', 'industry', 'event']
+    PANEL_TABLES = ['fundamental', 'status', 'money_flow', 'chip', 'industry', 'event', 'unstructured']
     
     # 宏观表（仅按 trade_date 广播）
     MACRO_TABLES = ['macro']
@@ -155,7 +156,7 @@ class DataMerger:
         加载单个DWD表
         
         Args:
-            table_name: 表名（price, fundamental, status, money_flow, chip, industry, event, macro）
+            table_name: 表名（price, fundamental, status, money_flow, chip, industry, event, macro, unstructured）
             downcast: 是否下压float类型
         
         Returns:
@@ -175,6 +176,7 @@ class DataMerger:
             'industry': self.data_config.industry_path,
             'event': self.data_config.event_path,
             'macro': self.data_config.macro_path,
+            'unstructured': self.data_config.unstructured_path,
         }
         
         path = path_map.get(table_name)
@@ -200,12 +202,12 @@ class DataMerger:
     
     def load_all_tables(self) -> dict[str, pd.DataFrame]:
         """
-        加载所有8个DWD表
+        加载所有DWD表
         
         Returns:
             {table_name: DataFrame} 字典
         """
-        all_tables = ['price', 'fundamental', 'status', 'money_flow', 'chip', 'industry', 'event', 'macro']
+        all_tables = ['price', 'fundamental', 'status', 'money_flow', 'chip', 'industry', 'event', 'macro', 'unstructured']
         loaded = {}
         
         for name in all_tables:
@@ -350,6 +352,7 @@ class DataMerger:
             'industry': ['sw_l1_idx'],
             'event': ['pledge_ratio', 'freeze_ratio'],
             'macro': ['shibor_1m', 'cpi_yoy'],
+            'unstructured': ['ann_score', 'events_score', 'market_sentiment'],
         }
         
         for table, fields in extended_fields.items():
@@ -456,7 +459,7 @@ class DataMerger:
             合并后的DataFrame
         """
         logger.info("=" * 60)
-        logger.info("开始8表合并流程" + (" [内存优化模式]" if memory_optimized else ""))
+        logger.info("开始9表合并流程" + (" [内存优化模式]" if memory_optimized else ""))
         logger.info("=" * 60)
         
         if memory_optimized:

@@ -206,6 +206,47 @@ class EventConfig:
 
 
 @dataclass
+class UnstructuredConfig:
+    """非结构化DWD预处理配置"""
+
+    # 缺失值填充为 0 的情绪/事件强度列
+    fillna_zero_fields: List[str] = field(default_factory=lambda: [
+        "ann_score",
+        "events_score",
+        "ex_score",
+        "reports_score",
+        "gov_score",
+        "ndrc_score",
+        "market_sentiment",
+    ])
+
+    # beta_signal 单独填充（保持中性基线）
+    beta_field: str = "beta_signal"
+    beta_fillna_value: float = 1.0
+
+    # has_* 指示列：基于 fillna 后、log 前的原始分数判定
+    has_signal_map: Dict[str, str] = field(default_factory=lambda: {
+        "ann_score": "has_ann_signal",
+        "events_score": "has_events_signal",
+        "ex_score": "has_exchange_signal",
+        "reports_score": "has_reports_signal",
+        "gov_score": "has_gov_signal",
+        "ndrc_score": "has_ndrc_signal",
+    })
+
+    # 仅对 6 个 score 做 signed-log，beta_signal 不参与
+    signed_log_fields: List[str] = field(default_factory=lambda: [
+        "ann_score",
+        "events_score",
+        "ex_score",
+        "reports_score",
+        "gov_score",
+        "ndrc_score",
+    ])
+    signed_log_epsilon: float = 1.0
+
+
+@dataclass
 class PreprocessConfig:
     """预处理总配置"""
     
@@ -226,6 +267,7 @@ class PreprocessConfig:
     industry: IndustryConfig = field(default_factory=IndustryConfig)
     macro: MacroConfig = field(default_factory=MacroConfig)
     event: EventConfig = field(default_factory=EventConfig)
+    unstructured: UnstructuredConfig = field(default_factory=UnstructuredConfig)
     
     # 输出文件名 - 核心表
     output_price_file: str = "preprocessed_stock_price.parquet"
@@ -238,6 +280,7 @@ class PreprocessConfig:
     output_industry_file: str = "preprocessed_stock_industry.parquet"
     output_macro_file: str = "preprocessed_macro_env.parquet"
     output_event_file: str = "preprocessed_event_signal.parquet"
+    output_unstructured_file: str = "preprocessed_unstructured.parquet"
     
     # 处理选项
     use_gpu: bool = True  # 是否使用 GPU 加速
