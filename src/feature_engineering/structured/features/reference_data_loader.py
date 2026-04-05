@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ class ReferenceDataLoader:
         加载基准指数行情
         
         只保留核心指数：沪深300, 中证500, 中证1000
-        返回简化表：trade_date, ts_code, pct_chg, close
+        返回简化表：trade_date, ts_code, pct_chg, close, open, vol, amount, adj_factor, vwap, vwap_hfq
         
         Returns:
             DataFrame 或 None
@@ -149,8 +150,13 @@ class ReferenceDataLoader:
         # 筛选核心指数
         df = df[df['ts_code'].isin(self.CORE_INDEXES)]
         
-        # 只保留必要列
-        required_cols = ['trade_date', 'ts_code', 'pct_chg', 'close']
+        # 只保留必要列（优先保留可支持 VWAP 执行口径的字段）
+        required_cols = [
+            'trade_date', 'ts_code',
+            'pct_chg', 'open', 'close',
+            'vol', 'amount', 'adj_factor',
+            'vwap', 'vwap_hfq',
+        ]
         available_cols = [c for c in required_cols if c in df.columns]
         df = df[available_cols]
         
@@ -159,9 +165,20 @@ class ReferenceDataLoader:
             df['trade_date'] = pd.to_datetime(df['trade_date'])
         
         # 确保数值列类型正确（解决 object 列问题）
-        for col in ['pct_chg', 'close']:
+        numeric_cols = ['pct_chg', 'open', 'close', 'vol', 'amount', 'adj_factor', 'vwap', 'vwap_hfq']
+        for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype('float32')
+
+        # 回算 vwap（当原始列缺失且 vol/amount 可用）
+        if 'vwap' not in df.columns and {'amount', 'vol'}.issubset(df.columns):
+            vol_shares = df['vol'].astype('float32') * 100.0
+            valid = vol_shares > 0
+            df['vwap'] = np.where(valid, df['amount'] / vol_shares, np.nan).astype('float32')
+
+        # 回算 vwap_hfq（当原始列缺失且 vwap/adj_factor 可用）
+        if 'vwap_hfq' not in df.columns and {'vwap', 'adj_factor'}.issubset(df.columns):
+            df['vwap_hfq'] = (df['vwap'] * df['adj_factor']).astype('float32')
         
         # 转换为 GPU 格式
         if self.use_gpu and self._cudf:

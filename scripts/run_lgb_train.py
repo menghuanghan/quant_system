@@ -31,7 +31,7 @@ import pandas as pd
 
 from src.models import SplitMode, TrainConfig
 from src.models.lgb import LGBTrainer
-from src.models.metrics import QuantEvaluator
+from src.models.metrics import QuantEvaluator, infer_pnl_return_col, parse_holding_period_days
 
 # 配置日志
 logging.basicConfig(
@@ -86,7 +86,7 @@ def parse_args():
         "--targets",
         type=str,
         nargs="+",
-        default=["rank_ret_5d", "excess_ret_10d", "sharpe_20d"],
+        default=["rank_ret_5d", "excess_ret_5d", "sharpe_5d"],
         help="要训练的目标标签列表",
     )
     
@@ -270,10 +270,20 @@ def main():
         
         for target_col, oof_df in oof_dict.items():
             logger.info(f"\n评估目标: {target_col}")
+
+            return_col = f"pnl_return_{target_col}"
+            if return_col not in oof_df.columns:
+                return_col = "pnl_return" if "pnl_return" in oof_df.columns else None
+            if return_col is None:
+                inferred = infer_pnl_return_col(target_col, available_cols=oof_df.columns)
+                return_col = inferred if inferred in oof_df.columns else None
+
             evaluator.print_report(
                 oof_df,
                 y_pred_col="y_pred",
                 y_true_col="y_true",
+                return_col=return_col,
+                holding_period_days=parse_holding_period_days(target_col, default=1),
                 target_name=target_col,
             )
     

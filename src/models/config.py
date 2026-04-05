@@ -460,9 +460,9 @@ class GRUSplitConfig:
 class GRUNetworkConfig:
     """GRU 神经网络配置"""
     num_features: int = 250       # 运行时从数据决定
-    hidden_size: int = 64
-    num_layers: int = 2
-    dropout: float = 0.1
+    hidden_size: int = 32
+    num_layers: int = 1
+    dropout: float = 0.2
     use_attention: bool = True
     num_targets: int = 3          # 运行时从 target_cols 决定
 
@@ -478,7 +478,10 @@ class GRUTrainConfig:
 
     # AdamW
     learning_rate: float = 5e-4
-    weight_decay: float = 1e-4
+    weight_decay: float = 2e-3
+
+    # 特征筛选策略
+    stationary_only: bool = True
 
     # OneCycleLR
     max_lr: float = 1e-3

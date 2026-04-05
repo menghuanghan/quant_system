@@ -3,6 +3,7 @@ pandas
 numpy
 scipy
 scikit-learn
+statsmodels
 # 注意：cudf 已通过 mamba 安装，此处不需要列出
 
 # --- 网络请求与爬虫 ---

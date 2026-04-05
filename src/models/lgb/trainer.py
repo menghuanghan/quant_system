@@ -4,8 +4,6 @@
 核心职责：
 - 编排数据与模型的交互
 - 多标签循环与动态过滤
-- 截面 Z-Score 标准化（连续型标签）
-- 去极值保护（Clip）
 - 滚窗迭代与 OOF 拼装
 - 模型持久化
 
@@ -32,6 +30,7 @@ from ..config import (
     TargetType,
     TrainConfig,
 )
+from ..metrics import infer_pnl_return_col
 from .dataset import FoldInfo, TimeSeriesSplitter
 from .lgb_model import LGBQuantModel
 
@@ -191,99 +190,6 @@ class LGBTrainer:
             # 默认回归（绝对/超额收益、夏普等）
             return TargetType.REGRESSION
     
-    def _should_normalize(self, target_col: str) -> bool:
-        """
-        判断是否需要对标签做截面标准化
-        
-        规则：
-        - rank_* 或 label_bin_* 不标准化
-        - ret_*, excess_ret_*, sharpe_* 需要标准化
-        
-        Args:
-            target_col: 标签列名
-            
-        Returns:
-            should_normalize: 是否需要标准化
-        """
-        label_config = self.config.label_config
-        
-        # 检查是否在跳过列表中
-        for prefix in label_config.skip_normalize_prefixes:
-            if target_col.startswith(prefix):
-                return False
-        
-        # 检查是否在需要标准化列表中
-        for prefix in label_config.zscore_prefixes:
-            if target_col.startswith(prefix):
-                return True
-        
-        return False
-    
-    def _normalize_target(
-        self, 
-        df: pd.DataFrame, 
-        target_col: str,
-        date_col: str = "trade_date",
-    ) -> pd.Series:
-        """
-        对标签做截面 Z-Score 标准化 + 去极值
-        
-        公式：Target_norm = clip((Target - Mean) / Std, -3, 3)
-        
-        注意：必须基于传入的 df 参数计算，而非 self.df_gpu，
-        因为 df 可能已经被过滤（如 _filter_valid_samples）
-        
-        Args:
-            df: 输入 DataFrame（可能是过滤后的子集）
-            target_col: 标签列名
-            date_col: 日期列名
-            
-        Returns:
-            normalized: 标准化后的标签 Series（与 df 行数一致）
-        """
-        label_config = self.config.label_config
-        
-        if self.use_gpu_df and HAS_CUDF:
-            # GPU 加速版本 - 【修复】使用传入的 df 而非 self.df_gpu
-            df_gpu = cudf.DataFrame.from_pandas(df[[date_col, target_col]])
-            
-            # 【修复】添加行索引，确保 merge 后能恢复原顺序
-            df_gpu["_row_id"] = cudf.Series(range(len(df_gpu)))
-            
-            # 按日期分组计算截面均值和标准差
-            stats = df_gpu.groupby(date_col)[target_col].agg(["mean", "std"]).reset_index()
-            stats.columns = [date_col, "mean", "std"]
-            
-            # 合并回原数据
-            merged = df_gpu.merge(stats, on=date_col, how="left")
-            
-            # 【修复】恢复原始行顺序
-            merged = merged.sort_values("_row_id").reset_index(drop=True)
-            
-            # Z-Score
-            normalized = (merged[target_col] - merged["mean"]) / merged["std"].replace(0, 1)
-            
-            # Clip
-            normalized = normalized.clip(label_config.clip_min, label_config.clip_max)
-            
-            return normalized.to_pandas()
-        else:
-            # CPU 版本
-            target = df[target_col].copy()
-            
-            # 按日期分组计算截面统计
-            date_groups = df.groupby(date_col)[target_col]
-            mean_map = date_groups.transform("mean")
-            std_map = date_groups.transform("std").replace(0, 1)  # 避免除零
-            
-            # Z-Score
-            normalized = (target - mean_map) / std_map
-            
-            # Clip 去极值
-            normalized = normalized.clip(label_config.clip_min, label_config.clip_max)
-            
-            return normalized
-    
     def _filter_valid_samples(
         self, 
         df: pd.DataFrame, 
@@ -370,18 +276,20 @@ class LGBTrainer:
         
         # 过滤有效样本
         df_filtered = self._filter_valid_samples(self.df, target_col)
-        
-        # 准备标签
-        if self._should_normalize(target_col):
-            logger.info(f"Applying cross-sectional Z-Score normalization to {target_col}")
-            y_normalized = self._normalize_target(df_filtered, target_col)
-            df_work = df_filtered.copy()
-            df_work[f"{target_col}_norm"] = y_normalized
-            actual_target_col = f"{target_col}_norm"
+
+        # 准备标签（按用户要求：不做 target 标准化/截断）
+        df_work = df_filtered
+        actual_target_col = target_col
+
+        pnl_return_col = infer_pnl_return_col(target_col, available_cols=df_work.columns)
+        if pnl_return_col is None:
+            pnl_return_col = target_col
+            logger.warning(
+                "Cannot infer dedicated pnl return column for %s, fallback to target column",
+                target_col,
+            )
         else:
-            logger.info(f"Skipping normalization for {target_col}")
-            df_work = df_filtered
-            actual_target_col = target_col
+            logger.info("PnL return column for %s: %s", target_col, pnl_return_col)
         
         # 初始化时序切分器
         splitter = TimeSeriesSplitter(
@@ -434,17 +342,21 @@ class LGBTrainer:
             pred = model.predict(X_valid)
             
             # 组装 OOF DataFrame
+            pnl_return_values = (
+                valid_df[pnl_return_col].values
+                if pnl_return_col in valid_df.columns
+                else valid_df[target_col].values
+            )
+
             oof_df = pd.DataFrame({
                 "trade_date": valid_df["trade_date"].values,
                 "ts_code": valid_df["ts_code"].values,
                 "y_true": y_valid.values,
                 "y_pred": pred,
+                "pnl_return": pnl_return_values,
+                f"pnl_return_{target_col}": pnl_return_values,
                 "fold": fold_idx,
             })
-            
-            # 如果做了标准化，也存原始标签
-            if actual_target_col != target_col:
-                oof_df["y_true_raw"] = valid_df[target_col].values
             
             oof_list.append(oof_df)
             models.append(model)

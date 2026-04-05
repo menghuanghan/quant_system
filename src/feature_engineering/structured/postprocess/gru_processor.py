@@ -69,7 +69,7 @@ class GRUProcessor:
         5. 滚动 Z-Score（市场级数据）
         5.2 MaxAbs 缩放（非结构化 score）
         6. 截面标准化 (Daily Z-Score)（个股级数据）
-        7. 确保无 NaN（严禁保留 NaN）
+        7. 最终兜底填充（仅非标签特征）
         8. 数据切分
         9. 数据排序
         
@@ -91,6 +91,10 @@ class GRUProcessor:
         
         # Step 1: 删除非平稳列
         df = self._drop_nonstationary_cols(df)
+        gc.collect()  # [内存优化]
+
+        # Step 1.5: 类别列规范化（embedding-ready）
+        df = self._prepare_categorical_columns(df, log_step="Step 1.5")
         gc.collect()  # [内存优化]
         
         # Step 2: Log1p 变换
@@ -273,6 +277,14 @@ class GRUProcessor:
                 gc.collect()
             
             logger.info(f"     ✓ 时序填充完成")
+
+        protected_cat_cols = self._get_protected_categorical_cols(df)
+        unknown_val = int(getattr(self.config, "category_unknown_value", -1))
+        cat_filled = 0
+        for col in protected_cat_cols:
+            if df[col].isna().any():
+                df[col] = df[col].fillna(unknown_val)
+                cat_filled += 1
         
         # 截面填充（用 0 填充，避免引入未来信息）
         # 获取所有数值列
@@ -282,8 +294,9 @@ class GRUProcessor:
         
         # 排除主键和标签
         exclude_cols = ['ts_code', 'trade_date']
-        label_cols = [c for c in df.columns if c.startswith(('ret_', 'label_'))]
+        label_cols = self._get_label_columns(df)
         exclude_cols.extend(label_cols)
+        exclude_cols.extend(protected_cat_cols)
         
         fill_cols = [c for c in numeric_cols if c not in exclude_cols]
 
@@ -296,9 +309,16 @@ class GRUProcessor:
                 filled_cols += 1
 
         logger.info(f"     ✓ 截面填充 (fillna(0)) 完成: {filled_cols}/{len(fill_cols)} 列")
+        if protected_cat_cols:
+            logger.info(
+                f"     ✓ 类别列显式保护: {protected_cat_cols}"
+                f" (缺失填充为 {unknown_val}: {cat_filled} 列)"
+            )
         
         self.stats["ffill_cols"] = len(ffill_cols)
         self.stats["fill_nan_cols"] = filled_cols
+        self.stats["cat_fill_cols"] = cat_filled
+        self.stats["cat_protected_cols"] = protected_cat_cols
         
         return df
     
@@ -340,12 +360,15 @@ class GRUProcessor:
         import pandas as pd
         numeric_cols = [c for c in df.columns 
                        if pd.api.types.is_numeric_dtype(df[c].dtype)]
+
+        protected_cat_cols = self._get_protected_categorical_cols(df)
         
         exclude_cols = ['ts_code', 'trade_date']
-        label_cols = [c for c in df.columns if c.startswith(('ret_', 'label_'))]
+        label_cols = self._get_label_columns(df)
         category_cols = [c for c in df.columns if 'idx' in c or 'code' in c.lower()]
         exclude_cols.extend(label_cols)
         exclude_cols.extend(category_cols)
+        exclude_cols.extend(protected_cat_cols)
         
         clip_cols = [c for c in numeric_cols if c not in exclude_cols]
         
@@ -415,9 +438,12 @@ class GRUProcessor:
             gc.collect()
         
         logger.info(f"     ✓ Clip 列数: {clipped_count}/{len(clip_cols)}")
+        if protected_cat_cols:
+            logger.info(f"     ✓ 类别列未参与 Clip: {protected_cat_cols}")
         
         self.stats["clip_cols"] = clipped_count
         self.stats["clip_mode"] = clip_mode
+        self.stats["clip_protected_categorical_cols"] = protected_cat_cols
         
         return df
     
@@ -561,7 +587,11 @@ class GRUProcessor:
         """
         logger.info("  📊 Step 6: 截面标准化 (Daily Z-Score)")
         
-        zscore_cols = [c for c in self.config.zscore_features if c in df.columns]
+        protected_cat_cols = set(self._get_protected_categorical_cols(df))
+        zscore_cols = [
+            c for c in self.config.zscore_features
+            if c in df.columns and c not in protected_cat_cols
+        ]
         clip_val = self.config.zscore_clip
         
         if not zscore_cols:
@@ -602,29 +632,42 @@ class GRUProcessor:
             gc.collect()
         
         logger.info(f"     ✓ 标准化完成: {normalized_count}/{len(zscore_cols)}")
+        if protected_cat_cols:
+            logger.info(f"     ✓ 类别列未参与截面标准化: {sorted(protected_cat_cols)}")
         
         self.stats["zscore_cols"] = normalized_count
+        self.stats["zscore_protected_categorical_cols"] = sorted(protected_cat_cols)
         
         return df
     
     def _final_fill(self, df: Any) -> Any:
         """
         最终填充
-        
-        严禁保留 NaN（PyTorch/TensorFlow 遇到 NaN 会报错），
-        对所有剩余 NaN 填 0。
+
+        仅对非标签特征做兜底填充，标签 NaN 保留给训练层 masked loss 处理。
 
         [内存优化] 避免对超大宽表执行两次全量 isna().sum().sum() 统计。
         """
-        logger.info("  📊 Step 7: 最终填充 (确保无 NaN)")
+        logger.info("  📊 Step 7: 最终填充 (仅非标签特征)")
         
         # 获取数值列
         import pandas as pd
         numeric_cols = [c for c in df.columns 
                        if pd.api.types.is_numeric_dtype(df[c].dtype)]
+
+        protected_cat_cols = self._get_protected_categorical_cols(df)
+        unknown_val = int(getattr(self.config, "category_unknown_value", -1))
+        cat_filled = 0
+        for col in protected_cat_cols:
+            if df[col].isna().any():
+                df[col] = df[col].fillna(unknown_val)
+                cat_filled += 1
         
         # 排除主键
         exclude_cols = ['ts_code', 'trade_date']
+        label_cols = self._get_label_columns(df)
+        exclude_cols.extend(label_cols)
+        exclude_cols.extend(protected_cat_cols)
         fill_cols = [c for c in numeric_cols if c not in exclude_cols]
 
         filled_cols = 0
@@ -638,8 +681,17 @@ class GRUProcessor:
             gc.collect()
 
         logger.info(f"     ✓ 最终填充完成: {filled_cols}/{len(fill_cols)} 列")
+        if label_cols:
+            logger.info(f"     ✓ 标签列未参与最终填充: {len(label_cols)} 列")
+        if protected_cat_cols:
+            logger.info(
+                f"     ✓ 类别列保持整数语义: {protected_cat_cols}"
+                f" (缺失填充为 {unknown_val}: {cat_filled} 列)"
+            )
 
         self.stats["final_fill_cols"] = filled_cols
+        self.stats["final_cat_fill_cols"] = cat_filled
+        self.stats["final_fill_label_cols_excluded"] = label_cols
         self.stats["final_fill_validation"] = "skipped_full_scan"
         
         return df
@@ -703,6 +755,66 @@ class GRUProcessor:
         valid_order = valid_order.fillna(False)
         valid_order.iloc[0] = True
         return bool(valid_order.all())
+
+    def _get_protected_categorical_cols(self, df: Any) -> List[str]:
+        """获取配置中需要保护的类别列（仅返回当前存在的列）。"""
+        return [c for c in getattr(self.config, "categorical_cols", []) if c in df.columns]
+
+    @staticmethod
+    def _get_label_columns(df: Any) -> List[str]:
+        """识别标签列（后处理中需完全隔离）。"""
+        label_prefixes = (
+            'ret_',
+            'label_',
+            'excess_ret_',
+            'rank_ret_',
+            'sharpe_',
+            'label_bin_',
+        )
+        return [c for c in df.columns if c.startswith(label_prefixes)]
+
+    def _prepare_categorical_columns(self, df: Any, log_step: str) -> Any:
+        """
+        类别列规范化（embedding-ready）
+
+        约束：
+        - market/industry_idx/sw_l1_idx 全部转为 int32
+        - 缺失/未知统一编码为 category_unknown_value（默认 -1）
+        """
+        logger.info(f"  📊 {log_step}: 类别列规范化 (embedding-ready)")
+
+        import pandas as pd
+
+        cat_cols = self._get_protected_categorical_cols(df)
+        if not cat_cols:
+            logger.info("     ✓ 无需规范化的类别列")
+            return df
+
+        unknown_val = int(getattr(self.config, "category_unknown_value", -1))
+        filled_counts: Dict[str, int] = {}
+
+        for col in cat_cols:
+            if self.use_gpu:
+                col_pd = df[col].to_pandas() if hasattr(df[col], 'to_pandas') else pd.Series(df[col])
+                numeric = pd.to_numeric(col_pd, errors='coerce')
+                na_count = int(numeric.isna().sum())
+                df[col] = numeric.fillna(unknown_val).astype('int32').values
+            else:
+                numeric = pd.to_numeric(df[col], errors='coerce')
+                na_count = int(numeric.isna().sum())
+                df[col] = numeric.fillna(unknown_val).astype('int32')
+
+            if na_count > 0:
+                filled_counts[col] = na_count
+
+        logger.info(f"     ✓ 保护类别列: {cat_cols}")
+        if filled_counts:
+            logger.info(f"     ✓ 缺失填充为 {unknown_val}: {filled_counts}")
+
+        self.stats["protected_categorical_cols"] = cat_cols
+        self.stats["categorical_unknown_value"] = unknown_val
+        self.stats["categorical_filled_counts"] = filled_counts
+        return df
     
     def _slice_data(self, df: Any, log_step: str = "Step 8") -> Any:
         """

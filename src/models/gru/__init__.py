@@ -31,6 +31,11 @@ from .dataset import (
     create_dataloader,
 )
 from .network import MultiTaskGRUNetwork, TemporalAttention
+from .feature_selection import (
+    GRUFeatureSelectionConfig,
+    FeatureSelectionResult,
+    GRUFeatureSelector,
+)
 from .gru_model import (
     GRUModel,
     MultiTaskLoss,
@@ -62,6 +67,10 @@ __all__ = [
     # Network
     "MultiTaskGRUNetwork",
     "TemporalAttention",
+    # Feature Selection
+    "GRUFeatureSelectionConfig",
+    "FeatureSelectionResult",
+    "GRUFeatureSelector",
     # Model + Loss
     "GRUModel",
     "MultiTaskLoss",

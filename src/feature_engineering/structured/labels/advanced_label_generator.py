@@ -122,23 +122,16 @@ class AdvancedLabelGenerator:
         # 计算基准的未来 N 日收益率
         bench_df['trade_date'] = pd.to_datetime(bench_df['trade_date'])
         bench_df = bench_df.sort_values('trade_date')
+
+        bench_price_col = self._select_benchmark_price_col(bench_df)
+        logger.info(f"    ✓ 基准执行价列: {bench_price_col} (T+1 执行口径)")
         
         for days in excess_days:
             bench_col = f'bench_ret_{days}d'
-            
-            # 使用收盘价计算基准收益率
-            if 'close' in bench_df.columns:
-                bench_df[bench_col] = (
-                    bench_df['close'].shift(-days) / bench_df['close'] - 1
-                )
-            elif 'pct_chg' in bench_df.columns:
-                # 如果只有日收益率，需要累积
-                bench_df[bench_col] = (
-                    (1 + bench_df['pct_chg'] / 100).rolling(window=days).apply(
-                        lambda x: x.prod() - 1, raw=True
-                    ).shift(-days)
-                )
-            
+            bench_df[bench_col] = self._compute_forward_return_series(
+                bench_df[bench_price_col],
+                forward_days=days,
+            )
             bench_merge = bench_df[['trade_date', bench_col]].copy()
         
         # 转换主表到 pandas 进行 merge
@@ -166,8 +159,8 @@ class AdvancedLabelGenerator:
             bench_merge = bench_df[['trade_date', bench_col]].copy()
             df_pd = df_pd.merge(bench_merge, on='trade_date', how='left')
             
-            # 计算超额收益
-            df_pd[excess_col] = df_pd[ret_col] - df_pd[bench_col].fillna(0)
+            # 计算超额收益（严格同口径，benchmark 缺失时保持 NaN）
+            df_pd[excess_col] = df_pd[ret_col] - df_pd[bench_col]
             
             # 删除临时列
             df_pd = df_pd.drop(columns=[bench_col])
@@ -189,6 +182,38 @@ class AdvancedLabelGenerator:
             df = df_pd
         
         return df
+
+    @staticmethod
+    def _compute_forward_return_series(price_series: pd.Series, forward_days: int) -> pd.Series:
+        """
+        T+1 执行口径收益率：Price[t+N+1] / Price[t+1] - 1
+
+        分母或分子不可用（NaN/<=0）时返回 NaN。
+        """
+        series = pd.to_numeric(price_series, errors='coerce')
+        entry_price = series.shift(-1)
+        exit_price = series.shift(-(int(forward_days) + 1))
+
+        ret = exit_price / entry_price - 1.0
+        invalid = (
+            entry_price.isna() |
+            (entry_price <= 0) |
+            exit_price.isna() |
+            (exit_price <= 0)
+        )
+        ret.loc[invalid] = np.nan
+        return ret.astype('float32')
+
+    @staticmethod
+    def _select_benchmark_price_col(bench_df: pd.DataFrame) -> str:
+        """选择基准执行价列，优先使用 vwap_hfq。"""
+        priority = ['vwap_hfq', 'vwap', 'close_hfq', 'close']
+        for col in priority:
+            if col in bench_df.columns:
+                if col != 'vwap_hfq':
+                    logger.warning(f"    ⚠️ 基准未命中 vwap_hfq，当前使用 {col}")
+                return col
+        raise ValueError("基准收益率计算失败：缺少执行价列（vwap_hfq/vwap/close_hfq/close）")
     
     def _generate_rank_labels(self, df: Any) -> Any:
         """

@@ -18,6 +18,7 @@ import pandas as pd
 
 from ..config import GRUConfig
 from ..metrics.evaluator import QuantEvaluator
+from ..metrics import infer_pnl_return_col, parse_holding_period_days
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,20 @@ class GRUReportGenerator:
         if pred_col not in self.oof_df.columns or true_col not in self.oof_df.columns:
             return {}
 
+        return_col = f"pnl_return_{target_col}"
+        if return_col not in self.oof_df.columns:
+            return_col = "pnl_return" if "pnl_return" in self.oof_df.columns else None
+
+        if return_col is None:
+            inferred = infer_pnl_return_col(target_col, available_cols=self.oof_df.columns)
+            return_col = inferred if inferred in self.oof_df.columns else None
+
         metrics = self.evaluator.evaluate(
             self.oof_df,
             y_pred_col=pred_col,
             y_true_col=true_col,
+            return_col=return_col,
+            holding_period_days=parse_holding_period_days(target_col, default=1),
         )
         self._eval_cache[target_col] = metrics
         return metrics
@@ -277,8 +288,21 @@ class GRUReportGenerator:
 
         # 2.4 综合信号（主信号，rank 通道）
         if "y_pred" in self.oof_df.columns and "y_true" in self.oof_df.columns:
+            rank_target_col = next(
+                (c for c in self.config.data.target_cols if c.startswith("rank")),
+                self.config.data.target_cols[0] if self.config.data.target_cols else "y_true",
+            )
+            main_return_col = "pnl_return" if "pnl_return" in self.oof_df.columns else None
+            if main_return_col is None:
+                inferred = infer_pnl_return_col(rank_target_col, available_cols=self.oof_df.columns)
+                main_return_col = inferred if inferred in self.oof_df.columns else None
+
             main_m = self.evaluator.evaluate(
-                self.oof_df, y_pred_col="y_pred", y_true_col="y_true",
+                self.oof_df,
+                y_pred_col="y_pred",
+                y_true_col="y_true",
+                return_col=main_return_col,
+                holding_period_days=parse_holding_period_days(rank_target_col, default=1),
             )
             s += "\n### 2.4 综合信号（主信号 rank 通道）\n\n"
             s += "| 指标 | 值 |\n| ---- | ---- |\n"
@@ -372,6 +396,89 @@ class GRUReportGenerator:
                 s += f"| {e + 1} | {tl:.4f} | {vl:.4f} | {ric:.4f}{marker} |\n"
 
             s += "\n"
+
+        # 3.3 特征筛选摘要
+        fs_summary = None
+        for info in infos:
+            cand = info.get("feature_selection_summary")
+            if isinstance(cand, dict) and cand:
+                fs_summary = cand
+                break
+
+        if fs_summary:
+            selector_mode = str(fs_summary.get("selector_mode", "") or "")
+            candidate_count = int(fs_summary.get("candidate_count", 0) or 0)
+            adf_pass_count = int(fs_summary.get("adf_pass_count", 0) or 0)
+            selected_count = int(fs_summary.get("selected_count", 0) or 0)
+            selected_ratio = fs_summary.get("selected_ratio", np.nan)
+            selected_preview = fs_summary.get("selected_preview", [])
+            artifact_dir = fs_summary.get("artifact_dir", "")
+            artifact_files = fs_summary.get("artifact_files", {})
+            drop_reason_dist = fs_summary.get("drop_reason_distribution", {})
+            transform_dist = fs_summary.get("selected_transform_distribution", {})
+
+            heading = (
+                "### 3.3 平稳性筛选工件与通过率摘要\n\n"
+                if selector_mode == "stationary_only"
+                else "### 3.3 特征筛选工件与通过率摘要\n\n"
+            )
+            s += heading
+            s += "| 指标 | 值 |\n"
+            s += "| ---- | ---- |\n"
+            if selector_mode:
+                s += f"| 筛选模式 | {selector_mode} |\n"
+            s += f"| 候选特征数 | {candidate_count} |\n"
+            s += f"| ADF 通过数 | {adf_pass_count} |\n"
+            s += f"| 入选特征数 | {selected_count} |\n"
+            s += f"| 通过率 | {selected_ratio:.2%} |\n"
+            s += f"| 工件目录 | `{artifact_dir}` |\n"
+
+            if selected_preview:
+                preview_str = ", ".join(selected_preview)
+                s += f"| 入选示例（前10） | {preview_str} |\n"
+
+            s += "\n"
+
+            if drop_reason_dist:
+                s += "**淘汰原因分布（Top）**\n\n"
+                s += "| 原因 | 数量 |\n"
+                s += "| ---- | ---- |\n"
+                for reason, cnt in drop_reason_dist.items():
+                    s += f"| {reason} | {cnt} |\n"
+                s += "\n"
+
+            if transform_dist:
+                s += "**入选特征平稳化变换分布**\n\n"
+                s += "| 变换 | 数量 |\n"
+                s += "| ---- | ---- |\n"
+                for name, cnt in transform_dist.items():
+                    s += f"| {name} | {cnt} |\n"
+                s += "\n"
+
+            if artifact_files:
+                s += "**筛选工件清单**\n\n"
+                for k, path in artifact_files.items():
+                    s += f"- {k}: `{path}`\n"
+                s += "\n"
+
+        # 3.4 置换重要性摘要
+        has_perm = any(bool(info.get("permutation_importance_top")) for info in infos)
+        if has_perm:
+            s += f"### 3.4 置换重要性 Top 特征\n\n"
+            for info in infos:
+                idx = info.get("seed", info.get("fold_idx", "?"))
+                top = info.get("permutation_importance_top", [])
+                if not top:
+                    continue
+
+                s += f"**{idx_label} {idx}**\n\n"
+                s += "| Rank | Feature | RankIC Drop |\n"
+                s += "| ---- | ------- | ----------- |\n"
+                for i, row in enumerate(top[:10], start=1):
+                    feat = row.get("feature", "")
+                    drop = row.get("rank_ic_drop", np.nan)
+                    s += f"| {i} | {feat} | {drop:.6f} |\n"
+                s += "\n"
 
         s += "---\n\n"
         return s

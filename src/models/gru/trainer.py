@@ -28,6 +28,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from torch.utils.data import Dataset
 
 from ..config import (
     GRUConfig,
@@ -36,9 +37,13 @@ from ..config import (
     GRUSplitConfig,
     GRUTrainConfig,
     GRUInferenceConfig,
-    get_gru_feature_columns,
-    get_gru_selected_features,
+    ID_COLS,
+    LABEL_COLS,
+    AUX_COLS,
+    CATEGORICAL_FEATURES,
 )
+from ..metrics import infer_pnl_return_col
+from .feature_selection import GRUFeatureSelectionConfig, GRUFeatureSelector
 from .dataset import (
     GRUFoldInfo,
     GRUTimeSeriesSplitter,
@@ -49,6 +54,28 @@ from .gru_model import GRUModel, set_seed
 from .report_generator import GRUReportGenerator
 
 logger = logging.getLogger(__name__)
+
+
+class _PermutedFeatureDataset(Dataset):
+    """在样本级按预设映射替换单一连续特征序列，用于置换重要性评估。"""
+
+    def __init__(self, base_dataset: GRUTensorDataset, permutation_indices: np.ndarray, feature_idx: int):
+        self.base_dataset = base_dataset
+        self.permutation_indices = permutation_indices
+        self.feature_idx = feature_idx
+        self.device = getattr(base_dataset, "device", "cpu")
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx: int):
+        x_cont, x_cat, y = self.base_dataset[idx]
+        src_idx = int(self.permutation_indices[idx])
+        src_x_cont, _, _ = self.base_dataset[src_idx]
+
+        x_cont_perm = x_cont.clone()
+        x_cont_perm[:, self.feature_idx] = src_x_cont[:, self.feature_idx]
+        return x_cont_perm, x_cat, y
 
 
 class GRUTrainer:
@@ -77,15 +104,22 @@ class GRUTrainer:
         self.config = config or GRUConfig.default()
         self.df: Optional[pd.DataFrame] = None
         self.feature_cols: Optional[List[str]] = None
+        self.cat_feature_cols: List[str] = []
+        self.cat_cardinalities: List[int] = []
+        self.cat_embedding_dims: List[int] = []
+        self.feature_selection_result = None
 
         # 预计算的共享张量（load_data 中创建）
         self.feature_tensor: Optional[torch.Tensor] = None
+        self.cat_feature_tensor: Optional[torch.Tensor] = None
         self.label_tensor: Optional[torch.Tensor] = None
         self.dates_arr: Optional[np.ndarray] = None
         self.codes_arr: Optional[np.ndarray] = None
 
         # 供外部读取的元信息
         self.loaded_columns: List[str] = []
+        self.target_return_col_map: Dict[str, str] = {}
+        self.pnl_return_arrays: Dict[str, np.ndarray] = {}
 
         logger.info("GRUTrainer 初始化完成")
 
@@ -122,13 +156,55 @@ class GRUTrainer:
         self.loaded_columns = all_columns
         logger.info(f"Parquet schema: {len(all_columns)} 列")
 
-        # ---- Step 2: 确定特征列（LGB Top 50 + 宏观特征） ----
+        # ---- Step 2: GRU 专属流式特征筛选（全样本一次拟合） ----
         mode = self.config.split.mode
-        self.feature_cols = get_gru_selected_features(
-            all_columns, mode=mode, top_n=50,
+        if "rank_ret_5d" not in all_columns:
+            raise ValueError(
+                "当前 GRU 特征筛选固定使用 rank_ret_5d，"
+                "但输入数据中未找到该列"
+            )
+
+        selector = GRUFeatureSelector(
+            config=GRUFeatureSelectionConfig(
+                target_col="rank_ret_5d",
+                stationary_only=bool(getattr(self.config.train, "stationary_only", True)),
+            )
+        )
+        selection_dir = self.config.train.save_dir / mode / "feature_selection"
+        exclude_cols = list(set(ID_COLS + LABEL_COLS + AUX_COLS + CATEGORICAL_FEATURES))
+
+        self.feature_selection_result = selector.fit_or_load_artifacts(
+            data_path=data_path,
+            all_columns=all_columns,
+            mode=mode,
+            output_dir=selection_dir,
+            exclude_cols=exclude_cols,
+        )
+        self.feature_cols = list(self.feature_selection_result.selected_features)
+
+        if not self.feature_cols:
+            raise ValueError("GRU 特征筛选结果为空，请检查筛选阈值或输入数据质量")
+
+        logger.info(
+            f"GRU 特征筛选结果: {len(self.feature_cols)} 列, artifact={selection_dir}"
+        )
+
+        fs_mode = getattr(self.feature_selection_result, "selector_mode", "unknown")
+        fs_candidates = int(getattr(self.feature_selection_result, "candidate_count", 0) or 0)
+        fs_adf_pass = int(getattr(self.feature_selection_result, "adf_pass_count", 0) or 0)
+        logger.info(
+            "GRU 筛选模式审计: selector_mode=%s, predictive_filter=%s, stationary_filter=ON, "
+            "candidate_count=%d, adf_pass_count=%d, selected_count=%d",
+            fs_mode,
+            "OFF" if fs_mode == "stationary_only" else "ON",
+            fs_candidates,
+            fs_adf_pass,
+            len(self.feature_cols),
         )
 
         # ---- Step 3: 确定读取列 ----
+        self.cat_feature_cols = [c for c in CATEGORICAL_FEATURES if c in all_columns]
+
         valid_target_cols = [c for c in target_cols if c in all_columns]
         if not valid_target_cols:
             raise ValueError(f"目标列在数据中均不存在: {target_cols}")
@@ -138,8 +214,23 @@ class GRUTrainer:
         self.config.data.target_cols = valid_target_cols
         target_cols = valid_target_cols
 
+        self.target_return_col_map = {}
+        return_cols: List[str] = []
+        for target_col in target_cols:
+            inferred_return_col = infer_pnl_return_col(target_col, available_cols=all_columns)
+            if inferred_return_col is None:
+                inferred_return_col = target_col
+                logger.warning(
+                    "目标 %s 未找到专用收益列，回退到目标列本身作为 pnl_return",
+                    target_col,
+                )
+            self.target_return_col_map[target_col] = inferred_return_col
+            return_cols.append(inferred_return_col)
+
+        logger.info(f"GRU 目标收益映射: {self.target_return_col_map}")
+
         read_cols = list(dict.fromkeys(
-            ['ts_code', 'trade_date'] + self.feature_cols + target_cols
+            ['ts_code', 'trade_date'] + self.feature_cols + self.cat_feature_cols + target_cols + return_cols
         ))
         read_cols = [c for c in read_cols if c in all_columns]
 
@@ -196,6 +287,31 @@ class GRUTrainer:
         else:
             logger.info(f"日期过滤: 无需截断, 保留全部 {len(df):,} 行")
 
+        # ---- Step 5.5: 应用筛选阶段确定的时序变换 ----
+        transform_specs = {}
+        if self.feature_selection_result is not None:
+            transform_specs = getattr(self.feature_selection_result, "transform_specs", {}) or {}
+
+        if transform_specs:
+            diff_cols = [c for c, m in transform_specs.items() if m == "diff" and c in df.columns]
+            pct_cols = [c for c, m in transform_specs.items() if m == "pct_change" and c in df.columns]
+
+            if diff_cols:
+                df[diff_cols] = df.groupby('ts_code', sort=False)[diff_cols].diff()
+            if pct_cols:
+                df[pct_cols] = df.groupby('ts_code', sort=False)[pct_cols].pct_change()
+
+            transformed_cols = diff_cols + pct_cols
+            if transformed_cols:
+                df[transformed_cols] = (
+                    df[transformed_cols]
+                    .replace([np.inf, -np.inf], np.nan)
+                    .fillna(0.0)
+                )
+            logger.info(
+                f"应用特征变换: diff={len(diff_cols)}, pct_change={len(pct_cols)}"
+            )
+
         # 过滤非数值特征列
         numeric_cols = df.select_dtypes(
             include=['float32', 'float64', 'Float32', 'Float64',
@@ -203,7 +319,11 @@ class GRUTrainer:
         ).columns.tolist()
         self.feature_cols = [c for c in self.feature_cols if c in numeric_cols]
 
-        logger.info(f"特征列数: {len(self.feature_cols)}, 目标列: {target_cols}")
+        self.cat_feature_cols = [c for c in self.cat_feature_cols if c in df.columns]
+
+        logger.info(
+            f"连续特征列数: {len(self.feature_cols)}, 类别特征列数: {len(self.cat_feature_cols)}, 目标列: {target_cols}"
+        )
 
         # ---- Step 6: 提取元数据（轻量，CPU）----
         self.dates_arr = df['trade_date'].values
@@ -233,7 +353,36 @@ class GRUTrainer:
             if col_data.dtype != np.float32:
                 col_data = col_data.astype(np.float32)
             labels_np[:, i] = col_data
-        np.nan_to_num(labels_np, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 评估使用的真实收益列（按目标分别缓存，避免后续被 DataFrame block 引用牵连）
+        self.pnl_return_arrays = {}
+        for target_col in target_cols:
+            ret_col = self.target_return_col_map.get(target_col, target_col)
+            if ret_col not in df.columns:
+                ret_col = target_col
+            self.pnl_return_arrays[target_col] = np.asarray(df[ret_col].values, dtype=np.float32).copy()
+
+        # 重要：标签 NaN（如 T+1 不可交易掩码）必须保留，
+        # 后续在 Loss 中通过 masked loss 忽略无效样本。
+
+        cat_np = None
+        self.cat_cardinalities = []
+        self.cat_embedding_dims = []
+
+        if self.cat_feature_cols:
+            cat_np = np.empty((n_rows, len(self.cat_feature_cols)), dtype=np.int64)
+            for i, c in enumerate(self.cat_feature_cols):
+                cat_series = pd.to_numeric(df[c], errors='coerce').fillna(-1).astype(np.int64)
+                cat_values = cat_series.values + 1  # unknown(-1) -> 0
+                cat_values = np.maximum(cat_values, 0)
+
+                max_val = int(cat_values.max()) if len(cat_values) else 0
+                cardinality = max(2, max_val + 1)
+                cat_values = np.clip(cat_values, 0, cardinality - 1)
+
+                cat_np[:, i] = cat_values
+                self.cat_cardinalities.append(cardinality)
+                self.cat_embedding_dims.append(max(4, min(32, int((cardinality + 1) // 2))))
 
         # 释放 DataFrame（最大内存节省点）
         del df
@@ -255,21 +404,207 @@ class GRUTrainer:
         del labels_np
         gc.collect()
 
+        if cat_np is not None:
+            self.cat_feature_tensor = torch.from_numpy(cat_np).to(device=device, dtype=torch.long)
+            del cat_np
+            gc.collect()
+        else:
+            self.cat_feature_tensor = None
+
         # ---- Step 9: 更新配置 ----
-        self.config.network.num_features = len(self.feature_cols)
+        self.config.network.num_features = len(self.feature_cols) + int(sum(self.cat_embedding_dims))
         self.config.network.num_targets = len(target_cols)
 
         feat_mb = self.feature_tensor.numel() * 4 / 1024 / 1024
+        cat_mb = 0.0
+        if self.cat_feature_tensor is not None:
+            cat_mb = self.cat_feature_tensor.numel() * 8 / 1024 / 1024  # int64
         label_mb = self.label_tensor.numel() * 4 / 1024 / 1024
         logger.info(
             f"数据加载完成: rows={len(self.dates_arr):,}, "
-            f"features={len(self.feature_cols)}, targets={len(target_cols)}, "
-            f"tensor_mem={feat_mb + label_mb:.0f}MB "
-            f"(features={feat_mb:.0f}MB, labels={label_mb:.0f}MB), "
+            f"cont_features={len(self.feature_cols)}, cat_features={len(self.cat_feature_cols)}, targets={len(target_cols)}, "
+            f"tensor_mem={feat_mb + cat_mb + label_mb:.0f}MB "
+            f"(cont={feat_mb:.0f}MB, cat={cat_mb:.0f}MB, labels={label_mb:.0f}MB), "
             f"device={device}, 总耗时={time.time() - t0:.1f}s"
         )
 
+        if self.cat_feature_cols:
+            logger.info(
+                f"类别特征基数: {dict(zip(self.cat_feature_cols, self.cat_cardinalities))}"
+            )
+
         return self.df
+
+    @staticmethod
+    def _calc_mean_rank_ic(y_true: np.ndarray, y_pred: np.ndarray, dates: np.ndarray) -> float:
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.to_datetime(dates),
+                "y_true": y_true,
+                "y_pred": y_pred,
+            }
+        )
+
+        daily_rank_ic = []
+        for _, g in df.groupby("trade_date", sort=True):
+            if len(g) < 3:
+                continue
+            if g["y_true"].nunique(dropna=True) < 2 or g["y_pred"].nunique(dropna=True) < 2:
+                continue
+            ric = g["y_true"].corr(g["y_pred"], method="spearman")
+            if np.isfinite(ric):
+                daily_rank_ic.append(float(ric))
+
+        if not daily_rank_ic:
+            return float("nan")
+        return float(np.mean(daily_rank_ic))
+
+    @staticmethod
+    def _build_cross_section_permutation_indices(dates: np.ndarray, seed: int) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        indices = np.arange(len(dates), dtype=np.int64)
+
+        df = pd.DataFrame({"idx": indices, "date": dates})
+        for _, g in df.groupby("date", sort=False):
+            idx = g["idx"].to_numpy(dtype=np.int64)
+            if len(idx) <= 1:
+                continue
+            shuffled = idx.copy()
+            rng.shuffle(shuffled)
+            indices[idx] = shuffled
+
+        return indices
+
+    def _compute_permutation_importance(
+        self,
+        model: GRUModel,
+        valid_ds: GRUTensorDataset,
+        baseline_preds: np.ndarray,
+        rank_channel_idx: int,
+        max_features: int = 30,
+        seed: int = 42,
+    ) -> pd.DataFrame:
+        if baseline_preds.size == 0 or not self.feature_cols:
+            return pd.DataFrame(columns=["feature", "baseline_rank_ic", "permuted_rank_ic", "rank_ic_drop"])
+
+        dates = valid_ds.get_all_dates()
+        y_true_rank = valid_ds.labels[valid_ds.valid_indices, rank_channel_idx].detach().cpu().numpy()
+        y_pred_rank = baseline_preds[:, rank_channel_idx]
+
+        baseline_rank_ic = self._calc_mean_rank_ic(y_true_rank, y_pred_rank, dates)
+        perm_indices = self._build_cross_section_permutation_indices(dates=dates, seed=seed)
+
+        feature_candidates = self.feature_cols[: max_features if max_features > 0 else len(self.feature_cols)]
+        rows = []
+
+        for feat_idx, feat in enumerate(feature_candidates):
+            perm_ds = _PermutedFeatureDataset(
+                base_dataset=valid_ds,
+                permutation_indices=perm_indices,
+                feature_idx=feat_idx,
+            )
+            perm_loader = create_dataloader(
+                perm_ds,
+                batch_size=self.config.train.batch_size,
+                shuffle=False,
+            )
+
+            perm_preds = model.predict(perm_loader)
+            perm_rank_ic = self._calc_mean_rank_ic(
+                y_true=y_true_rank,
+                y_pred=perm_preds[:, rank_channel_idx],
+                dates=dates,
+            )
+
+            rank_ic_drop = baseline_rank_ic - perm_rank_ic if np.isfinite(perm_rank_ic) else np.nan
+            rows.append(
+                {
+                    "feature": feat,
+                    "baseline_rank_ic": baseline_rank_ic,
+                    "permuted_rank_ic": perm_rank_ic,
+                    "rank_ic_drop": rank_ic_drop,
+                }
+            )
+
+        out = pd.DataFrame(rows)
+        if not out.empty:
+            out = out.sort_values("rank_ic_drop", ascending=False).reset_index(drop=True)
+            out["importance_rank"] = np.arange(1, len(out) + 1)
+        return out
+
+    def _build_feature_selection_summary(self) -> Dict[str, Any]:
+        """构建特征筛选摘要（用于训练报告）。"""
+        result = self.feature_selection_result
+        if result is None:
+            return {}
+
+        selected_features = list(getattr(result, "selected_features", []) or [])
+        transform_specs = dict(getattr(result, "transform_specs", {}) or {})
+        metrics_df = getattr(result, "metrics_df", None)
+
+        artifact_dir = Path(getattr(result, "artifact_dir", "")) if getattr(result, "artifact_dir", None) else None
+        artifact_files = {}
+        if artifact_dir is not None:
+            artifact_files = {
+                "selected_features": str(artifact_dir / "selected_features.json"),
+                "transform_specs": str(artifact_dir / "transform_specs.json"),
+                "feature_metrics": str(artifact_dir / "feature_metrics.parquet"),
+            }
+
+        summary: Dict[str, Any] = {
+            "artifact_dir": str(artifact_dir) if artifact_dir is not None else "",
+            "artifact_files": artifact_files,
+            "selector_mode": str(getattr(result, "selector_mode", "")),
+            "selected_count": int(len(selected_features)),
+            "selected_preview": selected_features[:10],
+            "selected_transform_distribution": {},
+            "drop_reason_distribution": {},
+            "adf_pass_count": int(getattr(result, "adf_pass_count", 0) or 0),
+        }
+
+        if not isinstance(metrics_df, pd.DataFrame) or metrics_df.empty:
+            if transform_specs:
+                transform_series = pd.Series(list(transform_specs.values())).fillna("identity").replace("", "identity")
+                summary["selected_transform_distribution"] = {
+                    str(k): int(v) for k, v in transform_series.value_counts().to_dict().items()
+                }
+            summary["candidate_count"] = int(getattr(result, "candidate_count", len(selected_features)) or len(selected_features))
+            summary["selected_ratio"] = 1.0 if selected_features else 0.0
+            return summary
+
+        candidate_count = int(metrics_df["feature"].nunique()) if "feature" in metrics_df.columns else int(len(metrics_df))
+        if "selected" in metrics_df.columns:
+            selected_mask = metrics_df["selected"].fillna(False).astype(bool)
+            selected_count = int(selected_mask.sum())
+        else:
+            selected_mask = pd.Series(False, index=metrics_df.index)
+            selected_count = int(len(selected_features))
+
+        selected_ratio = float(selected_count / candidate_count) if candidate_count > 0 else 0.0
+        summary["candidate_count"] = candidate_count
+        summary["selected_count"] = selected_count
+        summary["selected_ratio"] = selected_ratio
+
+        if "adf_passed" in metrics_df.columns:
+            summary["adf_pass_count"] = int(metrics_df["adf_passed"].fillna(False).astype(bool).sum())
+
+        if "drop_reason" in metrics_df.columns:
+            reason_series = metrics_df.loc[~selected_mask, "drop_reason"].fillna("").replace("", "filtered_out")
+            summary["drop_reason_distribution"] = {
+                str(k): int(v) for k, v in reason_series.value_counts().head(10).to_dict().items()
+            }
+
+        if "transform" in metrics_df.columns:
+            transform_series = metrics_df.loc[selected_mask, "transform"].fillna("identity").replace("", "identity")
+        else:
+            transform_series = pd.Series([transform_specs.get(f, "identity") for f in selected_features])
+
+        if not transform_series.empty:
+            summary["selected_transform_distribution"] = {
+                str(k): int(v) for k, v in transform_series.value_counts().to_dict().items()
+            }
+
+        return summary
 
     def train(
         self,
@@ -340,6 +675,8 @@ class GRUTrainer:
         device = str(self.feature_tensor.device)
         set_seed(seed)
 
+        feature_selection_summary = self._build_feature_selection_summary()
+
         fold_train_info: List[Dict[str, Any]] = []
 
         # 1) 初始化切分器（传入逻辑日期边界）
@@ -361,7 +698,8 @@ class GRUTrainer:
 
             # 构建训练/验证 Dataset（共享张量，零拷贝）
             train_ds = GRUTensorDataset(
-                features=self.feature_tensor,
+                cont_features=self.feature_tensor,
+                cat_features=self.cat_feature_tensor,
                 labels=self.label_tensor,
                 dates=self.dates_arr,
                 codes=self.codes_arr,
@@ -371,7 +709,8 @@ class GRUTrainer:
                 date_range=(fold_info.train_start, fold_info.train_end),
             )
             valid_ds = GRUTensorDataset(
-                features=self.feature_tensor,
+                cont_features=self.feature_tensor,
+                cat_features=self.cat_feature_tensor,
                 labels=self.label_tensor,
                 dates=self.dates_arr,
                 codes=self.codes_arr,
@@ -391,7 +730,11 @@ class GRUTrainer:
             # 构建模型
             model = GRUModel(
                 target_cols=target_cols,
-                num_features=len(self.feature_cols),
+                num_features=len(self.feature_cols) + int(sum(self.cat_embedding_dims)),
+                num_cont_features=len(self.feature_cols),
+                num_cat_features=len(self.cat_feature_cols),
+                cat_cardinalities=self.cat_cardinalities,
+                cat_embedding_dims=self.cat_embedding_dims,
                 config=config.train,
                 device=device,
                 seed=seed,
@@ -409,7 +752,7 @@ class GRUTrainer:
             # 收集 fold 训练元信息
             epochs_trained = model.train_info.get("epochs_trained", 0)
             best_epoch = epochs_trained - model.patience_counter
-            fold_train_info.append({
+            fold_record = {
                 "fold_idx": fold_idx,
                 "train_start": fold_info.train_start.strftime("%Y-%m-%d"),
                 "train_end": fold_info.train_end.strftime("%Y-%m-%d"),
@@ -426,7 +769,8 @@ class GRUTrainer:
                     "valid_loss": list(model.history["valid_loss"]),
                     "valid_rank_ic": list(model.history["valid_rank_ic"]),
                 },
-            })
+                "feature_selection_summary": feature_selection_summary,
+            }
 
             # 验证集预测
             preds = model.predict(valid_loader)  # (N_valid, num_targets)
@@ -447,10 +791,47 @@ class GRUTrainer:
                 oof_df[f"y_true_{col}"] = true_vals
                 oof_df[f"y_pred_{col}"] = preds[:, i]
 
+                pnl_source = self.pnl_return_arrays.get(col)
+                if pnl_source is not None:
+                    oof_df[f"pnl_return_{col}"] = pnl_source[valid_ds.valid_indices]
+                else:
+                    oof_df[f"pnl_return_{col}"] = true_vals
+
             # rank 通道作为主信号
             rank_col = target_cols[model.rank_channel_idx]
             oof_df["y_pred"] = oof_df[f"y_pred_{rank_col}"]
             oof_df["y_true"] = oof_df[f"y_true_{rank_col}"]
+            if f"pnl_return_{rank_col}" in oof_df.columns:
+                oof_df["pnl_return"] = oof_df[f"pnl_return_{rank_col}"]
+            else:
+                oof_df["pnl_return"] = oof_df["y_true"]
+
+            # 置换特征重要性（按 trade_date 截面 shuffle）
+            try:
+                perm_df = self._compute_permutation_importance(
+                    model=model,
+                    valid_ds=valid_ds,
+                    baseline_preds=preds,
+                    rank_channel_idx=model.rank_channel_idx,
+                    max_features=min(30, len(self.feature_cols)),
+                    seed=seed + fold_idx,
+                )
+            except Exception as e:
+                logger.warning(f"Fold {fold_idx} 置换重要性计算失败: {e}", exc_info=True)
+                perm_df = pd.DataFrame()
+
+            if not perm_df.empty:
+                perm_dir = config.train.save_dir / mode / "permutation_importance"
+                perm_dir.mkdir(parents=True, exist_ok=True)
+                perm_path = perm_dir / f"permutation_importance_fold{fold_idx}.parquet"
+                perm_df.to_parquet(perm_path, index=False)
+
+                fold_record["permutation_importance_path"] = str(perm_path)
+                fold_record["permutation_importance_top"] = (
+                    perm_df.head(10)[["feature", "rank_ic_drop"]].to_dict("records")
+                )
+
+            fold_train_info.append(fold_record)
 
             oof_list.append(oof_df)
 
@@ -507,6 +888,7 @@ class GRUTrainer:
         seeds = config.train.multi_seeds
         device = str(self.feature_tensor.device)
         fold_train_info: List[Dict[str, Any]] = []
+        feature_selection_summary = self._build_feature_selection_summary()
 
         # 1) 获取唯一 Fold（single_full 只产出1个，使用逻辑日期边界）
         splitter = GRUTimeSeriesSplitter(
@@ -529,7 +911,8 @@ class GRUTrainer:
 
             # 构建 Dataset（共享张量，零拷贝）
             train_ds = GRUTensorDataset(
-                features=self.feature_tensor,
+                cont_features=self.feature_tensor,
+                cat_features=self.cat_feature_tensor,
                 labels=self.label_tensor,
                 dates=self.dates_arr,
                 codes=self.codes_arr,
@@ -539,7 +922,8 @@ class GRUTrainer:
                 date_range=(fold_info.train_start, fold_info.train_end),
             )
             valid_ds = GRUTensorDataset(
-                features=self.feature_tensor,
+                cont_features=self.feature_tensor,
+                cat_features=self.cat_feature_tensor,
                 labels=self.label_tensor,
                 dates=self.dates_arr,
                 codes=self.codes_arr,
@@ -559,7 +943,11 @@ class GRUTrainer:
             # 构建模型
             model = GRUModel(
                 target_cols=target_cols,
-                num_features=len(self.feature_cols),
+                num_features=len(self.feature_cols) + int(sum(self.cat_embedding_dims)),
+                num_cont_features=len(self.feature_cols),
+                num_cat_features=len(self.cat_feature_cols),
+                cat_cardinalities=self.cat_cardinalities,
+                cat_embedding_dims=self.cat_embedding_dims,
                 config=config.train,
                 device=device,
                 seed=seed,
@@ -577,7 +965,7 @@ class GRUTrainer:
             # 收集种子训练元信息
             epochs_trained = model.train_info.get("epochs_trained", 0)
             best_epoch = epochs_trained - model.patience_counter
-            fold_train_info.append({
+            seed_record = {
                 "seed": seed,
                 "train_start": fold_info.train_start.strftime("%Y-%m-%d"),
                 "train_end": fold_info.train_end.strftime("%Y-%m-%d"),
@@ -594,11 +982,37 @@ class GRUTrainer:
                     "valid_loss": list(model.history["valid_loss"]),
                     "valid_rank_ic": list(model.history["valid_rank_ic"]),
                 },
-            })
+                "feature_selection_summary": feature_selection_summary,
+            }
 
             # 验证集预测
             preds = model.predict(valid_loader)
             seed_oof_preds.append(preds)
+
+            try:
+                perm_df = self._compute_permutation_importance(
+                    model=model,
+                    valid_ds=valid_ds,
+                    baseline_preds=preds,
+                    rank_channel_idx=model.rank_channel_idx,
+                    max_features=min(30, len(self.feature_cols)),
+                    seed=seed,
+                )
+            except Exception as e:
+                logger.warning(f"Single_Full seed={seed} 置换重要性计算失败: {e}", exc_info=True)
+                perm_df = pd.DataFrame()
+
+            if not perm_df.empty:
+                perm_dir = config.train.save_dir / "single_full" / "permutation_importance"
+                perm_dir.mkdir(parents=True, exist_ok=True)
+                perm_path = perm_dir / f"permutation_importance_seed_{seed}.parquet"
+                perm_df.to_parquet(perm_path, index=False)
+                seed_record["permutation_importance_path"] = str(perm_path)
+                seed_record["permutation_importance_top"] = (
+                    perm_df.head(10)[["feature", "rank_ic_drop"]].to_dict("records")
+                )
+
+            fold_train_info.append(seed_record)
 
             # 持久化
             if save_models:
@@ -616,7 +1030,8 @@ class GRUTrainer:
 
         # 组装 OOF（共享张量方式获取元数据，不额外分配内存）
         valid_ds_meta = GRUTensorDataset(
-            features=self.feature_tensor,
+            cont_features=self.feature_tensor,
+            cat_features=self.cat_feature_tensor,
             labels=self.label_tensor,
             dates=self.dates_arr,
             codes=self.codes_arr,
@@ -640,6 +1055,12 @@ class GRUTrainer:
             oof_df[f"y_true_{col}"] = true_vals
             oof_df[f"y_pred_{col}"] = avg_preds[:, i]
 
+            pnl_source = self.pnl_return_arrays.get(col)
+            if pnl_source is not None:
+                oof_df[f"pnl_return_{col}"] = pnl_source[valid_ds_meta.valid_indices]
+            else:
+                oof_df[f"pnl_return_{col}"] = true_vals
+
         # 主信号
         rank_idx = 0
         for i, col in enumerate(target_cols):
@@ -649,6 +1070,10 @@ class GRUTrainer:
         rank_col = target_cols[rank_idx]
         oof_df["y_pred"] = oof_df[f"y_pred_{rank_col}"]
         oof_df["y_true"] = oof_df[f"y_true_{rank_col}"]
+        if f"pnl_return_{rank_col}" in oof_df.columns:
+            oof_df["pnl_return"] = oof_df[f"pnl_return_{rank_col}"]
+        else:
+            oof_df["pnl_return"] = oof_df["y_true"]
 
         # 保存
         if save_oof and not oof_df.empty:

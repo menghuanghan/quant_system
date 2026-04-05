@@ -400,13 +400,14 @@ class GRUTensorDataset(Dataset):
     PyTorch 3D 张量滑窗构造器（零拷贝版本）
 
     职责:
-    - 接收 Trainer 预计算的共享 Feature/Label 张量（不复制数据）
+    - 接收 Trainer 预计算的共享连续/类别/标签张量（不复制数据）
     - 校验每个 index 对应的股票在它前面是否有连续 seq_len-1 天历史
-    - __getitem__ 返回 (X: (seq_len, num_features), Y: (num_targets,))
+    - __getitem__ 返回 (x_cont: (seq_len, n_cont), x_cat: (seq_len, n_cat), y: (num_targets,))
     - 多 Fold / 多种子间共享同一份张量，避免重复分配内存
 
     Args:
-        features: (N_total, num_features) 共享特征张量（由 Trainer 预计算）
+        cont_features: (N_total, n_cont) 共享连续特征张量（由 Trainer 预计算）
+        cat_features: (N_total, n_cat) 共享类别特征张量（可选）
         labels: (N_total, num_targets) 共享标签张量
         dates: (N_total,) 日期元数据 (numpy datetime64)
         codes: (N_total,) 股票代码元数据 (numpy str)
@@ -418,7 +419,8 @@ class GRUTensorDataset(Dataset):
 
     def __init__(
         self,
-        features: torch.Tensor,
+        cont_features: torch.Tensor,
+        cat_features: Optional[torch.Tensor],
         labels: torch.Tensor,
         dates: np.ndarray,
         codes: np.ndarray,
@@ -429,10 +431,11 @@ class GRUTensorDataset(Dataset):
     ):
         self.seq_len = seq_len
         self.target_cols = target_cols
-        self.device = str(features.device)
+        self.device = str(cont_features.device)
 
         # ---- 共享引用（零拷贝，不复制数据） ----
-        self.features = features
+        self.cont_features = cont_features
+        self.cat_features = cat_features
         self.labels = labels
         self.dates = dates
         self.codes = codes
@@ -443,7 +446,8 @@ class GRUTensorDataset(Dataset):
         logger.info(
             f"GRUTensorDataset: "
             f"样本={len(self.valid_indices):,}, "
-            f"特征={features.shape[1]}, "
+            f"连续特征={cont_features.shape[1]}, "
+            f"类别特征={0 if cat_features is None else cat_features.shape[1]}, "
             f"目标={labels.shape[1]}, "
             f"seq_len={seq_len}, "
             f"device={self.device}"
@@ -495,15 +499,19 @@ class GRUTensorDataset(Dataset):
     def __len__(self) -> int:
         return len(self.valid_indices)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         T = int(self.valid_indices[idx])
         start = T - self.seq_len + 1
 
         # GPU 上直接切片，零拷贝
-        X = self.features[start: T + 1]          # (seq_len, num_features)
-        Y = self.labels[T]                        # (num_targets,)
+        x_cont = self.cont_features[start: T + 1]     # (seq_len, n_cont)
+        if self.cat_features is not None:
+            x_cat = self.cat_features[start: T + 1]   # (seq_len, n_cat)
+        else:
+            x_cat = torch.empty((self.seq_len, 0), device=self.cont_features.device, dtype=torch.long)
+        y = self.labels[T]                             # (num_targets,)
 
-        return X, Y
+        return x_cont, x_cat, y
 
     # ---- 辅助方法 ----
 

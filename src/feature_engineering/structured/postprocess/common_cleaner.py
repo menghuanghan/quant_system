@@ -78,6 +78,10 @@ class CommonCleaner:
         # Step 1: 类别编码（删除字符串列，手动编码无索引列）
         df = self._encode_categorical_columns(df)
         gc.collect()
+
+        # Step 1.5: 类别列规范化（embedding-ready）
+        df = self._prepare_categorical_columns(df)
+        gc.collect()
         
         # Step 2: 无限值处理
         df = self._replace_infinite_values(df)
@@ -178,6 +182,12 @@ class CommonCleaner:
         # 2. 手动编码无索引的类别列
         for col, mapping in self.config.manual_encode_mapping.items():
             if col in df.columns:
+                dtype_str = str(df[col].dtype).lower()
+                # 若列已是数值编码（如上游已完成编码），跳过 map 以免误映射为 -1
+                if 'int' in dtype_str or 'float' in dtype_str:
+                    encoded_cols.append(col)
+                    continue
+
                 # 使用映射进行编码，未知值填充为 -1
                 if self.use_gpu:
                     # cuDF 需要转换为 pandas 处理后再转回
@@ -213,6 +223,51 @@ class CommonCleaner:
         self.stats["remaining_string_cols"] = remaining_str_cols
         
         return df
+
+    def _prepare_categorical_columns(self, df: Any) -> Any:
+        """
+        类别列规范化（embedding-ready）
+
+        约束：
+        - market / industry_idx / sw_l1_idx 统一为 int32
+        - 缺失值统一填充为 category_unknown_value（默认 -1）
+        - 显式记录保护列，供后续步骤避免误处理
+        """
+        logger.info("  📊 Step 1.5: 类别列规范化 (embedding-ready)")
+
+        import pandas as pd
+
+        cat_cols = [c for c in self.config.categorical_cols if c in df.columns]
+        if not cat_cols:
+            logger.info("     ✓ 无需规范化的类别列")
+            self.stats["protected_categorical_cols"] = []
+            return df
+
+        unknown_val = int(getattr(self.config, "category_unknown_value", -1))
+        filled_counts: Dict[str, int] = {}
+
+        for col in cat_cols:
+            if self.use_gpu:
+                col_pd = df[col].to_pandas() if hasattr(df[col], 'to_pandas') else pd.Series(df[col])
+                numeric = pd.to_numeric(col_pd, errors='coerce')
+                na_count = int(numeric.isna().sum())
+                df[col] = numeric.fillna(unknown_val).astype('int32').values
+            else:
+                numeric = pd.to_numeric(df[col], errors='coerce')
+                na_count = int(numeric.isna().sum())
+                df[col] = numeric.fillna(unknown_val).astype('int32')
+
+            if na_count > 0:
+                filled_counts[col] = na_count
+
+        logger.info(f"     ✓ 保护类别列: {cat_cols}")
+        if filled_counts:
+            logger.info(f"     ✓ 缺失填充为 {unknown_val}: {filled_counts}")
+
+        self.stats["protected_categorical_cols"] = cat_cols
+        self.stats["categorical_unknown_value"] = unknown_val
+        self.stats["categorical_filled_counts"] = filled_counts
+        return df
     
     def _replace_infinite_values(self, df: Any) -> Any:
         """
@@ -223,7 +278,9 @@ class CommonCleaner:
         logger.info("  📊 Step 2: 无限值处理 (inf -> NaN)")
         
         # 获取数值列
-        numeric_cols = self._get_numeric_columns(df)
+        protected = set(getattr(self.config, "categorical_cols", []))
+        label_cols = set(self._get_label_columns(df))
+        numeric_cols = [c for c in self._get_numeric_columns(df) if c not in protected and c not in label_cols]
         
         inf_count = 0
         neg_inf_count = 0
@@ -267,30 +324,12 @@ class CommonCleaner:
     def _clean_labels(self, df: Any) -> Any:
         """
         标签清洗
-        
-        删除主要标签 (ret_5d) 为 NaN 的行，因为没有标签的数据对监督学习无意义。
+
+        标签列不参与后处理，保留原始 NaN（供训练时 masked loss 使用）。
         """
-        logger.info(f"  📊 Step 3: 标签清洗 (删除 {self.config.primary_label} 为 NaN 的行)")
-        
-        primary_label = self.config.primary_label
-        
-        if primary_label not in df.columns:
-            logger.warning(f"     ⚠️ 主标签列 '{primary_label}' 不存在，跳过")
-            return df
-        
-        original_rows = len(df)
-        
-        # 删除标签为 NaN 的行
-        df = df.dropna(subset=[primary_label])
-        
-        final_rows = len(df)
-        removed_rows = original_rows - final_rows
-        
-        logger.info(f"     ✓ 删除 NaN 标签行: {removed_rows:,}")
-        logger.info(f"     ✓ 保留有效行: {final_rows:,}")
-        
-        self.stats["label_nan_removed"] = removed_rows
-        
+        logger.info("  📊 Step 3: 标签清洗已禁用 (标签列不参与后处理)")
+        self.stats["label_cleaning_skipped"] = True
+        self.stats["label_nan_removed"] = 0
         return df
     
     def _drop_constant_columns(self, df: Any) -> Any:
@@ -302,7 +341,9 @@ class CommonCleaner:
         logger.info("  📊 Step 4: 静态列剔除 (std == 0)")
         
         # 获取数值列
-        numeric_cols = self._get_numeric_columns(df)
+        protected = set(getattr(self.config, "categorical_cols", []))
+        label_cols = set(self._get_label_columns(df))
+        numeric_cols = [c for c in self._get_numeric_columns(df) if c not in protected and c not in label_cols]
         
         constant_cols = []
         
@@ -342,8 +383,22 @@ class CommonCleaner:
         
         self.stats["constant_cols_dropped"] = constant_cols
         self.stats["constant_cols_count"] = len(constant_cols)
+        self.stats["constant_cols_protected"] = list(protected)
         
         return df
+
+    @staticmethod
+    def _get_label_columns(df: Any) -> List[str]:
+        """识别标签列（后处理中需完全隔离）。"""
+        label_prefixes = (
+            'ret_',
+            'label_',
+            'excess_ret_',
+            'rank_ret_',
+            'sharpe_',
+            'label_bin_',
+        )
+        return [c for c in df.columns if c.startswith(label_prefixes)]
     
     def _get_numeric_columns(self, df: Any) -> List[str]:
         """获取数值类型的列"""

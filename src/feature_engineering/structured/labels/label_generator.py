@@ -75,7 +75,8 @@ class LabelGenerator:
         # 确保按股票和日期排序
         df = df.sort_values(['ts_code', 'trade_date'])
         
-        price_col = 'close_hfq' if 'close_hfq' in df.columns else 'close'
+        price_col = self._select_execution_price_col(df)
+        self._validate_vwap_hfq_consistency(df, price_col)
         
         # 1. 生成未来 N 日收益率
         for days in self.config.forward_days:
@@ -141,13 +142,21 @@ class LabelGenerator:
     ) -> Any:
         """
         计算未来 N 日收益率
-        
-        ret_Nd = (Close_{t+N} - Close_t) / Close_t
-        
-        使用 shift(-N) 实现"偷看未来"
+
+        执行口径（T+1 入场）：
+            ret_Nd = Price_{t+N+1} / Price_{t+1} - 1
+
+        其中 Price 默认优先使用 vwap_hfq。
+        分母（t+1 入场价）无效（NaN/<=0）时，标签严格置 NaN。
+
+        说明：
+            - N=1 => t+1 买入, t+2 卖出（真实持有 1 天）
+            - N=5 => t+1 买入, t+6 卖出（真实持有 5 天）
         """
         # 确保按 ts_code 和 trade_date 排序
         df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+        exit_offset = int(forward_days) + 1
         
         # cuDF 兼容的 shift 操作：
         # 1. 先计算 shift 结果，保存为临时列
@@ -158,20 +167,41 @@ class LabelGenerator:
             # 使用 apply + shift 替代 transform
             grouped = df.groupby('ts_code', sort=False)
             
-            # 直接使用 shift（cuDF 原生支持）
-            shift_col = f'_future_{forward_days}'
-            df[shift_col] = grouped[price_col].shift(-forward_days)
-            
-            # 计算收益率
-            df[output_col] = (df[shift_col] - df[price_col]) / df[price_col]
-            
+            # T+1 入场价与 T+N 退出价
+            entry_col = f'_entry_t1_{forward_days}'
+            exit_col = f'_exit_tn1_{forward_days}'
+            df[entry_col] = grouped[price_col].shift(-1)
+            df[exit_col] = grouped[price_col].shift(-exit_offset)
+
+            # 收益率
+            df[output_col] = df[exit_col] / df[entry_col] - 1.0
+
+            # 严格无效条件：分母或分子无效都置 NaN（分母规则为硬约束）
+            invalid_mask = (
+                df[entry_col].isna() |
+                (df[entry_col] <= 0) |
+                df[exit_col].isna() |
+                (df[exit_col] <= 0)
+            )
+            df[output_col] = df[output_col].where(~invalid_mask, other=np.nan)
+
             # 删除临时列 (使用 del 避免 cuDF 深拷贝)
-            del df[shift_col]
+            del df[entry_col]
+            del df[exit_col]
         else:
             # pandas 使用 transform
             grouped = df.groupby('ts_code', sort=False)
-            future_price = grouped[price_col].transform(lambda x: x.shift(-forward_days))
-            df[output_col] = (future_price - df[price_col]) / df[price_col]
+            entry_price = grouped[price_col].transform(lambda x: x.shift(-1))
+            future_price = grouped[price_col].transform(lambda x: x.shift(-exit_offset))
+            df[output_col] = future_price / entry_price - 1.0
+
+            invalid_mask = (
+                entry_price.isna() |
+                (entry_price <= 0) |
+                future_price.isna() |
+                (future_price <= 0)
+            )
+            df.loc[invalid_mask, output_col] = np.nan
         
         # 统计
         if self.use_gpu:
@@ -179,9 +209,79 @@ class LabelGenerator:
         else:
             null_count = df[output_col].isna().sum()
         
-        logger.info(f"    ✓ {output_col}: 缺失 {null_count:,} 行 (末尾 {forward_days} 天无未来数据)")
+        logger.info(f"    ✓ {output_col}: 缺失 {null_count:,} 行 (末尾 {exit_offset} 天无未来数据)")
         
         return df
+
+    def _select_execution_price_col(self, df: Any) -> str:
+        """
+        选择标签执行价列。
+
+        优先级：vwap_hfq > vwap > close_hfq > close
+        """
+        priority = ['vwap_hfq', 'vwap', 'close_hfq', 'close']
+        for col in priority:
+            if col in df.columns:
+                if col != 'vwap_hfq':
+                    logger.warning(f"  ⚠️ 标签执行价未命中 vwap_hfq，当前使用 {col}")
+                else:
+                    logger.info("  ✓ 标签执行价: vwap_hfq (T+1 执行口径)")
+                return col
+        raise ValueError("标签生成失败：缺少执行价列（vwap_hfq/vwap/close_hfq/close）")
+
+    def _validate_vwap_hfq_consistency(self, df: Any, price_col: str) -> None:
+        """
+        轻量校验 vwap_hfq 与 amount/vol/adj_factor 的一致性（抽样）。
+
+        仅在使用 vwap_hfq 且必要列齐全时执行。
+        """
+        if price_col != 'vwap_hfq':
+            return
+
+        required_cols = ['vwap_hfq', 'amount', 'vol', 'adj_factor']
+        if any(col not in df.columns for col in required_cols):
+            miss = [c for c in required_cols if c not in df.columns]
+            logger.warning(f"  ⚠️ 跳过 vwap_hfq 一致性校验，缺少列: {miss}")
+            return
+
+        try:
+            if self.use_gpu and hasattr(df, 'to_pandas'):
+                sample = df[required_cols].to_pandas()
+            else:
+                sample = df[required_cols].copy()
+
+            sample = sample.dropna()
+            if sample.empty:
+                return
+
+            if len(sample) > 10000:
+                sample = sample.sample(n=10000, random_state=42)
+
+            vol_shares = sample['vol'].astype(float) * 100.0
+            valid = vol_shares > 0
+            if valid.sum() == 0:
+                return
+
+            vwap_raw = np.where(valid, sample['amount'].astype(float) / vol_shares, np.nan)
+            vwap_hfq_rebuild = vwap_raw * sample['adj_factor'].astype(float)
+            target = sample['vwap_hfq'].astype(float).to_numpy()
+
+            rel_err = np.abs(vwap_hfq_rebuild - target) / (np.abs(target) + 1e-8)
+            rel_err = rel_err[np.isfinite(rel_err)]
+            if rel_err.size == 0:
+                return
+
+            mean_rel = float(np.mean(rel_err))
+            p95_rel = float(np.percentile(rel_err, 95))
+            self.stats['vwap_hfq_rebuild_mean_rel_err'] = mean_rel
+            self.stats['vwap_hfq_rebuild_p95_rel_err'] = p95_rel
+            logger.info(
+                "  ✓ vwap_hfq 抽样一致性: mean_rel_err=%.4e, p95_rel_err=%.4e",
+                mean_rel,
+                p95_rel,
+            )
+        except Exception as e:
+            logger.warning(f"  ⚠️ vwap_hfq 一致性校验失败（已跳过）: {e}")
     
     def _clip_labels(self, df: Any) -> Any:
         """
@@ -250,7 +350,7 @@ class LabelGenerator:
             )
             df['future_suspended_days'] = future_suspended
         
-        # 标记无效样本
+        # 标记无效样本（停牌窗口）
         label_col = f'ret_{primary_days}d'
         if label_col in df.columns:
             invalid_mask = df['future_suspended_days'] > max_suspended
@@ -266,11 +366,71 @@ class LabelGenerator:
                 df.loc[invalid_mask, label_col] = np.nan
             
             logger.info(f"    ✓ 标记无效样本: {invalid_count:,} 行 (未来 {primary_days} 日停牌 > {max_suspended} 天)")
+
+        # 标记 T+1 不可交易样本（涨停/停牌）
+        df = self._apply_t1_tradeability_mask(df)
         
         # 清理临时列 (使用 del 避免 cuDF 深拷贝)
         del df['is_suspended_day']
         del df['future_suspended_days']
         
+        return df
+
+    def _apply_t1_tradeability_mask(self, df: Any) -> Any:
+        """
+        T+1 可交易性掩码：
+        - T+1 一字涨停（is_limit_up.shift(-1)==1）
+        - T+1 停牌（vol.shift(-1)<=0）
+
+        命中后将当日产生的所有 ret_* 标签置 NaN。
+        """
+        ret_cols = [c for c in df.columns if c.startswith('ret_') and c.endswith('d')]
+        if not ret_cols:
+            return df
+
+        grouped = df.groupby('ts_code', sort=False)
+
+        # T+1 停牌
+        t1_suspended = grouped['vol'].shift(-1) <= 0
+
+        # T+1 一字涨停（优先使用 is_limit_up）
+        if 'is_limit_up' in df.columns:
+            t1_limit_up = grouped['is_limit_up'].shift(-1) == 1
+            limit_col_used = 'is_limit_up'
+        elif 'is_limit' in df.columns:
+            # 回退：若无方向信息，使用 is_limit 作为保守不可交易近似
+            t1_limit_up = grouped['is_limit'].shift(-1) == 1
+            limit_col_used = 'is_limit'
+            logger.warning("    ⚠️ 缺少 is_limit_up，使用 is_limit 近似 T+1 不可交易掩码")
+        else:
+            if self.use_gpu:
+                import cudf
+                t1_limit_up = cudf.Series([False] * len(df), index=df.index)
+            else:
+                import pandas as pd
+                t1_limit_up = pd.Series(False, index=df.index)
+            limit_col_used = 'none'
+            logger.warning("    ⚠️ 缺少 is_limit_up/is_limit，T+1 涨停掩码未生效")
+
+        invalid_buy_mask = t1_limit_up | t1_suspended
+
+        if self.use_gpu:
+            invalid_count = int(invalid_buy_mask.sum())
+            for col in ret_cols:
+                df[col] = df[col].where(~invalid_buy_mask, other=np.nan)
+        else:
+            invalid_count = int(invalid_buy_mask.sum())
+            df.loc[invalid_buy_mask, ret_cols] = np.nan
+
+        logger.info(
+            f"    ✓ T+1 可交易性掩码: 失效 {invalid_count:,} 行 "
+            f"(limit_col={limit_col_used}, ret_cols={len(ret_cols)})"
+        )
+
+        self.stats['t1_tradeability_invalid_count'] = invalid_count
+        self.stats['t1_tradeability_limit_col_used'] = limit_col_used
+        self.stats['t1_tradeability_ret_cols'] = ret_cols
+
         return df
     
     def _generate_class_labels(self, df: Any) -> Any:
@@ -368,7 +528,13 @@ class LabelGenerator:
         parquet_path = Path(parquet_path)
         
         # 读取需要的基础列（包含 return_1d 用于夏普标签计算）
-        base_cols = ['ts_code', 'trade_date', 'close_hfq', 'is_trading', 'return_1d', 'vol']
+        base_cols = [
+            'ts_code', 'trade_date',
+            'vwap_hfq', 'vwap', 'close_hfq', 'close',
+            'amount', 'vol', 'adj_factor',
+            'is_limit_up', 'is_limit',
+            'is_trading', 'return_1d',
+        ]
         available_cols = []
         for col in base_cols:
             try:
@@ -380,7 +546,8 @@ class LabelGenerator:
         df = pd_lib.read_parquet(str(parquet_path), columns=available_cols)
         df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
         
-        price_col = 'close_hfq' if 'close_hfq' in df.columns else 'close'
+        price_col = self._select_execution_price_col(df)
+        self._validate_vwap_hfq_consistency(df, price_col)
         
         # ============================
         # 1. 生成基础收益率标签

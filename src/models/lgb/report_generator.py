@@ -25,6 +25,7 @@ from ..config import (
     TrainConfig,
 )
 from ..metrics.evaluator import QuantEvaluator
+from ..metrics import infer_pnl_return_col, parse_holding_period_days
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,20 @@ class TrainingReportGenerator:
     def _evaluate_all_targets(self) -> None:
         """评估所有标签"""
         for target_col, oof_df in self.oof_dict.items():
+            preferred_return_col = f"pnl_return_{target_col}"
+            if preferred_return_col not in oof_df.columns:
+                preferred_return_col = "pnl_return" if "pnl_return" in oof_df.columns else None
+
+            if preferred_return_col is None:
+                inferred = infer_pnl_return_col(target_col, available_cols=oof_df.columns)
+                preferred_return_col = inferred if inferred in oof_df.columns else None
+
             metrics = self.evaluator.evaluate(
                 oof_df,
                 y_pred_col="y_pred",
                 y_true_col="y_true",
+                return_col=preferred_return_col,
+                holding_period_days=parse_holding_period_days(target_col, default=1),
             )
             self.evaluation_results[target_col] = metrics
     

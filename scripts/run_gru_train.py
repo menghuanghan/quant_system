@@ -35,6 +35,9 @@ GRU 多任务模型训练入口脚本
     --hidden-size: GRU 隐层大小
     --num-layers: GRU 层数
     --learning-rate: 学习率
+    --dropout: 网络 dropout 覆盖值
+    --weight-decay: AdamW weight_decay 覆盖值
+    --stationary-only / --no-stationary-only: 是否仅做平稳性筛选
     --no-save: 不保存模型
     --no-evaluate: 不进行 OOF 评估
     --no-gpu: 禁用 GPU
@@ -56,7 +59,7 @@ from src.models.gru import (
     GRUConfig,
     GRUTrainer,
 )
-from src.models.metrics import QuantEvaluator
+from src.models.metrics import QuantEvaluator, infer_pnl_return_col, parse_holding_period_days
 
 # 配置日志
 log_dir = PROJECT_ROOT / "logs" / "models"
@@ -148,20 +151,45 @@ def parse_args():
     parser.add_argument(
         "--hidden-size",
         type=int,
-        default=64,
-        help="GRU 隐层大小，默认 64",
+        default=None,
+        help="GRU 隐层大小（默认使用配置值）",
     )
     parser.add_argument(
         "--num-layers",
         type=int,
-        default=2,
-        help="GRU 层数，默认 2",
+        default=None,
+        help="GRU 层数（默认使用配置值）",
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
         default=5e-4,
         help="学习率，默认 5e-4",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="覆盖网络 dropout（默认使用配置值）",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=None,
+        help="覆盖 AdamW weight_decay（默认使用配置值）",
+    )
+    parser.add_argument(
+        "--stationary-only",
+        dest="stationary_only",
+        action="store_true",
+        default=True,
+        help="仅使用平稳性硬筛选（默认开启）",
+    )
+    parser.add_argument(
+        "--no-stationary-only",
+        dest="stationary_only",
+        action="store_false",
+        help="关闭 stationary-only，恢复预测能力硬筛选",
     )
     parser.add_argument(
         "--no-save",
@@ -250,15 +278,22 @@ def main():
     config.split.data_end_date = args.data_end_date
 
     # 网络
-    config.network.hidden_size = args.hidden_size
-    config.network.num_layers = args.num_layers
+    if args.hidden_size is not None:
+        config.network.hidden_size = args.hidden_size
+    if args.num_layers is not None:
+        config.network.num_layers = args.num_layers
     config.network.num_targets = len(args.targets)
+    if args.dropout is not None:
+        config.network.dropout = args.dropout
 
     # 训练
     config.train.epochs = args.epochs
     config.train.batch_size = args.batch_size
     config.train.learning_rate = args.learning_rate
     config.train.max_lr = args.learning_rate * 2  # OneCycleLR max_lr
+    if args.weight_decay is not None:
+        config.train.weight_decay = args.weight_decay
+    config.train.stationary_only = args.stationary_only
 
     # 动态设置损失权重
     n_targets = len(args.targets)
@@ -300,9 +335,12 @@ def main():
         logger.info(f"Single_Full: 训练用全部数据(保留最后1月做早停)")
     logger.info(f"Epochs: {args.epochs}")
     logger.info(f"Batch Size: {args.batch_size}")
-    logger.info(f"Hidden Size: {args.hidden_size}")
-    logger.info(f"Num Layers: {args.num_layers}")
+    logger.info(f"Hidden Size: {config.network.hidden_size}")
+    logger.info(f"Num Layers: {config.network.num_layers}")
     logger.info(f"Learning Rate: {args.learning_rate}")
+    logger.info(f"Dropout: {config.network.dropout}")
+    logger.info(f"Weight Decay: {config.train.weight_decay}")
+    logger.info(f"Stationary-Only: {config.train.stationary_only}")
     logger.info(f"GPU: {not args.no_gpu}")
     logger.info(f"数据范围(逻辑边界): {args.data_start_date} ~ {args.data_end_date}")
     logger.info(f"损失权重: {loss_weights}")
@@ -315,6 +353,13 @@ def main():
     # ---- 加载数据 ----
     logger.info("加载训练数据...")
     trainer.load_data()
+    if getattr(trainer, "feature_selection_result", None) is not None:
+        fs_result = trainer.feature_selection_result
+        logger.info(
+            "GRU 特征筛选工件: %s | 连续特征数: %d",
+            fs_result.artifact_dir,
+            len(fs_result.selected_features),
+        )
 
     # ---- 验证目标标签 ----
     valid_targets = [t for t in args.targets if t in trainer.loaded_columns]
@@ -348,20 +393,38 @@ def main():
         for col in valid_targets:
             if f"y_pred_{col}" in oof_df.columns and f"y_true_{col}" in oof_df.columns:
                 logger.info(f"\n评估目标: {col}")
+
+                return_col = f"pnl_return_{col}"
+                if return_col not in oof_df.columns:
+                    return_col = "pnl_return" if "pnl_return" in oof_df.columns else None
+                if return_col is None:
+                    inferred = infer_pnl_return_col(col, available_cols=oof_df.columns)
+                    return_col = inferred if inferred in oof_df.columns else None
+
                 evaluator.print_report(
                     oof_df,
                     y_pred_col=f"y_pred_{col}",
                     y_true_col=f"y_true_{col}",
+                    return_col=return_col,
+                    holding_period_days=parse_holding_period_days(col, default=1),
                     target_name=col,
                 )
 
         # 综合评估（主信号 rank 通道）
         if "y_pred" in oof_df.columns:
             logger.info(f"\n综合评估（主信号）:")
+            rank_target_col = next((c for c in valid_targets if c.startswith("rank")), valid_targets[0])
+            main_return_col = "pnl_return" if "pnl_return" in oof_df.columns else None
+            if main_return_col is None:
+                inferred = infer_pnl_return_col(rank_target_col, available_cols=oof_df.columns)
+                main_return_col = inferred if inferred in oof_df.columns else None
+
             evaluator.print_report(
                 oof_df,
                 y_pred_col="y_pred",
                 y_true_col="y_true",
+                return_col=main_return_col,
+                holding_period_days=parse_holding_period_days(rank_target_col, default=1),
                 target_name="主信号 (rank)",
             )
 

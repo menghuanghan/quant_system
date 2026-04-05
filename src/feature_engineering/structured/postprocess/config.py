@@ -51,6 +51,16 @@ class CommonCleanConfig:
         },
     })
 
+    # embedding-ready 类别列保护（用于 GRU 双轨输入）
+    categorical_cols: List[str] = field(default_factory=lambda: [
+        "market",
+        "industry_idx",
+        "sw_l1_idx",
+    ])
+
+    # 缺失/未知类别统一编码
+    category_unknown_value: int = -1
+
 
 @dataclass
 class LGBConfig:
@@ -298,7 +308,7 @@ class GRUConfig:
     # 这些列数值范围各异（百分比、比率、计数），需要统一到 N(0,1) 分布
     zscore_features: List[str] = field(default_factory=lambda: [
         # 价格收益率
-        "return_1d", "ret_1d",
+        "return_1d",
         # 换手率
         "turnover",
         # 技术指标 - 偏离度
@@ -314,11 +324,6 @@ class GRUConfig:
         "amplitude", "amplitude_5", "amplitude_10", "amplitude_20",
         # 技术指标 - 量比
         "volume_ratio_5", "volume_ratio_10", "volume_ratio_20",
-        # 技术指标 - 夏普
-        "sharpe_5d", "sharpe_10d", "sharpe_20d",
-        # 技术指标 - 超额收益
-        "excess_ret_5d", "excess_ret_10d",
-        "rank_ret_5d", "rank_ret_10d",
         # 相对强弱
         "rs_hs300", "rs_csi500",
         # 财务比率 - 估值
@@ -383,6 +388,16 @@ class GRUConfig:
     
     # 排序字段（用于时序连续性）
     sort_by: List[str] = field(default_factory=lambda: ["ts_code", "trade_date"])
+
+    # embedding-ready 类别列保护（严禁进入 clip / zscore）
+    categorical_cols: List[str] = field(default_factory=lambda: [
+        "market",
+        "industry_idx",
+        "sw_l1_idx",
+    ])
+
+    # 缺失/未知类别统一编码
+    category_unknown_value: int = -1
 
     # 若输入已按 sort_by 有序，则跳过重复排序
     skip_sort_if_already_sorted: bool = True

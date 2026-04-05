@@ -99,10 +99,27 @@ class MultiTaskLoss(nn.Module):
             total_loss: scalar
         """
         total = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
+        active_weight = 0.0
+
         for i, (fn, w) in enumerate(zip(self.loss_fns, self.weights)):
-            loss_i = fn(preds[:, i], targets[:, i])
+            target_i = targets[:, i]
+            pred_i = preds[:, i]
+
+            # 仅对有效标签计算损失（忽略 NaN/Inf）
+            valid_mask = torch.isfinite(target_i)
+            if not torch.any(valid_mask):
+                continue
+
+            loss_i = fn(pred_i[valid_mask], target_i[valid_mask])
             total = total + w * loss_i
-        return total
+            active_weight += w
+
+        # 极端场景：整个 batch 所有任务全是无效标签
+        if active_weight <= 0:
+            return (preds * 0.0).sum()
+
+        # 归一化，避免有效任务数变化导致 loss 尺度漂移
+        return total / active_weight
 
 
 class UncertaintyWeightedLoss(nn.Module):
@@ -143,11 +160,27 @@ class UncertaintyWeightedLoss(nn.Module):
         targets: torch.Tensor,
     ) -> torch.Tensor:
         total = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
+        active_tasks = 0
+
         for i, fn in enumerate(self.loss_fns):
-            loss_i = fn(preds[:, i], targets[:, i])
+            target_i = targets[:, i]
+            pred_i = preds[:, i]
+
+            # 仅对有效标签计算损失（忽略 NaN/Inf）
+            valid_mask = torch.isfinite(target_i)
+            if not torch.any(valid_mask):
+                continue
+
+            loss_i = fn(pred_i[valid_mask], target_i[valid_mask])
             precision = torch.exp(-2 * self.log_sigmas[i])
             total = total + precision * loss_i + self.log_sigmas[i]
-        return total
+            active_tasks += 1
+
+        # 极端场景：整个 batch 所有任务全是无效标签
+        if active_tasks == 0:
+            return (preds * 0.0).sum()
+
+        return total / float(active_tasks)
 
 
 # ============================================================================
@@ -198,11 +231,15 @@ class GRUModel(BaseModel):
         target_cols: List[str],
         num_features: int,
         config: GRUTrainConfig,
+        num_cont_features: Optional[int] = None,
+        num_cat_features: int = 0,
+        cat_cardinalities: Optional[List[int]] = None,
+        cat_embedding_dims: Optional[List[int]] = None,
         device: str = "cuda",
         seed: int = 42,
-        hidden_size: int = 64,
-        num_layers: int = 2,
-        dropout: float = 0.1,
+        hidden_size: int = 32,
+        num_layers: int = 1,
+        dropout: float = 0.2,
         use_attention: bool = True,
         name: str = "GRUModel",
     ):
@@ -210,6 +247,11 @@ class GRUModel(BaseModel):
 
         self.target_cols = target_cols
         self.num_features = num_features
+        self.num_cont_features = num_cont_features if num_cont_features is not None else num_features
+        self.num_cat_features = num_cat_features
+        self.cat_cardinalities = list(cat_cardinalities or [])
+        self.cat_embedding_dims = list(cat_embedding_dims or [])
+        self.dropout = float(dropout)
         self.config = config
         self.device = device
 
@@ -219,9 +261,13 @@ class GRUModel(BaseModel):
         # ---- 构建网络 ----
         self.network = MultiTaskGRUNetwork(
             num_features=num_features,
+            num_cont_features=self.num_cont_features,
+            num_cat_features=self.num_cat_features,
+            cat_cardinalities=self.cat_cardinalities,
+            cat_embedding_dims=self.cat_embedding_dims if self.cat_embedding_dims else None,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            dropout=dropout,
+            dropout=self.dropout,
             num_targets=len(target_cols),
             use_attention=use_attention,
         ).to(device)
@@ -280,9 +326,26 @@ class GRUModel(BaseModel):
 
         logger.info(
             f"GRUModel 初始化: targets={target_cols}, "
-            f"features={num_features}, seed={seed}, "
+            f"features={num_features} (cont={self.num_cont_features}, cat={self.num_cat_features}), seed={seed}, "
             f"rank_channel={self.rank_channel_idx}"
         )
+
+    @staticmethod
+    def _parse_batch(
+        batch: Union[List[torch.Tensor], Tuple[torch.Tensor, ...]],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        if not isinstance(batch, (list, tuple)):
+            raise ValueError("batch 必须是 tuple/list")
+
+        if len(batch) == 3:
+            x_cont, x_cat, y = batch
+            return x_cont, x_cat, y
+
+        if len(batch) == 2:
+            x_cont, y = batch
+            return x_cont, None, y
+
+        raise ValueError(f"不支持的 batch 格式，长度={len(batch)}")
 
     def _find_rank_channel(self) -> int:
         """找到 rank_ret_* / rank_* 通道的索引"""
@@ -412,6 +475,7 @@ class GRUModel(BaseModel):
             "epochs_trained": len(self.history['train_loss']),
             "target_cols": self.target_cols,
             "num_features": self.num_features,
+            "network_dropout": self.dropout,
         }
 
         return self
@@ -422,17 +486,21 @@ class GRUModel(BaseModel):
         total_loss = 0.0
         n_batches = 0
 
-        for batch_idx, (X, Y) in enumerate(train_loader):
-            if X.device != torch.device(self.device):
-                X = X.to(self.device, non_blocking=True)
-                Y = Y.to(self.device, non_blocking=True)
+        for batch_idx, batch in enumerate(train_loader):
+            x_cont, x_cat, y = self._parse_batch(batch)
+
+            if x_cont.device != torch.device(self.device):
+                x_cont = x_cont.to(self.device, non_blocking=True)
+                y = y.to(self.device, non_blocking=True)
+                if x_cat is not None:
+                    x_cat = x_cat.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad()
 
             if self.scaler is not None:
                 with autocast("cuda"):
-                    preds = self.network(X)       # (batch, num_targets)
-                    loss = self.criterion(preds, Y)
+                    preds = self.network(x_cont, x_cat)       # (batch, num_targets)
+                    loss = self.criterion(preds, y)
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -442,8 +510,8 @@ class GRUModel(BaseModel):
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                preds = self.network(X)
-                loss = self.criterion(preds, Y)
+                preds = self.network(x_cont, x_cat)
+                loss = self.criterion(preds, y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.network.parameters(), max_norm=self.config.grad_clip
@@ -481,23 +549,26 @@ class GRUModel(BaseModel):
         all_preds = []
         all_targets = []
 
-        for X, Y in valid_loader:
-            if X.device != torch.device(self.device):
-                X = X.to(self.device, non_blocking=True)
-                Y = Y.to(self.device, non_blocking=True)
+        for batch in valid_loader:
+            x_cont, x_cat, y = self._parse_batch(batch)
+            if x_cont.device != torch.device(self.device):
+                x_cont = x_cont.to(self.device, non_blocking=True)
+                y = y.to(self.device, non_blocking=True)
+                if x_cat is not None:
+                    x_cat = x_cat.to(self.device, non_blocking=True)
 
             if self.config.use_amp and self.device == "cuda":
                 with autocast("cuda"):
-                    preds = self.network(X)
-                    loss = self.criterion(preds, Y)
+                    preds = self.network(x_cont, x_cat)
+                    loss = self.criterion(preds, y)
             else:
-                preds = self.network(X)
-                loss = self.criterion(preds, Y)
+                preds = self.network(x_cont, x_cat)
+                loss = self.criterion(preds, y)
 
             total_loss += loss.item()
             n_batches += 1
             all_preds.append(preds.cpu())
-            all_targets.append(Y.cpu())
+            all_targets.append(y.cpu())
 
         all_preds_np = torch.cat(all_preds, dim=0).numpy()      # (N, num_targets)
         all_targets_np = torch.cat(all_targets, dim=0).numpy()
@@ -540,15 +611,28 @@ class GRUModel(BaseModel):
         all_preds = []
         loader = X
 
-        for batch_X, _ in loader:
-            if batch_X.device != torch.device(self.device):
-                batch_X = batch_X.to(self.device, non_blocking=True)
+        for batch in loader:
+            if not isinstance(batch, (list, tuple)):
+                raise ValueError("predict 输入 DataLoader 的 batch 必须为 tuple/list")
+
+            if len(batch) == 3:
+                batch_x_cont, batch_x_cat, _ = batch
+            elif len(batch) == 2:
+                batch_x_cont, _ = batch
+                batch_x_cat = None
+            else:
+                raise ValueError(f"不支持的 predict batch 长度={len(batch)}")
+
+            if batch_x_cont.device != torch.device(self.device):
+                batch_x_cont = batch_x_cont.to(self.device, non_blocking=True)
+                if batch_x_cat is not None:
+                    batch_x_cat = batch_x_cat.to(self.device, non_blocking=True)
 
             if self.config.use_amp and self.device == "cuda":
                 with autocast("cuda"):
-                    preds = self.network(batch_X)
+                    preds = self.network(batch_x_cont, batch_x_cat)
             else:
-                preds = self.network(batch_X)
+                preds = self.network(batch_x_cont, batch_x_cat)
 
             all_preds.append(preds.cpu().numpy())
 
@@ -572,8 +656,13 @@ class GRUModel(BaseModel):
             'history': self.history,
             'network_config': {
                 'num_features': self.network.num_features,
+                'num_cont_features': self.network.num_cont_features,
+                'num_cat_features': self.network.num_cat_features,
+                'cat_cardinalities': list(self.network.cat_cardinalities),
+                'cat_embedding_dims': list(self.network.cat_embedding_dims),
                 'hidden_size': self.network.hidden_size,
                 'num_layers': self.network.num_layers,
+                'dropout': self.dropout,
                 'num_targets': self.network.num_targets,
                 'use_attention': self.network.use_attention,
             },
@@ -607,16 +696,27 @@ class GRUModel(BaseModel):
 
         # 创建一个轻量 config（推断不需要训练参数）
         config = GRUTrainConfig()
+        legacy_dropout = checkpoint.get('train_info', {}).get('network_dropout', 0.2)
+        restored_dropout = float(
+            nc.get(
+                'dropout',
+                legacy_dropout,
+            )
+        )
 
         model = cls(
             target_cols=target_cols,
             num_features=num_features,
+            num_cont_features=nc.get('num_cont_features', num_features),
+            num_cat_features=nc.get('num_cat_features', 0),
+            cat_cardinalities=nc.get('cat_cardinalities', []),
+            cat_embedding_dims=nc.get('cat_embedding_dims', []),
             config=config,
             device=device,
             seed=seed,
             hidden_size=nc['hidden_size'],
             num_layers=nc['num_layers'],
-            dropout=0.0,  # 推断时关闭 dropout
+            dropout=restored_dropout,
             use_attention=nc['use_attention'],
             name=name,
         )
@@ -649,6 +749,7 @@ class GRUModel(BaseModel):
     def __repr__(self) -> str:
         return (
             f"GRUModel(name={self.name}, fitted={self.is_fitted}, "
-            f"features={self.num_features}, targets={len(self.target_cols)}, "
+            f"features={self.num_features} (cont={self.num_cont_features}, cat={self.num_cat_features}), "
+            f"targets={len(self.target_cols)}, "
             f"best_rank_ic={self.best_rank_ic:.4f})"
         )
