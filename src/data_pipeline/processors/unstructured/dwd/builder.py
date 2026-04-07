@@ -3,7 +3,9 @@
 
 核心逻辑：
 1. 以 dwd_stock_price (trade_date, ts_code) 作为最终骨架
-2. 非结构化数据先做 date + 1天（防未来泄露）
+2. 日期对齐规则：
+    - 全量模式：非结构化数据先做 date + 1天（防未来泄露）
+    - 增量模式：不做 date 漂移（使用原始 date）
 3. 将“自然日”映射到“下一个有效交易日”
 4. 对齐并聚合到 (trade_date, ts_code)
     - 个股特征（ann/events/ex/reports）: 同键 score 求和
@@ -19,6 +21,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -40,6 +43,14 @@ FEATURE_COLUMNS = [
 ]
 
 
+def _normalize_iso_date(date_str: str) -> str:
+    """归一化日期为 YYYY-MM-DD。"""
+    s = str(date_str).strip()
+    if len(s) == 8 and s.isdigit():
+        return datetime.strptime(s, "%Y%m%d").strftime("%Y-%m-%d")
+    return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+
+
 @dataclass
 class UnstructuredDWDConfig:
     """非结构化 DWD 构建配置"""
@@ -47,6 +58,10 @@ class UnstructuredDWDConfig:
     unstructured_processed_dir: str = "data/processed/unstructured"
     structured_dwd_dir: str = "data/processed/structured/dwd"
     output_file: str = "data/processed/unstructured/dwd_unstructured.parquet"
+    incremental_mode: bool = False
+    latest_date: Optional[str] = None
+    unstructured_increment_processed_dir: str = "data/processed/unstructured_increment"
+    structured_increment_dwd_dir: str = "data/processed/structured_increment/dwd"
     compression: str = "snappy"
 
 
@@ -55,13 +70,37 @@ class UnstructuredDWDBuilder:
 
     def __init__(self, config: Optional[UnstructuredDWDConfig] = None):
         self.config = config or UnstructuredDWDConfig()
+        self.incremental_mode = bool(self.config.incremental_mode)
+        self.latest_date: Optional[str] = None
+        self._date_shift_days = 0 if self.incremental_mode else 1
 
         self.unstructured_processed_dir = Path(self.config.unstructured_processed_dir)
         self.structured_dwd_dir = Path(self.config.structured_dwd_dir)
+        self.unstructured_increment_processed_dir = Path(self.config.unstructured_increment_processed_dir)
+        self.structured_increment_dwd_dir = Path(self.config.structured_increment_dwd_dir)
         self.output_path = Path(self.config.output_file)
 
-        self.price_path = self.structured_dwd_dir / "dwd_stock_price.parquet"
-        self.industry_path = self.structured_dwd_dir / "dwd_stock_industry.parquet"
+        self.input_provider = None
+        if self.incremental_mode:
+            if not self.config.latest_date:
+                raise ValueError("incremental_mode=True 时 latest_date 不能为空")
+
+            self.latest_date = _normalize_iso_date(self.config.latest_date)
+            partition_dir = self.structured_increment_dwd_dir / f"date={self.latest_date}"
+            self.price_path = partition_dir / "dwd_stock_price.parquet"
+            self.industry_path = partition_dir / "dwd_stock_industry.parquet"
+
+            from .increment_duckdb_merger import DuckDBIncrementProcessedProvider
+
+            self.input_provider = DuckDBIncrementProcessedProvider(
+                full_processed_root=self.unstructured_processed_dir,
+                increment_processed_root=self.unstructured_increment_processed_dir,
+                latest_date=self.latest_date,
+                cache_enabled=True,
+            )
+        else:
+            self.price_path = self.structured_dwd_dir / "dwd_stock_price.parquet"
+            self.industry_path = self.structured_dwd_dir / "dwd_stock_industry.parquet"
 
         self._calendar_map: Dict[pd.Timestamp, str] = {}
         self._price_code_suffix_map: Dict[str, set[str]] = {}
@@ -71,8 +110,16 @@ class UnstructuredDWDBuilder:
         """执行构建流程并写出 parquet"""
         logger.info("=" * 80)
         logger.info("开始构建非结构化 DWD 宽表")
+        logger.info("运行模式: %s", "增量模式" if self.incremental_mode else "全量模式")
+        logger.info("日期对齐策略: %s", "原始date（不漂移）" if self.incremental_mode else "date+1天")
+        if self.incremental_mode and self.latest_date:
+            logger.info("latest-date: %s", self.latest_date)
         logger.info(f"非结构化输入目录: {self.unstructured_processed_dir}")
+        if self.incremental_mode:
+            logger.info(f"非结构化增量输入目录: {self.unstructured_increment_processed_dir}")
         logger.info(f"结构化 DWD 目录: {self.structured_dwd_dir}")
+        if self.incremental_mode:
+            logger.info(f"结构化增量 DWD 目录: {self.structured_increment_dwd_dir}")
         logger.info(f"输出文件: {self.output_path}")
         logger.info("=" * 80)
 
@@ -126,6 +173,9 @@ class UnstructuredDWDBuilder:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_parquet(self.output_path, index=False, compression=self.config.compression)
 
+        if self.input_provider is not None:
+            self.input_provider.clear_cache()
+
         non_null_stats = {c: int(result[c].notna().sum()) for c in FEATURE_COLUMNS}
         logger.info("非结构化 DWD 构建完成")
         logger.info(f"输出行数: {len(result):,}")
@@ -134,6 +184,44 @@ class UnstructuredDWDBuilder:
         logger.info(f"已保存: {self.output_path}")
 
         return result
+
+    def _read_input_data(
+        self,
+        source_file: str,
+        required_columns: list[str],
+        feature_name: str,
+    ) -> pd.DataFrame:
+        source_path = self.unstructured_processed_dir / source_file
+
+        merged_df: Optional[pd.DataFrame] = None
+        if self.input_provider is not None:
+            # 传入相对文件名，避免在相对目录配置下把 full 根目录前缀重复拼接
+            merged_df = self.input_provider.get(source_file)
+            if merged_df is not None:
+                logger.info(
+                    "增量输入覆写生效 [%s]: %s, rows=%s",
+                    feature_name,
+                    source_file,
+                    f"{len(merged_df):,}",
+                )
+
+        if merged_df is None:
+            if not source_path.exists():
+                logger.warning("缺少输入文件，跳过 %s: %s", feature_name, source_path)
+                return pd.DataFrame(columns=required_columns)
+            return pd.read_parquet(source_path, columns=required_columns)
+
+        missing_cols = [col for col in required_columns if col not in merged_df.columns]
+        if missing_cols:
+            logger.warning(
+                "输入缺失列，跳过 %s: %s (missing=%s)",
+                feature_name,
+                source_file,
+                ", ".join(missing_cols),
+            )
+            return pd.DataFrame(columns=required_columns)
+
+        return merged_df[required_columns].copy()
 
     def _load_price_skeleton_keys(self) -> pd.DataFrame:
         if not self.price_path.exists():
@@ -193,14 +281,13 @@ class UnstructuredDWDBuilder:
         return industry_df
 
     def _build_stock_score_feature(self, source_file: str, feature_name: str) -> pd.DataFrame:
-        source_path = self.unstructured_processed_dir / source_file
-        if not source_path.exists():
-            logger.warning("缺少输入文件，跳过 %s: %s", feature_name, source_path)
-            return pd.DataFrame(columns=["trade_date", "ts_code", feature_name])
-
-        df = pd.read_parquet(source_path, columns=["date", "ts_code", "score"])
+        df = self._read_input_data(
+            source_file=source_file,
+            required_columns=["date", "ts_code", "score"],
+            feature_name=feature_name,
+        )
         if df.empty:
-            logger.warning("输入文件为空，跳过 %s: %s", feature_name, source_path)
+            logger.warning("输入数据为空，跳过 %s: %s", feature_name, source_file)
             return pd.DataFrame(columns=["trade_date", "ts_code", feature_name])
 
         df["trade_date"] = self._map_to_trade_date_after_shift(df["date"])
@@ -222,12 +309,11 @@ class UnstructuredDWDBuilder:
         return out
 
     def _build_cctv_feature(self, base_keys: pd.DataFrame) -> pd.DataFrame:
-        source_path = self.unstructured_processed_dir / "news_cctv.parquet"
-        if not source_path.exists():
-            logger.warning("缺少输入文件，跳过 market_sentiment/beta_signal: %s", source_path)
-            return pd.DataFrame(columns=["trade_date", "ts_code", "market_sentiment", "beta_signal"])
-
-        df = pd.read_parquet(source_path, columns=["date", "market_sentiment", "beta_signal"])
+        df = self._read_input_data(
+            source_file="news_cctv.parquet",
+            required_columns=["date", "market_sentiment", "beta_signal"],
+            feature_name="market_sentiment/beta_signal",
+        )
         if df.empty:
             return pd.DataFrame(columns=["trade_date", "ts_code", "market_sentiment", "beta_signal"])
 
@@ -257,12 +343,11 @@ class UnstructuredDWDBuilder:
         feature_name: str,
         industry_ref: pd.DataFrame,
     ) -> pd.DataFrame:
-        source_path = self.unstructured_processed_dir / source_file
-        if not source_path.exists():
-            logger.warning("缺少输入文件，跳过 %s: %s", feature_name, source_path)
-            return pd.DataFrame(columns=["trade_date", "ts_code", feature_name])
-
-        df = pd.read_parquet(source_path, columns=["date", "industry_scores"])
+        df = self._read_input_data(
+            source_file=source_file,
+            required_columns=["date", "industry_scores"],
+            feature_name=feature_name,
+        )
         if df.empty:
             return pd.DataFrame(columns=["trade_date", "ts_code", feature_name])
 
@@ -318,7 +403,7 @@ class UnstructuredDWDBuilder:
 
     def _map_to_trade_date_after_shift(self, date_series: pd.Series) -> pd.Series:
         date_ts = pd.to_datetime(date_series, errors="coerce").dt.normalize()
-        shifted = date_ts + pd.Timedelta(days=1)
+        shifted = date_ts + pd.Timedelta(days=self._date_shift_days)
         return shifted.map(self._calendar_map)
 
     def _normalize_ts_code_series(self, code_series: pd.Series) -> pd.Series:

@@ -69,23 +69,17 @@ class IndustryProcessor(BaseProcessor):
             包含 ts_code, industry 的 DataFrame
         """
         logger.info("加载 stock_list_a 行业数据...")
-        
-        # 读取元数据
-        import pandas as pd
-        stock_list_path = DATA_SOURCE_PATHS.stock_list_a
-        
-        if not stock_list_path.exists():
-            logger.warning(f"stock_list_a 文件不存在: {stock_list_path}")
+
+        # 通过统一读取入口加载，支持输入覆写（DuckDB full+increment）
+        df = self.read_parquet(DATA_SOURCE_PATHS.stock_list_a, columns=['ts_code', 'industry'])
+
+        if len(df) == 0:
+            logger.warning(f"stock_list_a 文件为空或不存在: {DATA_SOURCE_PATHS.stock_list_a}")
             return cudf.DataFrame()
-        
-        pdf = pd.read_parquet(stock_list_path)
-        
-        # 只保留需要的字段
+
+        # 只保留需要的字段并去重
         cols = ['ts_code', 'industry']
-        pdf = pdf[cols].drop_duplicates()
-        
-        # 转为 cuDF
-        df = cudf.from_pandas(pdf)
+        df = df[cols].drop_duplicates()
         
         # 处理缺失值
         df['industry'] = df['industry'].fillna('未分类')

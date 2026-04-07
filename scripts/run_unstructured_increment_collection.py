@@ -13,6 +13,7 @@ import ssl
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # 忽略SSL证书验证（与全量脚本保持一致）
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -28,6 +29,12 @@ def parse_args():
         type=str,
         default=datetime.now().strftime("%Y-%m-%d"),
         help="目标日期，支持 YYYYMMDD 或 YYYY-MM-DD，默认当天",
+    )
+    parser.add_argument(
+        "--latest-date",
+        type=str,
+        default=None,
+        help="非结构化增量DWD的最新日期，支持 YYYYMMDD 或 YYYY-MM-DD；默认等于 --date",
     )
     parser.add_argument(
         "--output-dir",
@@ -72,6 +79,11 @@ def parse_args():
         help="跳过增量处理流水线，仅执行原始增量采集",
     )
     parser.add_argument(
+        "--skip-dwd",
+        action="store_true",
+        help="跳过增量非结构化DWD构建（默认在增量处理完成后自动执行）",
+    )
+    parser.add_argument(
         "--processing-model",
         type=str,
         default="qwen2.5:7b-instruct",
@@ -112,6 +124,68 @@ def parse_args():
     return parser.parse_args()
 
 
+def normalize_date_yyyy_mm_dd(date_str: str) -> str:
+    """标准化日期为 YYYY-MM-DD。"""
+    s = str(date_str).strip()
+    if len(s) == 8 and s.isdigit():
+        return datetime.strptime(s, "%Y%m%d").strftime("%Y-%m-%d")
+    return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+
+
+def resolve_path(path_str: str) -> Path:
+    """将相对路径解析为项目根目录下绝对路径。"""
+    path = Path(path_str)
+    return path if path.is_absolute() else (project_root / path)
+
+
+def run_increment_dwd(latest_date: str, args, logger: logging.Logger) -> int:
+    """执行非结构化增量 DWD 构建。"""
+    from src.data_pipeline.processors.unstructured.dwd import (
+        UnstructuredDWDBuilder,
+        UnstructuredDWDConfig,
+    )
+
+    latest_date_iso = normalize_date_yyyy_mm_dd(latest_date)
+
+    full_processed_dir = resolve_path(args.full_processed_dir)
+    increment_processed_dir = resolve_path(args.processed_output_dir)
+    structured_dwd_dir = project_root / "data" / "processed" / "structured" / "dwd"
+    structured_increment_dwd_dir = (
+        project_root / "data" / "processed" / "structured_increment" / "dwd"
+    )
+
+    output_file = increment_processed_dir / f"date={latest_date_iso}" / "dwd_unstructured.parquet"
+
+    logger.info("=" * 80)
+    logger.info("开始构建非结构化增量 DWD 宽表")
+    logger.info("latest-date: %s", latest_date_iso)
+    logger.info("非结构化全量处理目录: %s", full_processed_dir)
+    logger.info("非结构化增量处理目录: %s", increment_processed_dir)
+    logger.info("结构化增量骨架目录: %s/date=%s", structured_increment_dwd_dir, latest_date_iso)
+    logger.info("输出文件: %s", output_file)
+    logger.info("=" * 80)
+
+    config = UnstructuredDWDConfig(
+        unstructured_processed_dir=str(full_processed_dir),
+        structured_dwd_dir=str(structured_dwd_dir),
+        output_file=str(output_file),
+        incremental_mode=True,
+        latest_date=latest_date_iso,
+        unstructured_increment_processed_dir=str(increment_processed_dir),
+        structured_increment_dwd_dir=str(structured_increment_dwd_dir),
+    )
+
+    builder = UnstructuredDWDBuilder(config=config)
+    df = builder.run()
+
+    logger.info(
+        "增量非结构化 DWD 构建完成: rows=%s, output=%s",
+        f"{len(df):,}",
+        output_file,
+    )
+    return 0
+
+
 def main():
     args = parse_args()
 
@@ -133,10 +207,26 @@ def main():
 
     logger = logging.getLogger(__name__)
 
+    normalized_date = normalize_date_yyyy_mm_dd(args.date)
+    normalized_latest_date = normalize_date_yyyy_mm_dd(args.latest_date) if args.latest_date else None
+    effective_date = normalized_latest_date or normalized_date
+
+    if normalized_latest_date and normalized_latest_date != normalized_date:
+        logger.info(
+            "检测到 --latest-date 与 --date 不一致，按 latest-date 统一全链路日期: date=%s -> %s",
+            normalized_date,
+            normalized_latest_date,
+        )
+
+    logger.info(
+        "本次全链路日期: collection/processing/dwd 均使用 %s",
+        effective_date,
+    )
+
     from src.data_pipeline.scheduler.unstructured.increment import UnstructuredIncrementScheduler
 
     scheduler = UnstructuredIncrementScheduler(
-        date=args.date,
+        date=effective_date,
         output_dir=args.output_dir,
         full_raw_dir=args.full_raw_dir,
         processed_output_dir=args.processed_output_dir,
@@ -178,6 +268,27 @@ def main():
         for r in [x for x in report.results if not x.success][:20]:
             logger.warning("  - %s: %s", r.task_name, r.error_message)
         sys.exit(1)
+
+    latest_date_value: Optional[str] = effective_date
+    should_run_increment_dwd = (
+        not args.skip_processing
+        and not args.dry_run
+        and not args.skip_dwd
+    )
+
+    if should_run_increment_dwd:
+        try:
+            run_increment_dwd(latest_date=latest_date_value, args=args, logger=logger)
+        except Exception as e:
+            logger.error("增量非结构化 DWD 构建失败: %s", e, exc_info=True)
+            sys.exit(1)
+    else:
+        if args.skip_dwd:
+            logger.info("按参数跳过增量非结构化 DWD 构建（--skip-dwd）")
+        elif args.skip_processing:
+            logger.info("已跳过增量非结构化 DWD 构建：--skip-processing 未执行增量处理")
+        elif args.dry_run:
+            logger.info("已跳过增量非结构化 DWD 构建：--dry-run 模式不写文件")
 
     sys.exit(0)
 

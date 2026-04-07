@@ -324,12 +324,22 @@ class FundamentalProcessor(BaseProcessor):
     
     def _get_full_trade_dates(self) -> list:
         """获取完整历史交易日（不限制 start_date，用于 ffill 需要历史数据的场景）"""
-        cal_df = cudf.read_parquet(str(DATA_SOURCE_PATHS.trade_calendar))
+        # 通过统一读取入口加载交易日历（支持增量 input_provider 覆写）
+        cal_df = self.read_parquet(DATA_SOURCE_PATHS.trade_calendar)
+        if len(cal_df) == 0:
+            raise ValueError(f"交易日历为空: {DATA_SOURCE_PATHS.trade_calendar}")
+
         cal_df = cal_df[cal_df['is_open'] == 1]
         cal_df = self.normalize_date_column(cal_df, 'cal_date')
+
         # 只过滤 end_date，不过滤 start_date
         cal_df = cal_df[cal_df['cal_date'] <= self.end_date]
+
         trade_dates = sorted(cal_df['cal_date'].unique().to_arrow().to_pylist())
+        if not trade_dates:
+            raise ValueError(
+                f"交易日历过滤后为空: end_date={self.end_date}, source={DATA_SOURCE_PATHS.trade_calendar}"
+            )
         return trade_dates
     
     def _resample_to_daily(

@@ -23,7 +23,7 @@ DWD层处理器基类 - 强制cuDF GPU加速版本
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union, List, Optional, Dict
+from typing import Union, List, Optional, Dict, Any
 from datetime import datetime
 
 import cudf
@@ -66,6 +66,7 @@ class BaseProcessor(ABC):
         use_gpu: bool = True,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        input_provider: Optional[Any] = None,
     ):
         self.use_gpu = use_gpu
         if not self.use_gpu:
@@ -75,9 +76,44 @@ class BaseProcessor(ABC):
         
         self.start_date = start_date or PROCESSING_CONFIG.start_date
         self.end_date = end_date or PROCESSING_CONFIG.end_date
+        self.input_provider = input_provider
         
         self._trade_dates_cache: Optional[List[str]] = None
         self._stock_list_cache: Optional[cudf.DataFrame] = None
+
+    def _load_from_input_provider(
+        self,
+        path: Union[str, Path],
+        expect_dir: bool,
+    ) -> Optional[cudf.DataFrame]:
+        """
+        从外部输入提供器加载覆写数据（如 DuckDB full+increment 合并结果）。
+
+        Args:
+            path: 请求路径
+            expect_dir: True 表示按目录语义请求（对应 read_parquet_dir）
+
+        Returns:
+            覆写 DataFrame（cuDF）或 None（未命中覆写）
+        """
+        if self.input_provider is None:
+            return None
+
+        if not hasattr(self.input_provider, "get"):
+            raise ValueError("input_provider 必须实现 get(path, expect_dir) 方法")
+
+        df = self.input_provider.get(path, expect_dir=expect_dir)
+        if df is None:
+            return None
+
+        if isinstance(df, cudf.DataFrame):
+            return df
+
+        # 兼容 pandas.DataFrame 或其他可转换对象
+        try:
+            return cudf.from_pandas(df)
+        except Exception as e:
+            raise TypeError(f"input_provider 返回数据无法转换为 cuDF: {e}") from e
     
     def to_cpu(self, df: cudf.DataFrame):
         """cuDF -> pandas（仅用于最终输出/保存）"""
@@ -180,6 +216,18 @@ class BaseProcessor(ABC):
     ) -> cudf.DataFrame:
         """读取Parquet文件（cuDF直接读取）"""
         path = Path(path)
+
+        # 优先使用外部覆写输入
+        override_df = self._load_from_input_provider(path, expect_dir=False)
+        if override_df is not None:
+            if columns:
+                missing_cols = [c for c in columns if c not in override_df.columns]
+                for c in missing_cols:
+                    override_df[c] = None
+                override_df = override_df[columns]
+            logger.info(f"使用覆写输入: {path}")
+            return override_df
+
         if not path.exists():
             logger.warning(f"文件不存在: {path}")
             return cudf.DataFrame()
@@ -205,6 +253,18 @@ class BaseProcessor(ABC):
         3. 并行处理提升性能
         """
         dir_path = Path(dir_path)
+
+        # 优先使用外部覆写输入
+        override_df = self._load_from_input_provider(dir_path, expect_dir=True)
+        if override_df is not None:
+            if columns:
+                missing_cols = [c for c in columns if c not in override_df.columns]
+                for c in missing_cols:
+                    override_df[c] = None
+                override_df = override_df[columns]
+            logger.info(f"使用覆写目录输入: {dir_path}")
+            return override_df
+
         if not dir_path.exists():
             # 目录不存在时，检查是否有同名的合并后parquet文件
             parquet_file = dir_path.with_suffix('.parquet')
@@ -425,8 +485,11 @@ class BaseProcessor(ABC):
         if self._trade_dates_cache is not None:
             return self._trade_dates_cache
         
-        # 用cuDF读取交易日历
-        cal_df = cudf.read_parquet(str(DATA_SOURCE_PATHS.trade_calendar))
+        # 通过统一读取入口加载交易日历（支持输入覆写）
+        cal_df = self.read_parquet(DATA_SOURCE_PATHS.trade_calendar)
+
+        if len(cal_df) == 0:
+            raise ValueError(f"交易日历为空: {DATA_SOURCE_PATHS.trade_calendar}")
         
         # 过滤交易日
         cal_df = cal_df[cal_df['is_open'] == 1]
@@ -453,7 +516,11 @@ class BaseProcessor(ABC):
         if self._stock_list_cache is not None:
             return self._stock_list_cache
         
-        stock_df = cudf.read_parquet(str(DATA_SOURCE_PATHS.stock_list_a))
+        # 通过统一读取入口加载股票列表（支持输入覆写）
+        stock_df = self.read_parquet(DATA_SOURCE_PATHS.stock_list_a)
+
+        if len(stock_df) == 0:
+            raise ValueError(f"股票列表为空: {DATA_SOURCE_PATHS.stock_list_a}")
         
         stock_df = self.normalize_date_column(stock_df, 'list_date')
         stock_df = stock_df[stock_df['list_date'] <= self.end_date]

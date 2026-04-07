@@ -1,6 +1,7 @@
 # --- 核心数据处理 ---
 pandas
 numpy
+duckdb
 scipy
 scikit-learn
 statsmodels

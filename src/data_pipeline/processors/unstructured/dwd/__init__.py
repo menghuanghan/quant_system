@@ -11,9 +11,11 @@ from .builder import (
     UnstructuredDWDBuilder,
     build_dwd_unstructured,
 )
+from .increment_duckdb_merger import DuckDBIncrementProcessedProvider
 
 __all__ = [
     "UnstructuredDWDConfig",
     "UnstructuredDWDBuilder",
     "build_dwd_unstructured",
+    "DuckDBIncrementProcessedProvider",
 ]
