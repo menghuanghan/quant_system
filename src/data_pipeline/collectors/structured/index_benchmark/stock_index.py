@@ -10,7 +10,7 @@
 
 import logging
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -408,8 +408,13 @@ class IndexWeightCollector(BaseCollector):
     指数成分权重采集器
     
     采集指数成分股及权重
-    主数据源：Tushare (index_weight) - 需400积分
-    备用数据源：AkShare
+        数据源：Tushare (index_weight) - 需2000积分
+
+        说明：
+        - index_weight 为月度更新数据
+        - 当传入单日查询（trade_date 或 start_date=end_date）时，采用 as-of 语义：
+            先查目标月窗口，必要时回看上月，选择 trade_date <= 目标日 的最近一期快照
+        - 返回结果中 trade_date 统一写为目标日（不保留原快照日期）
     """
     
     OUTPUT_FIELDS = [
@@ -439,7 +444,7 @@ class IndexWeightCollector(BaseCollector):
         Returns:
             DataFrame: 标准化的指数成分权重数据
         """
-        # 优先使用Tushare
+        # 仅使用Tushare
         try:
             df = self._collect_from_tushare(index_code, trade_date, start_date, end_date)
             if not df.empty:
@@ -447,19 +452,110 @@ class IndexWeightCollector(BaseCollector):
                 return df
         except Exception as e:
             logger.warning(f"Tushare获取指数权重失败: {e}")
-        
-        # 降级到AkShare
-        try:
-            if index_code:
-                df = self._collect_from_akshare(index_code)
-                if not df.empty:
-                    logger.info(f"从AkShare成功获取 {len(df)} 条指数权重数据")
-                    return df
-        except Exception as e:
-            logger.error(f"AkShare获取指数权重失败: {e}")
-        
-        logger.error("所有数据源均无法获取指数权重数据")
+
+        logger.warning("Tushare未返回可用的指数权重数据")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+    @staticmethod
+    def _normalize_to_compact_date(date_value: Optional[str]) -> Optional[str]:
+        """将日期统一为 YYYYMMDD。"""
+        if date_value is None:
+            return None
+
+        s = str(date_value).strip()
+        if not s:
+            return None
+
+        for fmt in ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y%m%d")
+            except Exception:
+                continue
+
+        dt = pd.to_datetime(s, errors='coerce')
+        if pd.isna(dt):
+            return None
+        return dt.strftime("%Y%m%d")
+
+    @staticmethod
+    def _get_month_window(date_compact: str) -> tuple[str, str]:
+        """获取 date_compact 所在月的 [月初, 月末]。"""
+        dt = datetime.strptime(date_compact, "%Y%m%d")
+        month_start = dt.replace(day=1)
+        if dt.month == 12:
+            next_month_start = dt.replace(year=dt.year + 1, month=1, day=1)
+        else:
+            next_month_start = dt.replace(month=dt.month + 1, day=1)
+        month_end = next_month_start - timedelta(days=1)
+        return month_start.strftime("%Y%m%d"), month_end.strftime("%Y%m%d")
+
+    @staticmethod
+    def _get_previous_month_window(date_compact: str) -> tuple[str, str]:
+        """获取 date_compact 上一月的 [月初, 月末]。"""
+        dt = datetime.strptime(date_compact, "%Y%m%d")
+        this_month_start = dt.replace(day=1)
+        prev_month_end = this_month_start - timedelta(days=1)
+        prev_month_start = prev_month_end.replace(day=1)
+        return prev_month_start.strftime("%Y%m%d"), prev_month_end.strftime("%Y%m%d")
+
+    def _select_asof_snapshot(self, df: pd.DataFrame, target_date: str) -> pd.DataFrame:
+        """从候选集中选择 trade_date <= target_date 的最近一期快照。"""
+        if df.empty or 'trade_date' not in df.columns:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+        work = df.copy()
+        work['_trade_date_compact'] = work['trade_date'].apply(self._normalize_to_compact_date)
+        work = work[work['_trade_date_compact'].notna()].copy()
+        if work.empty:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+        work = work[work['_trade_date_compact'] <= target_date].copy()
+        if work.empty:
+            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
+
+        snapshot_date = work['_trade_date_compact'].max()
+        work = work[work['_trade_date_compact'] == snapshot_date].copy()
+        work = work.drop(columns=['_trade_date_compact'])
+        return work
+
+    def _collect_single_day_asof_from_tushare(
+        self,
+        pro,
+        index_code: Optional[str],
+        target_date: str,
+        month_cache: Optional[dict] = None,
+    ) -> pd.DataFrame:
+        """执行单日 as-of 采集：先查当月，不足则回看上月，并将 trade_date 写为目标日。"""
+        cache = month_cache if month_cache is not None else {}
+
+        def fetch_month(start_date: str, end_date: str) -> pd.DataFrame:
+            cache_key = (index_code or '', start_date, end_date)
+            if cache_key in cache:
+                return cache[cache_key]
+
+            params = {'start_date': start_date, 'end_date': end_date}
+            if index_code:
+                params['index_code'] = index_code
+
+            month_df = pro.index_weight(**params)
+            cache[cache_key] = month_df if month_df is not None else pd.DataFrame()
+            return cache[cache_key]
+
+        month_start, month_end = self._get_month_window(target_date)
+        current_month_df = fetch_month(month_start, month_end)
+
+        asof_df = self._select_asof_snapshot(current_month_df, target_date)
+        if asof_df.empty:
+            prev_start, prev_end = self._get_previous_month_window(target_date)
+            prev_month_df = fetch_month(prev_start, prev_end)
+            combined = pd.concat([current_month_df, prev_month_df], ignore_index=True)
+            asof_df = self._select_asof_snapshot(combined, target_date)
+
+        if not asof_df.empty:
+            asof_df = asof_df.copy()
+            asof_df['trade_date'] = target_date
+
+        return asof_df
     
     @retry_on_failure(max_retries=3, delay=1.0)
     def _collect_from_tushare(
@@ -469,83 +565,63 @@ class IndexWeightCollector(BaseCollector):
         start_date: Optional[str],
         end_date: Optional[str]
     ) -> pd.DataFrame:
-        """从Tushare获取指数权重"""
+        """从Tushare获取指数权重（支持单日 as-of 语义）。"""
         pro = self.tushare_api
-        
-        params = {}
-        if index_code:
-            params['index_code'] = index_code
-        if trade_date:
-            params['trade_date'] = trade_date
-        if start_date:
-            params['start_date'] = start_date
-        if end_date:
-            params['end_date'] = end_date
-        
-        df = pro.index_weight(**params)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        df = self._convert_date_format(df, ['trade_date'])
-        
-        for col in self.OUTPUT_FIELDS:
-            if col not in df.columns:
-                df[col] = None
-        
-        return df[self.OUTPUT_FIELDS]
-    
-    def _collect_from_akshare(self, index_code: str) -> pd.DataFrame:
-        """从AkShare获取指数权重"""
-        import akshare as ak
-        
-        try:
-            code = index_code.split('.')[0] if '.' in index_code else index_code
-            
-            # 沪深300成分
-            if code in ['000300', '399300']:
-                df = ak.index_stock_cons_weight_csindex(symbol='000300')
-            # 上证50
-            elif code in ['000016']:
-                df = ak.index_stock_cons_weight_csindex(symbol='000016')
-            # 中证500
-            elif code in ['000905', '399905']:
-                df = ak.index_stock_cons_weight_csindex(symbol='000905')
+
+        trade_compact = self._normalize_to_compact_date(trade_date)
+        start_compact = self._normalize_to_compact_date(start_date)
+        end_compact = self._normalize_to_compact_date(end_date)
+
+        # 区间查询：按日循环复用单日 as-of 逻辑
+        if not trade_compact and start_compact and end_compact and start_compact != end_compact:
+            start_dt = datetime.strptime(start_compact, '%Y%m%d')
+            end_dt = datetime.strptime(end_compact, '%Y%m%d')
+            if start_dt > end_dt:
+                start_dt, end_dt = end_dt, start_dt
+
+            month_cache: dict = {}
+            frames: List[pd.DataFrame] = []
+
+            for dt in pd.date_range(start=start_dt, end=end_dt, freq='D'):
+                target_date = dt.strftime('%Y%m%d')
+                day_df = self._collect_single_day_asof_from_tushare(
+                    pro=pro,
+                    index_code=index_code,
+                    target_date=target_date,
+                    month_cache=month_cache,
+                )
+                if day_df is not None and not day_df.empty:
+                    frames.append(day_df)
+
+            if frames:
+                df = pd.concat(frames, ignore_index=True)
             else:
-                logger.warning(f"AkShare不支持该指数的权重查询: {index_code}")
-                return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        except Exception as e:
-            logger.warning(f"AkShare获取指数权重失败: {e}")
+                df = pd.DataFrame(columns=self.OUTPUT_FIELDS)
+        else:
+            # 单日 as-of 模式（增量日常快照）
+            target_date = trade_compact or end_compact or start_compact
+
+            if target_date:
+                df = self._collect_single_day_asof_from_tushare(
+                    pro=pro,
+                    index_code=index_code,
+                    target_date=target_date,
+                )
+            else:
+                params = {}
+                if index_code:
+                    params['index_code'] = index_code
+                df = pro.index_weight(**params)
+
+        if df is None or df.empty:
             return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        if df.empty:
-            return pd.DataFrame(columns=self.OUTPUT_FIELDS)
-        
-        # 标准化字段
-        column_mapping = {
-            '成分券代码': 'con_code',
-            '权重': 'weight',
-            '日期': 'trade_date',
-        }
-        df = self._standardize_columns(df, column_mapping)
-        
-        df['index_code'] = index_code
-        
-        # 格式化成分股代码
-        if 'con_code' in df.columns:
-            def format_code(code):
-                code = str(code)
-                if code.startswith('6'):
-                    return code + '.SH'
-                elif code.startswith(('0', '3')):
-                    return code + '.SZ'
-                return code
-            df['con_code'] = df['con_code'].apply(format_code)
-        
+
+        df = self._convert_date_format(df, ['trade_date'])
+
         for col in self.OUTPUT_FIELDS:
             if col not in df.columns:
                 df[col] = None
-        
+
         return df[self.OUTPUT_FIELDS]
 
 

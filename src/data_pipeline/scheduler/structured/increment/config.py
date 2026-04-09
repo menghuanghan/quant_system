@@ -164,6 +164,7 @@ TIME_DEPENDENT_TASKS: List[IncrementCollectionTask] = [
     # index_benchmark
     IncrementCollectionTask(
         "index_weight", "index_benchmark", "get_index_weight", "指数成分权重（核心指数）", "start_end", "trade_date",
+        date_granularity="none",
         output_mode="by_code", code_param="index_code", code_source="core_index"
     ),
 ]

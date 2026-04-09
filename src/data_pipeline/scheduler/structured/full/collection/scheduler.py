@@ -34,6 +34,13 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 
+CORE_INDEX_CODES = [
+    "000905.SH",  # 中证500
+    "000300.SH",  # 沪深300
+    "000852.SH",  # 中证1000
+]
+
+
 class TaskStatus(Enum):
     """任务状态"""
     PENDING = "pending"
@@ -844,8 +851,17 @@ class FullCollectionScheduler:
                 return [result]
             results = self._execute_batch_task(task, fund_list)
         elif task.stock_scope == StockScope.ALL_INDEX:
-            # 需要遍历全量指数
-            index_list = self._get_index_list()
+            # index_weight 仅采集核心指数；其余任务仍遍历全量指数
+            if task.name == "index_weight":
+                index_list = CORE_INDEX_CODES
+                logger.info(
+                    "任务 %s 使用核心指数范围: %s",
+                    task.name,
+                    ", ".join(index_list),
+                )
+            else:
+                # 需要遍历全量指数
+                index_list = self._get_index_list()
             if not index_list:
                 logger.error(f"任务 {task.name} 无法获取指数列表，跳过")
                 result = TaskResult(
