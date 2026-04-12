@@ -6,6 +6,7 @@
     python scripts/run_feature_pipeline.py
     python scripts/run_feature_pipeline.py --no-gpu
     python scripts/run_feature_pipeline.py --dry-run
+    python scripts/run_feature_pipeline.py --latest-date 2026-01-07
     python scripts/run_feature_pipeline.py --postprocess only-lgb
     python scripts/run_feature_pipeline.py --postprocess only-gru
     python scripts/run_feature_pipeline.py --postprocess both
@@ -58,6 +59,14 @@ def main():
                         choices=["both", "only-lgb", "only-gru", "none"],
                         help="后处理模式: both(默认)=输出train_lgb和train_gru, "
                              "only-lgb=仅LightGBM, only-gru=仅GRU, none=不做后处理")
+    parser.add_argument(
+        "--latest-date",
+        "--latest_date",
+        dest="latest_date",
+        type=str,
+        default=None,
+        help="启用增量模式并指定 latest_date（支持 YYYYMMDD 或 YYYY-MM-DD）",
+    )
     
     args = parser.parse_args()
     
@@ -69,7 +78,11 @@ def main():
     logger.info("=" * 70)
     
     # 导入配置和流水线
-    from src.feature_engineering.structured import PipelineConfig, FeaturePipeline
+    from src.feature_engineering.structured import (
+        FeaturePipeline,
+        FeaturePipelineIncrement,
+        PipelineConfig,
+    )
     
     # 创建配置
     config = PipelineConfig.default()
@@ -79,28 +92,48 @@ def main():
     if args.output:
         config.data.train_file = args.output
     
-    # 初始化流水线并预先推导自动日期边界（用于启动日志）
+    is_increment_mode = bool(args.latest_date)
+
+    # 初始化流水线并预先推导自动日期边界（全量模式）
     pipeline = None
     auto_bounds = {}
-    try:
-        pipeline = FeaturePipeline(config)
-        auto_bounds = pipeline.get_auto_date_boundaries(emit_log=False)
-    except Exception as e:
-        logger.warning(f"⚠️ 自动日期边界推导失败，回退配置默认值打印: {e}")
+    if is_increment_mode:
+        pipeline = FeaturePipelineIncrement(config=config, latest_date=args.latest_date)
+    else:
+        try:
+            pipeline = FeaturePipeline(config)
+            auto_bounds = pipeline.get_auto_date_boundaries(emit_log=False)
+        except Exception as e:
+            logger.warning(f"⚠️ 自动日期边界推导失败，回退配置默认值打印: {e}")
 
     # 打印配置
     memory_efficient = args.memory_efficient and not args.no_memory_efficient
     postprocess_mode = args.postprocess
+    if is_increment_mode and postprocess_mode != "both":
+        logger.warning("⚠️ 增量模式固定输出 both，忽略 --postprocess=%s", postprocess_mode)
+        postprocess_mode = "both"
     
     logger.info("📋 流水线配置:")
+    logger.info(f"   运行模式: {'increment' if is_increment_mode else 'full'}")
     logger.info(f"   GPU 加速: {config.use_gpu}")
     logger.info(f"   内存高效模式: {memory_efficient}")
     logger.info(f"   后处理模式: {postprocess_mode}")
     logger.info(f"   输入目录: {config.data.input_dir}")
     logger.info(f"   输出目录: {config.data.output_dir}")
-    logger.info(f"   临时目录: {config.data.temp_dir}")
-    logger.info(f"   输出文件: {config.data.train_file}")
-    if auto_bounds:
+    if is_increment_mode:
+        logger.info("   中间落盘: disabled (内存态)")
+        logger.info(f"   latest_date: {args.latest_date}")
+        logger.info(f"   增量输出根目录: {config.data.increment_output_root}")
+        logger.info(
+            f"   增量输入窗口: lookback={config.data.increment_lookback_trade_days} 交易日"
+        )
+        logger.info(
+            f"   GRU 输出窗口: recent={config.data.increment_gru_trade_days} 交易日"
+        )
+        logger.info("   输出文件: predict_lgb.parquet + predict_gru.parquet")
+    elif auto_bounds:
+        logger.info(f"   临时目录: {config.data.temp_dir}")
+        logger.info(f"   输出文件: {config.data.train_file}")
         logger.info(
             f"   原始交易日范围: {auto_bounds['raw_min_date']} ~ {auto_bounds['raw_max_date']}"
         )
@@ -116,6 +149,8 @@ def main():
         )
         logger.info(f"   正式期: {auto_bounds['train_start']} ~ {auto_bounds['train_end']}")
     else:
+        logger.info(f"   临时目录: {config.data.temp_dir}")
+        logger.info(f"   输出文件: {config.data.train_file}")
         logger.info(f"   预热期: {config.data.warmup_start} ~ {config.data.warmup_end}")
         logger.info(f"   正式期: {config.data.train_start} ~ {config.data.train_end}")
     logger.info("")
@@ -135,14 +170,16 @@ def main():
     logger.info(f"   标签裁剪: [{config.label.label_clip_lower:.0%}, {config.label.label_clip_upper:.0%}]")
     logger.info("")
     logger.info(f"📋 后处理配置:")
-    if postprocess_mode == "both":
-        logger.info(f"   输出: train_lgb.parquet + train_gru.parquet")
+    if is_increment_mode:
+        logger.info("   输出: predict_lgb.parquet + predict_gru.parquet")
+    elif postprocess_mode == "both":
+        logger.info("   输出: train_lgb.parquet + train_gru.parquet")
     elif postprocess_mode == "only-lgb":
-        logger.info(f"   输出: train_lgb.parquet (仅 LightGBM)")
+        logger.info("   输出: train_lgb.parquet (仅 LightGBM)")
     elif postprocess_mode == "only-gru":
-        logger.info(f"   输出: train_gru.parquet (仅 GRU)")
+        logger.info("   输出: train_gru.parquet (仅 GRU)")
     else:
-        logger.info(f"   输出: train.parquet (无后处理)")
+        logger.info("   输出: train.parquet (无后处理)")
     logger.info("")
     
     if args.dry_run:
@@ -153,14 +190,23 @@ def main():
     try:
         if pipeline is None:
             pipeline = FeaturePipeline(config)
-        result = pipeline.run(
-            save_output=True, 
-            memory_efficient=memory_efficient,
-            postprocess_mode=postprocess_mode
-        )
+
+        if is_increment_mode:
+            result = pipeline.run(save_output=True)
+        else:
+            result = pipeline.run(
+                save_output=True,
+                memory_efficient=memory_efficient,
+                postprocess_mode=postprocess_mode,
+            )
         
         logger.info("")
         logger.info("🎉 流水线执行成功!")
+
+        if is_increment_mode and isinstance(result, dict):
+            logger.info("   增量输出目录: %s", result.get("output_dir"))
+            logger.info("   predict_lgb: %s", result.get("predict_lgb_path"))
+            logger.info("   predict_gru: %s", result.get("predict_gru_path"))
         
         # 打印统计信息
         stats = pipeline.get_stats()

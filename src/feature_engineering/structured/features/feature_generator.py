@@ -601,6 +601,172 @@ class FeatureGenerator:
                 pass
         
         return feature_columns
+
+    def generate_column_by_column_from_df(
+        self,
+        source_df: Any,
+        ref_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        逐列计算特征（内存态）
+
+        语义对齐 `generate_column_by_column`：
+        - 保持同样的特征分组与列依赖
+        - 仅从传入 DataFrame 切片，不做中间 parquet 落盘
+
+        Args:
+            source_df: 合并+预处理后的完整 DataFrame
+            ref_data: 参考数据字典
+
+        Returns:
+            特征列字典 {column_name: column_data}
+        """
+        import gc
+
+        if source_df is None or len(source_df) == 0:
+            return {}
+
+        if self.use_gpu:
+            import cupy as cp
+
+        self.set_ref_data(ref_data or {})
+        feature_columns: Dict[str, Any] = {}
+        available_set = set(source_df.columns)
+
+        # 定义特征组及其需要的列（与 generate_column_by_column 对齐）
+        feature_groups = [
+            {
+                'name': '技术指标',
+                'columns_needed': ['ts_code', 'trade_date', 'close_hfq', 'vol', 'high', 'low', 'pre_close', 'return_1d'],
+                'generator': self._generate_technical_features_standalone
+            },
+            {
+                'name': '基本面衍生',
+                'columns_needed': ['ts_code', 'trade_date', 'amount', 'total_mv', 'circ_mv', 'vol', 'ep', 'revenue_yoy', 'roe', 'gross_margin', 'debt_to_assets'],
+                'generator': self._generate_fundamental_features_standalone
+            },
+            {
+                'name': '资金流特征',
+                'columns_needed': ['ts_code', 'trade_date', 'amount',
+                                   'net_main_amount', 'net_elg_amount', 'net_lg_amount', 'net_md_amount', 'net_sm_amount',
+                                   'net_mf_amount', 'block_trade_amount',
+                                   'buy_sm_amount', 'sell_sm_amount', 'rzye', 'rqye', 'hsgt_north'],
+                'generator': self._generate_mf_features_standalone
+            },
+            {
+                'name': '筹码特征',
+                'columns_needed': ['ts_code', 'trade_date', 'holder_num', 'holder_num_chg', 'holder_num_chg_pct',
+                                   'top10_hold_ratio', 'top1_hold_ratio', 'top10_inst_ratio', 'chip_concentration'],
+                'generator': self._generate_chip_features_standalone
+            },
+        ]
+
+        for group in feature_groups:
+            logger.info(f"  📊 计算 {group['name']}...")
+
+            columns_needed = [c for c in group['columns_needed'] if c in available_set]
+            if 'ts_code' not in columns_needed or 'trade_date' not in columns_needed:
+                logger.warning(f"    ⚠️ 跳过 {group['name']}: 缺少主键列")
+                continue
+
+            # 去重并保持顺序
+            dedup_cols = list(dict.fromkeys(columns_needed))
+            df_subset = source_df[dedup_cols].copy()
+            df_subset = df_subset.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+            original_cols = set(df_subset.columns)
+            new_features = group['generator'](df_subset)
+
+            new_count = 0
+            for col in new_features.columns:
+                if col not in original_cols:
+                    feature_columns[col] = new_features[col].copy()
+                    new_count += 1
+
+            logger.info(f"    ✓ {group['name']}: +{new_count} 列")
+
+            del df_subset, new_features
+            gc.collect()
+            if self.use_gpu:
+                try:
+                    cp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
+
+        # 相对强弱和指数成分特征（需要参考数据）
+        if ref_data:
+            logger.info("  📊 计算相对强弱特征...")
+            rs_cols = [c for c in ['ts_code', 'trade_date', 'return_1d'] if c in available_set]
+            if 'ts_code' in rs_cols and 'trade_date' in rs_cols:
+                try:
+                    df_subset = source_df[rs_cols].copy()
+                    df_subset = df_subset.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+                    rs_features = self.rs_gen.fit_transform(df_subset)
+                    for col in rs_features.columns:
+                        if col not in rs_cols:
+                            feature_columns[col] = rs_features[col].copy()
+
+                    del df_subset, rs_features
+                    gc.collect()
+                except Exception as e:
+                    logger.warning(f"    ⚠️ 相对强弱特征失败: {e}")
+            else:
+                logger.warning("    ⚠️ 相对强弱特征失败: 缺少 ts_code/trade_date")
+
+            logger.info("  📊 计算指数成分特征...")
+            idx_cols = [c for c in ['ts_code', 'trade_date'] if c in available_set]
+            if 'ts_code' in idx_cols and 'trade_date' in idx_cols:
+                try:
+                    df_subset = source_df[idx_cols].copy()
+                    df_subset = df_subset.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+                    idx_features = self.index_gen.fit_transform(df_subset)
+                    for col in idx_features.columns:
+                        if col not in idx_cols:
+                            feature_columns[col] = idx_features[col].copy()
+
+                    del df_subset, idx_features
+                    gc.collect()
+                except Exception as e:
+                    logger.warning(f"    ⚠️ 指数成分特征失败: {e}")
+            else:
+                logger.warning("    ⚠️ 指数成分特征失败: 缺少 ts_code/trade_date")
+
+        # 宏观交互特征
+        logger.info("  📊 计算宏观交互特征...")
+        macro_cols = [
+            'ts_code', 'trade_date',
+            'amount', 'vol', 'shibor_1m', 'shibor_on', 'm2_yoy',
+            'ep', 'bp', 'stock_bond_spread',
+            'cn10y_yield',
+            'cpi_yoy', 'ppi_yoy', 'revenue_yoy',
+        ]
+        available_macro_cols = [c for c in macro_cols if c in available_set]
+        if 'ts_code' in available_macro_cols and 'trade_date' in available_macro_cols:
+            try:
+                df_subset = source_df[list(dict.fromkeys(available_macro_cols))].copy()
+                df_subset = df_subset.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+                macro_features = self.macro_gen.fit_transform(df_subset)
+                for col in macro_features.columns:
+                    if col not in available_macro_cols:
+                        feature_columns[col] = macro_features[col].copy()
+
+                del df_subset, macro_features
+                gc.collect()
+            except Exception as e:
+                logger.warning(f"    ⚠️ 宏观交互特征失败: {e}")
+        else:
+            logger.warning("    ⚠️ 宏观交互特征失败: 缺少 ts_code/trade_date")
+
+        if self.use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+
+        return feature_columns
     
     def _generate_technical_features_standalone(self, df: Any) -> Any:
         """独立计算技术指标特征（用于逐列模式）"""

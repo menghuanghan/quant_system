@@ -18,6 +18,7 @@ DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "structured" / "dwd"
 UNSTRUCTURED_DWD_INPUT_DIR = BASE_DIR / "data" / "processed" / "unstructured"
 PREPROCESSED_DIR = BASE_DIR / "data" / "features" / "preprocessed"  # 预处理后数据
 FEATURE_OUTPUT_DIR = BASE_DIR / "data" / "features" / "structured"
+FEATURE_INCREMENT_OUTPUT_DIR = BASE_DIR / "data" / "features" / "increment"
 FEATURE_TEMP_DIR = BASE_DIR / "data" / "features" / "temp"  # 流水线中间结果暂存目录
 
 
@@ -50,8 +51,13 @@ class DataConfig:
     
     # 输出
     output_dir: Path = FEATURE_OUTPUT_DIR
+    increment_output_root: Path = FEATURE_INCREMENT_OUTPUT_DIR
     temp_dir: Path = FEATURE_TEMP_DIR  # 中间结果暂存目录
     train_file: str = "train.parquet"
+
+    # 增量窗口配置
+    increment_lookback_trade_days: int = 300
+    increment_gru_trade_days: int = 60
     
     # 中间结果文件名
     merger_preprocess_file: str = "merger_preprocess.parquet"  # 合并+预处理后的中间表

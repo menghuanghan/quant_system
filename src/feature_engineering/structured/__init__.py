@@ -20,6 +20,7 @@ from .config import (
 )
 
 from .pipeline import FeaturePipeline
+from .pipeline_increment import FeaturePipelineIncrement
 
 __all__ = [
     # 配置
@@ -32,4 +33,5 @@ __all__ = [
     "NormalizationConfig",
     # 流水线
     "FeaturePipeline",
+    "FeaturePipelineIncrement",
 ]

@@ -621,3 +621,100 @@ class LabelGenerator:
         logger.info(f"  ✅ 标签列: {list(label_columns.keys())}")
         
         return label_columns
+
+    def generate_labels_column_by_column_from_df(self, source_df: Any) -> Dict[str, Any]:
+        """
+        逐列计算标签（内存态）
+
+        语义对齐 `generate_labels_column_by_column`：
+        - 保持同样的输入列裁剪与标签计算顺序
+        - 不依赖中间 parquet 文件
+
+        Args:
+            source_df: 合并+预处理后的完整 DataFrame
+
+        Returns:
+            标签列字典 {column_name: column_data}
+        """
+        import gc
+
+        if source_df is None or len(source_df) == 0:
+            return {}
+
+        if self.use_gpu:
+            import cupy as cp
+
+        label_columns: Dict[str, Any] = {}
+        available_set = set(source_df.columns)
+
+        base_cols = [
+            'ts_code', 'trade_date',
+            'vwap_hfq', 'vwap', 'close_hfq', 'close',
+            'amount', 'vol', 'adj_factor',
+            'is_limit_up', 'is_limit',
+            'is_trading', 'return_1d',
+        ]
+        available_cols = [c for c in base_cols if c in available_set]
+
+        if 'ts_code' not in available_cols or 'trade_date' not in available_cols:
+            raise ValueError("标签逐列计算失败：缺少 ts_code/trade_date")
+
+        df = source_df[available_cols].copy()
+        df = df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+
+        price_col = self._select_execution_price_col(df)
+        self._validate_vwap_hfq_consistency(df, price_col)
+
+        # 1) 基础收益率标签
+        logger.info("  📊 计算未来收益率标签...")
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            df = self._generate_forward_return(df, price_col, days, label_col)
+            label_columns[label_col] = df[label_col].copy()
+
+        logger.info(f"    ✓ 收益率标签: {list(self.config.forward_days)}")
+
+        # 2) 去极值
+        df = self._clip_labels(df)
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            if label_col in df.columns:
+                label_columns[label_col] = df[label_col].copy()
+
+        # 3) 无效样本标记
+        df = self._mark_invalid_samples(df)
+        for days in self.config.forward_days:
+            label_col = f'ret_{days}d'
+            if label_col in df.columns:
+                label_columns[label_col] = df[label_col].copy()
+
+        # 4) 分类标签
+        if self.config.generate_class_labels:
+            logger.info("  📊 计算分类标签...")
+            df = self._generate_class_labels(df)
+            for days in self.config.forward_days:
+                class_col = f'label_{days}d'
+                if class_col in df.columns:
+                    label_columns[class_col] = df[class_col].copy()
+
+        # 5) 高级标签
+        logger.info("  📊 计算高级标签...")
+        df = self._generate_advanced_labels(df)
+
+        advanced_label_prefixes = ['excess_ret_', 'rank_ret_', 'sharpe_', 'label_bin_']
+        for col in df.columns:
+            for prefix in advanced_label_prefixes:
+                if col.startswith(prefix):
+                    label_columns[col] = df[col].copy()
+                    break
+
+        del df
+        gc.collect()
+        if self.use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+
+        logger.info(f"  ✅ 标签列: {list(label_columns.keys())}")
+        return label_columns

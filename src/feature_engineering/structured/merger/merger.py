@@ -20,7 +20,7 @@ from __future__ import annotations
 import gc
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, Any, Optional, List
 
 import pandas as pd
 
@@ -56,7 +56,8 @@ class DataMerger:
         self, 
         data_config: Optional[DataConfig] = None,
         pipeline_config: Optional[PipelineConfig] = None,
-        use_gpu: bool = True
+        use_gpu: bool = True,
+        table_provider: Optional[Any] = None,
     ):
         """
         初始化合并器
@@ -65,10 +66,12 @@ class DataMerger:
             data_config: 数据路径配置
             pipeline_config: 管道配置
             use_gpu: 是否使用GPU加速
+            table_provider: 可选输入数据提供器，需实现 load_table(table_name)
         """
         self.data_config = data_config or DataConfig()
         self.pipeline_config = pipeline_config or PipelineConfig()
         self.use_gpu = use_gpu
+        self.table_provider = table_provider
         
         # 延迟导入 cuDF 和 cupy（用于内存管理）
         self._cudf = None
@@ -137,6 +140,20 @@ class DataMerger:
         except Exception as e:
             logger.error(f"读取文件失败 {path}: {e}")
             return None
+
+    def _adapt_provider_df(self, df: Any) -> Optional[pd.DataFrame]:
+        """将 provider 返回的 DataFrame 适配到当前 CPU/GPU 后端。"""
+        if df is None:
+            return None
+
+        if self.use_gpu and self._cudf:
+            if isinstance(df, pd.DataFrame):
+                return self._cudf.from_pandas(df)
+            return df
+
+        if hasattr(df, "to_pandas"):
+            return df.to_pandas()
+        return df
     
     def _downcast_float(self, df: pd.DataFrame) -> pd.DataFrame:
         """将float64列下压为float32以节省内存"""
@@ -165,29 +182,39 @@ class DataMerger:
         # 检查缓存
         if table_name in self._table_cache:
             return self._table_cache[table_name]
+
+        # 优先从外部 provider 读取（增量模式注入）
+        df = None
+        if self.table_provider is not None:
+            try:
+                provider_df = self.table_provider.load_table(table_name)
+                if provider_df is not None:
+                    df = self._adapt_provider_df(provider_df)
+            except Exception as e:
+                logger.warning(f"provider 读取 {table_name} 失败，回退默认路径读取: {e}")
         
-        # 获取路径
-        path_map = {
-            'price': self.data_config.price_path,
-            'fundamental': self.data_config.fundamental_path,
-            'status': self.data_config.status_path,
-            'money_flow': self.data_config.money_flow_path,
-            'chip': self.data_config.chip_path,
-            'industry': self.data_config.industry_path,
-            'event': self.data_config.event_path,
-            'macro': self.data_config.macro_path,
-            'unstructured': self.data_config.unstructured_path,
-        }
-        
-        path = path_map.get(table_name)
-        if path is None:
-            logger.error(f"未知表名: {table_name}")
-            return None
-        
-        # 读取
-        df = self._read_parquet(path)
+        # provider 未命中时回退默认路径读取
         if df is None:
-            return None
+            path_map = {
+                'price': self.data_config.price_path,
+                'fundamental': self.data_config.fundamental_path,
+                'status': self.data_config.status_path,
+                'money_flow': self.data_config.money_flow_path,
+                'chip': self.data_config.chip_path,
+                'industry': self.data_config.industry_path,
+                'event': self.data_config.event_path,
+                'macro': self.data_config.macro_path,
+                'unstructured': self.data_config.unstructured_path,
+            }
+
+            path = path_map.get(table_name)
+            if path is None:
+                logger.error(f"未知表名: {table_name}")
+                return None
+
+            df = self._read_parquet(path)
+            if df is None:
+                return None
         
         # 下压
         if downcast:

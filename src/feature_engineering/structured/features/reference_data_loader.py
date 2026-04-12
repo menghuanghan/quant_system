@@ -35,7 +35,8 @@ class ReferenceDataLoader:
         self, 
         config: Any,
         use_gpu: bool = True,
-        cache_enabled: bool = True
+        cache_enabled: bool = True,
+        provider: Optional[Any] = None,
     ):
         """
         初始化加载器
@@ -44,10 +45,12 @@ class ReferenceDataLoader:
             config: 数据配置对象（需包含路径）
             use_gpu: 是否使用 GPU
             cache_enabled: 是否缓存数据
+            provider: 可选参考数据提供器，需实现 load_dataset(dataset_name)
         """
         self.config = config
         self.use_gpu = use_gpu
         self.cache_enabled = cache_enabled
+        self.provider = provider
         self._cache: Dict[str, Any] = {}
         
         # 初始化 DataFrame 库
@@ -64,6 +67,28 @@ class ReferenceDataLoader:
                 logger.warning("⚠️ cuDF 不可用，回退到 pandas")
         else:
             self.df_lib = pd
+
+    def _load_from_provider(self, dataset_name: str) -> Optional[pd.DataFrame]:
+        """从外部 provider 加载参考数据（若配置）。"""
+        if self.provider is None:
+            return None
+
+        try:
+            if hasattr(self.provider, 'load_dataset'):
+                df = self.provider.load_dataset(dataset_name)
+            else:
+                logger.warning("provider 不支持 load_dataset 接口，已回退本地读取")
+                return None
+        except Exception as e:
+            logger.warning(f"provider 加载 {dataset_name} 失败，回退本地读取: {e}")
+            return None
+
+        if df is None:
+            return None
+
+        if hasattr(df, 'to_pandas'):
+            return df.to_pandas()
+        return df
     
     @property
     def index_daily_path(self) -> Path:
@@ -126,26 +151,30 @@ class ReferenceDataLoader:
             return self._cache['benchmark']
         
         logger.info("  📖 加载指数日线行情...")
-        
-        path = self.index_daily_path
-        if not path.exists():
-            logger.warning(f"    ⚠️ 指数日线目录不存在: {path}")
-            return None
-        
-        # 读取所有 parquet 文件
-        dfs = []
-        for f in path.glob('*.parquet'):
-            try:
-                df = pd.read_parquet(f)
-                dfs.append(df)
-            except Exception as e:
-                logger.debug(f"    读取失败 {f}: {e}")
-        
-        if not dfs:
-            logger.warning("    ⚠️ 无可用指数日线数据")
-            return None
-        
-        df = pd.concat(dfs, ignore_index=True)
+
+        df = self._load_from_provider('index_daily')
+        if df is None:
+            path = self.index_daily_path
+            if not path.exists():
+                logger.warning(f"    ⚠️ 指数日线目录不存在: {path}")
+                return None
+
+            # 读取所有 parquet 文件
+            dfs = []
+            for f in path.glob('*.parquet'):
+                try:
+                    tmp = pd.read_parquet(f)
+                    dfs.append(tmp)
+                except Exception as e:
+                    logger.debug(f"    读取失败 {f}: {e}")
+
+            if not dfs:
+                logger.warning("    ⚠️ 无可用指数日线数据")
+                return None
+
+            df = pd.concat(dfs, ignore_index=True)
+        else:
+            logger.info("    ✓ 使用 provider 指数日线数据")
         
         # 筛选核心指数
         df = df[df['ts_code'].isin(self.CORE_INDEXES)]
@@ -211,26 +240,30 @@ class ReferenceDataLoader:
             return self._cache['weights']
         
         logger.info("  📖 加载指数权重表...")
-        
-        path = self.index_weight_path
-        if not path.exists():
-            logger.warning(f"    ⚠️ 指数权重目录不存在: {path}")
-            return None
-        
-        # 读取所有 parquet 文件
-        dfs = []
-        for f in path.glob('*.parquet'):
-            try:
-                df = pd.read_parquet(f)
-                dfs.append(df)
-            except Exception as e:
-                logger.debug(f"    读取失败 {f}: {e}")
-        
-        if not dfs:
-            logger.warning("    ⚠️ 无可用指数权重数据")
-            return None
-        
-        df = pd.concat(dfs, ignore_index=True)
+
+        df = self._load_from_provider('index_weight')
+        if df is None:
+            path = self.index_weight_path
+            if not path.exists():
+                logger.warning(f"    ⚠️ 指数权重目录不存在: {path}")
+                return None
+
+            # 读取所有 parquet 文件
+            dfs = []
+            for f in path.glob('*.parquet'):
+                try:
+                    tmp = pd.read_parquet(f)
+                    dfs.append(tmp)
+                except Exception as e:
+                    logger.debug(f"    读取失败 {f}: {e}")
+
+            if not dfs:
+                logger.warning("    ⚠️ 无可用指数权重数据")
+                return None
+
+            df = pd.concat(dfs, ignore_index=True)
+        else:
+            logger.info("    ✓ 使用 provider 指数权重数据")
         
         # 筛选核心指数
         index_col = 'index_code' if 'index_code' in df.columns else 'ts_code'
@@ -272,26 +305,30 @@ class ReferenceDataLoader:
             return self._cache['etf']
         
         logger.info("  📖 加载ETF日线...")
-        
-        path = self.etf_daily_path
-        if not path.exists():
-            logger.warning(f"    ⚠️ ETF日线目录不存在: {path}")
-            return None
-        
-        # 读取所有 parquet 文件
-        dfs = []
-        for f in path.glob('*.parquet'):
-            try:
-                df = pd.read_parquet(f)
-                dfs.append(df)
-            except Exception as e:
-                logger.debug(f"    读取失败 {f}: {e}")
-        
-        if not dfs:
-            logger.warning("    ⚠️ 无可用ETF日线数据")
-            return None
-        
-        df = pd.concat(dfs, ignore_index=True)
+
+        df = self._load_from_provider('etf_daily')
+        if df is None:
+            path = self.etf_daily_path
+            if not path.exists():
+                logger.warning(f"    ⚠️ ETF日线目录不存在: {path}")
+                return None
+
+            # 读取所有 parquet 文件
+            dfs = []
+            for f in path.glob('*.parquet'):
+                try:
+                    tmp = pd.read_parquet(f)
+                    dfs.append(tmp)
+                except Exception as e:
+                    logger.debug(f"    读取失败 {f}: {e}")
+
+            if not dfs:
+                logger.warning("    ⚠️ 无可用ETF日线数据")
+                return None
+
+            df = pd.concat(dfs, ignore_index=True)
+        else:
+            logger.info("    ✓ 使用 provider ETF 日线数据")
         
         # 确保 trade_date 格式
         if 'trade_date' in df.columns:
