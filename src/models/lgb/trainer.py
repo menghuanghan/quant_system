@@ -23,6 +23,7 @@ import pandas as pd
 from ..config import (
     DEFAULT_TRAIN_CONFIG,
     FeatureConfig,
+    InferenceConfig,
     LabelConfig,
     LGBConfig,
     SplitConfig,
@@ -189,7 +190,7 @@ class LGBTrainer:
         else:
             # 默认回归（绝对/超额收益、夏普等）
             return TargetType.REGRESSION
-    
+
     def _filter_valid_samples(
         self, 
         df: pd.DataFrame, 
@@ -560,95 +561,441 @@ class LGBTrainer:
 class InferenceEngine:
     """
     实盘推断引擎
-    
-    支持：
-    - 加载 Rolling 模型群 + Single Full 模型
-    - 加权融合预测
-    - 多目标融合
+
+    能力：
+    - 多目标模型加载（Rolling + Single_Full 两层）
+    - Rolling 层支持时间递近加权（linear_recency）
+    - 层内与层间可解释权重拆解
+    - 兼容旧接口：load_models(target_col) + predict(X)
     """
-    
+
     def __init__(
         self,
+        config: Optional[InferenceConfig] = None,
         rolling_models_dir: Optional[Path] = None,
+        full_models_dir: Optional[Path] = None,
+        full_model_pattern: Optional[str] = None,
         full_model_path: Optional[Path] = None,
-        rolling_weight: float = 0.4,
-        full_weight: float = 0.6,
+        rolling_weight: Optional[float] = None,
+        full_weight: Optional[float] = None,
+        rolling_weight_strategy: Optional[str] = None,
+        target_cols: Optional[List[str]] = None,
     ):
         """
         初始化推断引擎
-        
+
         Args:
-            rolling_models_dir: Rolling 模型目录
-            full_model_path: Single Full 模型路径
-            rolling_weight: Rolling 模型群权重
-            full_weight: Single Full 模型权重
+            config: 推断配置对象
+            rolling_models_dir: Rolling 模型目录（可覆盖 config）
+            full_models_dir: Single_Full 模型目录（可覆盖 config）
+            full_model_pattern: full 模型匹配模式（可覆盖 config）
+            full_model_path: 兼容旧单模型路径（fallback）
+            rolling_weight: Rolling 层权重
+            full_weight: Single_Full 层权重
+            rolling_weight_strategy: Rolling 层内权重策略（uniform/linear_recency）
+            target_cols: 默认推断目标列表
         """
-        self.rolling_models_dir = rolling_models_dir
-        self.full_model_path = full_model_path
-        self.rolling_weight = rolling_weight
-        self.full_weight = full_weight
-        
+        self.config = config or InferenceConfig()
+
+        self.rolling_models_dir = Path(rolling_models_dir or self.config.rolling_models_dir)
+        self.full_models_dir = Path(full_models_dir or self.config.full_models_dir)
+        self.full_model_pattern = full_model_pattern or self.config.full_model_pattern
+        self.full_model_path = Path(full_model_path or self.config.full_model_path)
+
+        self.rolling_weight = float(
+            self.config.rolling_weight if rolling_weight is None else rolling_weight
+        )
+        self.full_weight = float(
+            self.config.full_weight if full_weight is None else full_weight
+        )
+        self.rolling_weight_strategy = str(
+            (self.config.rolling_weight_strategy if rolling_weight_strategy is None else rolling_weight_strategy)
+        ).strip().lower()
+        self.target_cols = list(target_cols or self.config.target_cols)
+
+        # 目标级模型缓存
+        self.rolling_models_by_target: Dict[str, List[LGBQuantModel]] = {}
+        self.full_models_by_target: Dict[str, List[LGBQuantModel]] = {}
+        self.rolling_model_files_by_target: Dict[str, List[Path]] = {}
+        self.full_model_files_by_target: Dict[str, List[Path]] = {}
+
+        # 兼容旧接口（单目标）
         self.rolling_models: List[LGBQuantModel] = []
         self.full_model: Optional[LGBQuantModel] = None
-    
+
+    @staticmethod
+    def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+        """归一化权重，若和为 0 则回退等权。"""
+        w = np.asarray(weights, dtype=np.float64)
+        if w.ndim != 1 or w.size == 0:
+            raise ValueError("weights must be a non-empty 1D array")
+
+        s = float(np.sum(w))
+        if not np.isfinite(s) or s <= 0.0:
+            w = np.ones_like(w, dtype=np.float64)
+            s = float(np.sum(w))
+        return w / s
+
+    @staticmethod
+    def _extract_fold_idx(path: Path) -> int:
+        """从 rolling 模型文件名提取 fold 序号，提取失败返回 -1。"""
+        match = re.search(r"_fold(\d+)", path.stem)
+        return int(match.group(1)) if match else -1
+
+    def _sort_rolling_model_files(self, model_files: List[Path]) -> List[Path]:
+        """按 fold_idx 升序排序，确保时间递近加权语义一致。"""
+        return sorted(
+            model_files,
+            key=lambda p: (self._extract_fold_idx(p), p.name),
+        )
+
+    def _build_rolling_model_weights(self, model_files: List[Path]) -> np.ndarray:
+        """构建 rolling 层内权重。"""
+        n_models = len(model_files)
+        if n_models == 0:
+            return np.array([], dtype=np.float64)
+
+        strategy = self.rolling_weight_strategy
+        if strategy == "uniform":
+            raw = np.ones(n_models, dtype=np.float64)
+        elif strategy == "linear_recency":
+            # model_files 已按 fold 递增排序：后续模型权重更大
+            raw = np.arange(1, n_models + 1, dtype=np.float64)
+        else:
+            raise ValueError(
+                f"Unsupported rolling_weight_strategy='{strategy}'. "
+                "Use one of ['uniform', 'linear_recency']."
+            )
+
+        return self._normalize_weights(raw)
+
+    def _predict_model_group(
+        self,
+        X: pd.DataFrame,
+        models: List[LGBQuantModel],
+        model_weights: np.ndarray,
+    ) -> np.ndarray:
+        """同一层内模型按给定权重融合。"""
+        if not models:
+            raise ValueError("models is empty")
+
+        if len(models) != len(model_weights):
+            raise ValueError(
+                f"Model count {len(models)} != weight count {len(model_weights)}"
+            )
+
+        model_weights = self._normalize_weights(model_weights)
+        preds = [np.asarray(m.predict(X), dtype=np.float64) for m in models]
+
+        fused = np.zeros_like(preds[0], dtype=np.float64)
+        for pred, w in zip(preds, model_weights):
+            fused += pred * w
+        return fused
+
+    def load_models_for_targets(
+        self,
+        target_cols: Optional[List[str]] = None,
+        rolling_dir: Optional[Path] = None,
+        full_dir: Optional[Path] = None,
+    ) -> None:
+        """
+        批量加载多个目标的模型群。
+
+        Args:
+            target_cols: 目标列表
+            rolling_dir: rolling 模型目录
+            full_dir: single_full 模型目录
+        """
+        targets = list(target_cols or self.target_cols)
+        if not targets:
+            raise ValueError("target_cols is empty")
+
+        rolling_base = Path(rolling_dir or self.rolling_models_dir)
+        full_base = Path(full_dir or self.full_models_dir)
+
+        self.target_cols = targets
+        self.rolling_models_by_target.clear()
+        self.full_models_by_target.clear()
+        self.rolling_model_files_by_target.clear()
+        self.full_model_files_by_target.clear()
+
+        for target_col in targets:
+            # Rolling 模型群
+            rolling_files: List[Path] = []
+            if rolling_base.exists():
+                rolling_files = list(rolling_base.glob(f"lgb_{target_col}_rolling_*.pkl"))
+                rolling_files = self._sort_rolling_model_files(rolling_files)
+
+            rolling_models = [LGBQuantModel.load(f) for f in rolling_files]
+            self.rolling_model_files_by_target[target_col] = rolling_files
+            self.rolling_models_by_target[target_col] = rolling_models
+
+            # Single_Full 模型群（按 target 匹配）
+            full_files: List[Path] = []
+            if full_base.exists():
+                pattern = self.full_model_pattern.format(target_col=target_col)
+                full_files = sorted(full_base.glob(pattern))
+
+            # 兼容旧单模型路径（仅当前 target 未匹配到时回退）
+            if not full_files and self.full_model_path.exists():
+                logger.warning(
+                    "No target-specific single_full model matched for %s in %s; "
+                    "fallback to legacy full_model_path=%s",
+                    target_col,
+                    full_base,
+                    self.full_model_path,
+                )
+                full_files = [self.full_model_path]
+
+            full_models = [LGBQuantModel.load(f) for f in full_files]
+            self.full_model_files_by_target[target_col] = full_files
+            self.full_models_by_target[target_col] = full_models
+
+            logger.info(
+                "Loaded models for %s: rolling=%d, single_full=%d",
+                target_col,
+                len(rolling_models),
+                len(full_models),
+            )
+
     def load_models(self, target_col: str) -> None:
         """
-        加载指定标签的模型
-        
+        加载指定标签的模型（兼容旧接口）。
+
         Args:
             target_col: 标签列名
         """
-        # 加载 Rolling 模型群
-        if self.rolling_models_dir and self.rolling_models_dir.exists():
-            pattern = f"lgb_{target_col}_rolling_*.pkl"
-            model_files = sorted(self.rolling_models_dir.glob(pattern))
-            
-            self.rolling_models = [
-                LGBQuantModel.load(f) for f in model_files
-            ]
-            logger.info(f"Loaded {len(self.rolling_models)} rolling models for {target_col}")
-        
-        # 加载 Single Full 模型
-        if self.full_model_path and self.full_model_path.exists():
-            self.full_model = LGBQuantModel.load(self.full_model_path)
-            logger.info(f"Loaded full model from {self.full_model_path}")
-    
+        self.load_models_for_targets([target_col])
+        self.rolling_models = self.rolling_models_by_target.get(target_col, [])
+        full_models = self.full_models_by_target.get(target_col, [])
+        self.full_model = full_models[0] if full_models else None
+
+    def _fuse_target_predictions(
+        self,
+        X: pd.DataFrame,
+        target_col: str,
+        with_breakdown: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
+        """单目标两层融合，按需返回可解释拆解。"""
+        rolling_models = self.rolling_models_by_target.get(target_col, [])
+        full_models = self.full_models_by_target.get(target_col, [])
+
+        layer_names: List[str] = []
+        layer_scores: List[np.ndarray] = []
+        layer_weights: List[float] = []
+        breakdown: Dict[str, Any] = {
+            "target_col": target_col,
+            "rolling": {},
+            "single_full": {},
+            "layer_weights": {},
+        }
+
+        # Rolling 层
+        if rolling_models:
+            rolling_files = self.rolling_model_files_by_target.get(target_col, [])
+            if rolling_files:
+                rolling_model_weights = self._build_rolling_model_weights(rolling_files)
+            else:
+                rolling_model_weights = self._normalize_weights(
+                    np.ones(len(rolling_models), dtype=np.float64)
+                )
+
+            score_rolling = self._predict_model_group(
+                X=X,
+                models=rolling_models,
+                model_weights=rolling_model_weights,
+            )
+            layer_names.append("rolling")
+            layer_scores.append(score_rolling)
+            layer_weights.append(self.rolling_weight)
+
+            if with_breakdown:
+                breakdown["rolling"] = {
+                    "enabled": True,
+                    "model_count": len(rolling_models),
+                    "model_files": [str(p) for p in rolling_files],
+                    "model_weights": rolling_model_weights.tolist(),
+                    "pred_mean": float(np.mean(score_rolling)),
+                    "pred_std": float(np.std(score_rolling)),
+                }
+        elif with_breakdown:
+            breakdown["rolling"] = {
+                "enabled": False,
+                "model_count": 0,
+                "model_files": [],
+                "model_weights": [],
+            }
+
+        # Single_Full 层
+        if full_models:
+            full_model_weights = self._normalize_weights(
+                np.ones(len(full_models), dtype=np.float64)
+            )
+            score_full = self._predict_model_group(
+                X=X,
+                models=full_models,
+                model_weights=full_model_weights,
+            )
+            layer_names.append("single_full")
+            layer_scores.append(score_full)
+            layer_weights.append(self.full_weight)
+
+            if with_breakdown:
+                full_files = self.full_model_files_by_target.get(target_col, [])
+                breakdown["single_full"] = {
+                    "enabled": True,
+                    "model_count": len(full_models),
+                    "model_files": [str(p) for p in full_files],
+                    "model_weights": full_model_weights.tolist(),
+                    "pred_mean": float(np.mean(score_full)),
+                    "pred_std": float(np.std(score_full)),
+                }
+        elif with_breakdown:
+            breakdown["single_full"] = {
+                "enabled": False,
+                "model_count": 0,
+                "model_files": [],
+                "model_weights": [],
+            }
+
+        if not layer_scores:
+            raise ValueError(f"No models loaded for target '{target_col}'")
+
+        layer_weights_arr = self._normalize_weights(np.asarray(layer_weights, dtype=np.float64))
+        final_score = np.zeros_like(layer_scores[0], dtype=np.float64)
+        for s, w in zip(layer_scores, layer_weights_arr):
+            final_score += s * w
+
+        if with_breakdown:
+            breakdown["layer_weights"] = {
+                name: float(w) for name, w in zip(layer_names, layer_weights_arr)
+            }
+            breakdown["configured_layer_weights"] = {
+                "rolling": float(self.rolling_weight),
+                "single_full": float(self.full_weight),
+            }
+            breakdown["final"] = {
+                "pred_mean": float(np.mean(final_score)),
+                "pred_std": float(np.std(final_score)),
+            }
+            return final_score, breakdown
+
+        return final_score
+
+    def predict_target(
+        self,
+        X: pd.DataFrame,
+        target_col: str,
+        with_breakdown: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
+        """单目标融合预测。"""
+        loaded = bool(
+            self.rolling_models_by_target.get(target_col)
+            or self.full_models_by_target.get(target_col)
+        )
+        if not loaded:
+            self.load_models(target_col)
+
+        return self._fuse_target_predictions(
+            X=X,
+            target_col=target_col,
+            with_breakdown=with_breakdown,
+        )
+
+    def predict_multi(
+        self,
+        X: pd.DataFrame,
+        target_cols: Optional[List[str]] = None,
+        with_breakdown: bool = False,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, Dict[str, Any]]]:
+        """多目标融合预测。"""
+        targets = list(target_cols or self.target_cols)
+        if not targets:
+            raise ValueError("target_cols is empty")
+
+        # 按请求目标批量加载
+        self.load_models_for_targets(targets)
+
+        preds_df = pd.DataFrame(index=X.index)
+        breakdown_by_target: Dict[str, Any] = {}
+
+        for target_col in targets:
+            if with_breakdown:
+                pred, breakdown = self.predict_target(
+                    X=X,
+                    target_col=target_col,
+                    with_breakdown=True,
+                )
+                breakdown_by_target[target_col] = breakdown
+            else:
+                pred = self.predict_target(
+                    X=X,
+                    target_col=target_col,
+                    with_breakdown=False,
+                )
+
+            preds_df[f"y_pred_{target_col}"] = pred
+
+        if with_breakdown:
+            return preds_df, {
+                "targets": targets,
+                "rolling_weight_strategy": self.rolling_weight_strategy,
+                "layer_weight_config": {
+                    "rolling": self.rolling_weight,
+                    "single_full": self.full_weight,
+                },
+                "by_target": breakdown_by_target,
+            }
+
+        return preds_df
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
-        融合预测
-        
-        公式：0.4 * Score_rolling + 0.6 * Score_full
-        其中 Score_rolling 是所有 Rolling 模型的平均
-        
-        Args:
-            X: 输入特征
-            
-        Returns:
-            predictions: 融合后的预测分数
+        融合预测（兼容旧单目标接口）。
+
+        说明：
+        - 若仅加载了一个目标，返回该目标预测
+        - 若已加载多个目标，请使用 predict_multi()
         """
-        scores = []
-        weights = []
-        
-        # Rolling 模型群预测（等权平均）
-        if self.rolling_models:
-            rolling_preds = [m.predict(X) for m in self.rolling_models]
-            score_rolling = np.mean(rolling_preds, axis=0)
-            scores.append(score_rolling)
-            weights.append(self.rolling_weight)
-        
-        # Full 模型预测
-        if self.full_model:
-            score_full = self.full_model.predict(X)
-            scores.append(score_full)
-            weights.append(self.full_weight)
-        
-        if not scores:
-            raise ValueError("No models loaded")
-        
-        # 归一化权重
-        weights = np.array(weights)
-        weights = weights / weights.sum()
-        
-        # 加权融合
-        final_score = sum(s * w for s, w in zip(scores, weights))
-        return final_score
+        loaded_targets = [
+            t for t in set(self.rolling_models_by_target.keys()) | set(self.full_models_by_target.keys())
+            if self.rolling_models_by_target.get(t) or self.full_models_by_target.get(t)
+        ]
+
+        # 兼容旧路径：外部仅调用了 load_models(target_col)
+        if not loaded_targets and (self.rolling_models or self.full_model is not None):
+            layer_scores: List[np.ndarray] = []
+            layer_weights: List[float] = []
+
+            if self.rolling_models:
+                rw = self._normalize_weights(np.ones(len(self.rolling_models), dtype=np.float64))
+                layer_scores.append(self._predict_model_group(X, self.rolling_models, rw))
+                layer_weights.append(self.rolling_weight)
+
+            if self.full_model is not None:
+                layer_scores.append(np.asarray(self.full_model.predict(X), dtype=np.float64))
+                layer_weights.append(self.full_weight)
+
+            if not layer_scores:
+                raise ValueError("No models loaded")
+
+            lw = self._normalize_weights(np.asarray(layer_weights, dtype=np.float64))
+            out = np.zeros_like(layer_scores[0], dtype=np.float64)
+            for s, w in zip(layer_scores, lw):
+                out += s * w
+            return out
+
+        if not loaded_targets:
+            if len(self.target_cols) == 1:
+                return self.predict_target(X=X, target_col=self.target_cols[0], with_breakdown=False)
+            raise ValueError(
+                "No models loaded. Call load_models(target_col) or "
+                "load_models_for_targets([...]) first."
+            )
+
+        if len(loaded_targets) > 1:
+            raise ValueError(
+                "Multiple targets are loaded. Use predict_multi() for multi-target inference."
+            )
+
+        return self.predict_target(X=X, target_col=loaded_targets[0], with_breakdown=False)

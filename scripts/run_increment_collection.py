@@ -141,7 +141,7 @@ def main():
                     item.new_hash,
                 )
 
-        reports_dir = Path("reports")
+        reports_dir = Path("reports/static_refresh")
         reports_dir.mkdir(parents=True, exist_ok=True)
         default_path = reports_dir / (
             f"static_refresh_report_{report.target_date.replace('-', '')}_"

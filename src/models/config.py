@@ -239,16 +239,31 @@ class TrainConfig:
 @dataclass
 class InferenceConfig:
     """实盘推断配置"""
+
+    # 默认推断目标（与训练脚本默认值对齐）
+    target_cols: List[str] = field(default_factory=lambda: [
+        "rank_ret_5d",
+        "excess_ret_5d",
+        "sharpe_5d",
+    ])
     
     # 模型权重
     rolling_weight: float = 0.4      # Rolling 模型群权重
     full_weight: float = 0.6         # Single Full 模型权重
+
+    # Rolling 组内加权策略（uniform / linear_recency）
+    rolling_weight_strategy: str = "linear_recency"
     
     # 多目标融合权重（可选：等权 or 协方差加权）
     target_weights: Optional[Dict[str, float]] = None
     
     # 模型路径
     rolling_models_dir: Path = MODELS_DIR / "lgb" / "rolling"
+    # 新默认：训练产物在 models/lgb/single_full
+    full_models_dir: Path = MODELS_DIR / "lgb" / "single_full"
+    # 目标级 full 模型匹配规则，{target_col} 会被替换
+    full_model_pattern: str = "lgb_{target_col}_single_full_*.pkl"
+    # 兼容旧配置（若目录匹配不到目标模型，可回退到该单模型文件）
     full_model_path: Path = MODELS_DIR / "lgb" / "full" / "lgb_full.pkl"
 
 
@@ -529,8 +544,20 @@ class GRUTrainConfig:
 @dataclass
 class GRUInferenceConfig:
     """GRU 实盘推断配置"""
+
+    # 默认推断目标（与训练脚本默认值对齐）
+    target_cols: List[str] = field(default_factory=lambda: [
+        "rank_ret_5d",
+        "excess_ret_5d",
+        "sharpe_5d",
+    ])
+
     rolling_weight: float = 0.4
     full_weight: float = 0.6
+
+    # Rolling 组内加权策略（uniform / linear_recency）
+    rolling_weight_strategy: str = "linear_recency"
+
     rolling_models_dir: Path = MODELS_DIR / "gru" / "rolling"
     full_models_dir: Path = MODELS_DIR / "gru" / "single_full"
 

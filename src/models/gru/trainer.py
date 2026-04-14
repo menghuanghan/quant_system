@@ -18,10 +18,12 @@
 """
 
 import gc
+import json
 import logging
+import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -1094,15 +1096,316 @@ class GRUInferenceEngine:
     实盘推断引擎
 
     大集成逻辑:
-    1. 加载 Rolling 模型群 → 各自预测 → 等权平均 → Score_rolling
-    2. 加载 Single_Full 模型群 → 各自预测 → 算术平均 → Score_full
-    3. 加权融合: final = rolling_weight * Score_rolling + full_weight * Score_full
+    1. 加载 Rolling 模型群（按 fold 时间递近加权）
+    2. 加载 Single_Full 多种子模型群（层内等权）
+    3. 两层融合: final = w_rolling * Score_rolling + w_full * Score_full
+    4. 支持从增量 DataFrame 直接构建推断 loader，并强制应用 feature_selection 工件
     """
 
     def __init__(self, config: Optional[GRUInferenceConfig] = None):
         self.config = config or GRUInferenceConfig()
+        self.target_cols = list(self.config.target_cols)
+        self.rolling_models_dir = Path(self.config.rolling_models_dir)
+        self.full_models_dir = Path(self.config.full_models_dir)
+
         self.rolling_models: List[GRUModel] = []
         self.full_models: List[GRUModel] = []
+        self.rolling_model_files: List[Path] = []
+        self.full_model_files: List[Path] = []
+        self.device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    @staticmethod
+    def _normalize_weights(weights: np.ndarray) -> np.ndarray:
+        w = np.asarray(weights, dtype=np.float64)
+        if w.ndim != 1 or w.size == 0:
+            raise ValueError("weights must be a non-empty 1D array")
+
+        s = float(np.sum(w))
+        if not np.isfinite(s) or s <= 0:
+            w = np.ones_like(w, dtype=np.float64)
+            s = float(np.sum(w))
+        return w / s
+
+    @staticmethod
+    def _extract_fold_idx(path: Path) -> int:
+        match = re.search(r"rolling_fold(\d+)", path.stem)
+        return int(match.group(1)) if match else -1
+
+    def _sort_rolling_model_files(self, files: List[Path]) -> List[Path]:
+        return sorted(files, key=lambda p: (self._extract_fold_idx(p), p.name))
+
+    def _resolve_device(self, device: str) -> str:
+        requested = str(device).strip().lower()
+        if requested == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA 不可用，GRU 推断回退到 CPU")
+            return "cpu"
+        return requested
+
+    def _build_rolling_model_weights(self, model_files: List[Path]) -> np.ndarray:
+        n_models = len(model_files)
+        if n_models == 0:
+            return np.array([], dtype=np.float64)
+
+        strategy = str(self.config.rolling_weight_strategy).strip().lower()
+        if strategy == "uniform":
+            raw = np.ones(n_models, dtype=np.float64)
+        elif strategy == "linear_recency":
+            # files 已按 fold 递增排序：越新的 fold 权重越高
+            raw = np.arange(1, n_models + 1, dtype=np.float64)
+        else:
+            raise ValueError(
+                f"Unsupported rolling_weight_strategy='{strategy}'. "
+                "Use one of ['uniform', 'linear_recency']."
+            )
+
+        return self._normalize_weights(raw)
+
+    def _predict_model_group(
+        self,
+        loader,
+        models: List[GRUModel],
+        model_weights: np.ndarray,
+    ) -> np.ndarray:
+        if not models:
+            raise ValueError("models is empty")
+        if len(models) != len(model_weights):
+            raise ValueError(
+                f"Model count {len(models)} != weight count {len(model_weights)}"
+            )
+
+        model_weights = self._normalize_weights(model_weights)
+        preds = [np.asarray(m.predict(loader), dtype=np.float64) for m in models]
+
+        fused = np.zeros_like(preds[0], dtype=np.float64)
+        for pred, w in zip(preds, model_weights):
+            fused += pred * w
+        return fused
+
+    def _load_feature_selection_artifacts(
+        self,
+        mode: str,
+        model_dir: Path,
+    ) -> Tuple[List[str], Dict[str, str], Path]:
+        """读取 feature_selection 工件（selected_features + transform_specs）。"""
+        artifact_dir = model_dir / "feature_selection"
+        selected_path = artifact_dir / "selected_features.json"
+        transform_path = artifact_dir / "transform_specs.json"
+
+        if not selected_path.exists():
+            raise FileNotFoundError(
+                f"{mode} feature selection artifact not found: {selected_path}"
+            )
+
+        with open(selected_path, "r", encoding="utf-8") as f:
+            selected_payload = json.load(f)
+
+        selected_features = list(selected_payload.get("selected_features", []))
+        if not selected_features:
+            raise ValueError(f"{mode} selected_features is empty: {selected_path}")
+
+        transform_specs: Dict[str, str] = {}
+        if transform_path.exists():
+            with open(transform_path, "r", encoding="utf-8") as f:
+                transform_specs = dict(json.load(f) or {})
+
+        return selected_features, transform_specs, artifact_dir
+
+    @staticmethod
+    def _apply_transform_specs(
+        df: pd.DataFrame,
+        selected_features: List[str],
+        transform_specs: Dict[str, str],
+    ) -> pd.DataFrame:
+        """按 feature_selection 工件中的 transform_specs 应用列变换。"""
+        if not transform_specs:
+            return df
+
+        diff_cols = [
+            c for c in selected_features
+            if transform_specs.get(c) == "diff" and c in df.columns
+        ]
+        pct_cols = [
+            c for c in selected_features
+            if transform_specs.get(c) == "pct_change" and c in df.columns
+        ]
+
+        if diff_cols:
+            df[diff_cols] = df.groupby("ts_code", sort=False)[diff_cols].diff()
+        if pct_cols:
+            df[pct_cols] = df.groupby("ts_code", sort=False)[pct_cols].pct_change()
+
+        transformed_cols = diff_cols + pct_cols
+        if transformed_cols:
+            df[transformed_cols] = (
+                df[transformed_cols]
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+            )
+
+        return df
+
+    def _validate_model_group(
+        self,
+        models: List[GRUModel],
+        selected_features: List[str],
+        requested_targets: List[str],
+        group_name: str,
+    ) -> Tuple[List[str], int, List[int]]:
+        """校验同一层模型结构一致，并验证 target/feature 约束。"""
+        if not models:
+            raise ValueError(f"{group_name} models is empty")
+
+        ref = models[0]
+        ref_targets = list(ref.target_cols)
+        ref_num_cont = int(ref.num_cont_features)
+        ref_num_cat = int(ref.num_cat_features)
+        ref_cardinalities = list(getattr(ref, "cat_cardinalities", []) or [])
+
+        if len(selected_features) != ref_num_cont:
+            raise ValueError(
+                f"{group_name} selected_features count({len(selected_features)}) "
+                f"!= model.num_cont_features({ref_num_cont})"
+            )
+
+        missing_targets = [t for t in requested_targets if t not in ref_targets]
+        if missing_targets:
+            raise ValueError(
+                f"{group_name} model targets mismatch, missing requested targets: {missing_targets}, "
+                f"model_targets={ref_targets}"
+            )
+
+        for i, model in enumerate(models[1:], start=1):
+            if list(model.target_cols) != ref_targets:
+                raise ValueError(
+                    f"{group_name} model[{i}] target_cols mismatch: "
+                    f"{model.target_cols} != {ref_targets}"
+                )
+            if int(model.num_cont_features) != ref_num_cont:
+                raise ValueError(
+                    f"{group_name} model[{i}] num_cont_features mismatch: "
+                    f"{model.num_cont_features} != {ref_num_cont}"
+                )
+            if int(model.num_cat_features) != ref_num_cat:
+                raise ValueError(
+                    f"{group_name} model[{i}] num_cat_features mismatch: "
+                    f"{model.num_cat_features} != {ref_num_cat}"
+                )
+            model_cards = list(getattr(model, "cat_cardinalities", []) or [])
+            if model_cards != ref_cardinalities:
+                raise ValueError(
+                    f"{group_name} model[{i}] cat_cardinalities mismatch: "
+                    f"{model_cards} != {ref_cardinalities}"
+                )
+
+        return ref_targets, ref_num_cat, ref_cardinalities
+
+    def _build_inference_loader_from_dataframe(
+        self,
+        df: pd.DataFrame,
+        selected_features: List[str],
+        transform_specs: Dict[str, str],
+        target_cols: List[str],
+        seq_len: int,
+        batch_size: int,
+        device: str,
+        num_cat_features: int,
+        cat_cardinalities: List[int],
+    ) -> Tuple[Any, pd.DataFrame]:
+        """
+        从原始 DataFrame 构建 GRU 推断 loader，并返回样本元信息（trade_date/ts_code）。
+        """
+        if "ts_code" not in df.columns or "trade_date" not in df.columns:
+            raise ValueError("Inference DataFrame must contain ['ts_code', 'trade_date'] columns")
+
+        work_df = df.copy()
+        work_df["trade_date"] = pd.to_datetime(work_df["trade_date"], errors="coerce")
+        work_df["ts_code"] = work_df["ts_code"].astype(str)
+        work_df = work_df.dropna(subset=["trade_date", "ts_code"]).copy()
+        work_df = work_df.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
+
+        missing_features = [c for c in selected_features if c not in work_df.columns]
+        if missing_features:
+            raise ValueError(
+                f"Missing required GRU selected features (showing up to 20): {missing_features[:20]}"
+            )
+
+        # 应用训练期同源 transform 规则
+        work_df = self._apply_transform_specs(
+            df=work_df,
+            selected_features=selected_features,
+            transform_specs=transform_specs,
+        )
+
+        n_rows = len(work_df)
+        if n_rows == 0:
+            raise ValueError("Inference DataFrame is empty after preprocessing")
+
+        # 连续特征
+        cont_np = np.empty((n_rows, len(selected_features)), dtype=np.float32)
+        for i, col in enumerate(selected_features):
+            values = pd.to_numeric(work_df[col], errors="coerce").astype(np.float32).values
+            cont_np[:, i] = values
+        np.nan_to_num(cont_np, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 类别特征（按训练时卡方大小截断）
+        cat_tensor = None
+        if num_cat_features > 0:
+            cat_cols = [c for c in CATEGORICAL_FEATURES if c in work_df.columns]
+            if len(cat_cols) < num_cat_features:
+                raise ValueError(
+                    f"Not enough categorical columns for GRU inference: "
+                    f"required={num_cat_features}, available={cat_cols}"
+                )
+            cat_cols = cat_cols[:num_cat_features]
+
+            cat_np = np.empty((n_rows, num_cat_features), dtype=np.int64)
+            for i, col in enumerate(cat_cols):
+                raw = pd.to_numeric(work_df[col], errors="coerce").fillna(-1).astype(np.int64).values
+                values = np.maximum(raw + 1, 0)
+                cardinality = int(cat_cardinalities[i]) if i < len(cat_cardinalities) else max(2, int(values.max()) + 1)
+                values = np.clip(values, 0, max(cardinality - 1, 1))
+                cat_np[:, i] = values
+
+            cat_tensor = torch.from_numpy(cat_np).to(device=device, dtype=torch.long)
+
+        labels_np = np.zeros((n_rows, len(target_cols)), dtype=np.float32)
+
+        cont_tensor = torch.from_numpy(cont_np).to(device)
+        label_tensor = torch.from_numpy(labels_np).to(device)
+
+        dates_arr = work_df["trade_date"].values
+        codes_arr = work_df["ts_code"].values
+        indices = np.arange(n_rows, dtype=np.int64)
+
+        dataset = GRUTensorDataset(
+            cont_features=cont_tensor,
+            cat_features=cat_tensor,
+            labels=label_tensor,
+            dates=dates_arr,
+            codes=codes_arr,
+            indices=indices,
+            seq_len=seq_len,
+            target_cols=target_cols,
+            date_range=None,
+        )
+        if len(dataset) == 0:
+            raise ValueError(
+                "No valid GRU sequence samples generated. "
+                "Check seq_len and whether each ts_code has enough history rows."
+            )
+
+        loader = create_dataloader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+        meta_df = pd.DataFrame(
+            {
+                "trade_date": dataset.get_all_dates(),
+                "ts_code": dataset.get_all_codes(),
+            }
+        )
+        return loader, meta_df
 
     def load_models(
         self,
@@ -1110,59 +1413,355 @@ class GRUInferenceEngine:
         rolling_dir: Optional[Path] = None,
         full_dir: Optional[Path] = None,
     ):
-        """加载所有模型"""
-        rolling_dir = rolling_dir or self.config.rolling_models_dir
-        full_dir = full_dir or self.config.full_models_dir
+        """加载所有模型。"""
+        self.device = self._resolve_device(device)
+
+        rolling_dir = Path(rolling_dir or self.config.rolling_models_dir)
+        full_dir = Path(full_dir or self.config.full_models_dir)
+        self.rolling_models_dir = rolling_dir
+        self.full_models_dir = full_dir
+
+        self.rolling_models = []
+        self.full_models = []
+        self.rolling_model_files = []
+        self.full_model_files = []
 
         # Rolling 模型
         if rolling_dir.exists():
-            pth_files = sorted(rolling_dir.glob("*_best_model.pth"))
+            rolling_files = list(rolling_dir.glob("rolling_fold*_best_model.pth"))
+            if not rolling_files:
+                rolling_files = list(rolling_dir.glob("*_best_model.pth"))
+            rolling_files = self._sort_rolling_model_files(rolling_files)
+
+            self.rolling_model_files = rolling_files
             self.rolling_models = [
-                GRUModel.load(f, device=device) for f in pth_files
+                GRUModel.load(f, device=self.device) for f in rolling_files
             ]
             logger.info(f"加载 {len(self.rolling_models)} 个 Rolling 模型")
 
         # Full 模型
         if full_dir.exists():
-            pth_files = sorted(full_dir.glob("*_best_model_seed_*.pth"))
+            full_files = sorted(full_dir.glob("single_full_best_model_seed_*.pth"))
+            if not full_files:
+                full_files = sorted(full_dir.glob("*_best_model_seed_*.pth"))
+
+            self.full_model_files = full_files
             self.full_models = [
-                GRUModel.load(f, device=device) for f in pth_files
+                GRUModel.load(f, device=self.device) for f in full_files
             ]
             logger.info(f"加载 {len(self.full_models)} 个 Single_Full 模型")
 
     def predict(
         self,
         loader,
-    ) -> np.ndarray:
+        with_breakdown: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, Any]]]:
         """
-        融合预测
+        使用已有 loader 执行融合预测（兼容旧接口）。
 
         Returns:
             final_preds: (N, num_targets)
         """
-        scores = []
-        weights = []
+        scores: List[np.ndarray] = []
+        weights: List[float] = []
+        breakdown: Dict[str, Any] = {
+            "rolling": {},
+            "single_full": {},
+            "layer_weights": {},
+            "configured_layer_weights": {
+                "rolling": float(self.config.rolling_weight),
+                "single_full": float(self.config.full_weight),
+            },
+        }
 
         # Rolling 模型群
         if self.rolling_models:
-            rolling_preds = [m.predict(loader) for m in self.rolling_models]
-            score_rolling = np.mean(rolling_preds, axis=0)
+            if self.rolling_model_files:
+                rolling_model_weights = self._build_rolling_model_weights(self.rolling_model_files)
+            else:
+                rolling_model_weights = self._normalize_weights(
+                    np.ones(len(self.rolling_models), dtype=np.float64)
+                )
+
+            score_rolling = self._predict_model_group(
+                loader=loader,
+                models=self.rolling_models,
+                model_weights=rolling_model_weights,
+            )
             scores.append(score_rolling)
             weights.append(self.config.rolling_weight)
 
+            if with_breakdown:
+                breakdown["rolling"] = {
+                    "enabled": True,
+                    "model_count": len(self.rolling_models),
+                    "model_files": [str(p) for p in self.rolling_model_files],
+                    "model_weights": rolling_model_weights.tolist(),
+                    "pred_mean": float(np.mean(score_rolling)),
+                    "pred_std": float(np.std(score_rolling)),
+                }
+        elif with_breakdown:
+            breakdown["rolling"] = {
+                "enabled": False,
+                "model_count": 0,
+                "model_files": [],
+                "model_weights": [],
+            }
+
         # Full 模型群
         if self.full_models:
-            full_preds = [m.predict(loader) for m in self.full_models]
-            score_full = np.mean(full_preds, axis=0)
+            full_model_weights = self._normalize_weights(
+                np.ones(len(self.full_models), dtype=np.float64)
+            )
+            score_full = self._predict_model_group(
+                loader=loader,
+                models=self.full_models,
+                model_weights=full_model_weights,
+            )
             scores.append(score_full)
             weights.append(self.config.full_weight)
+
+            if with_breakdown:
+                breakdown["single_full"] = {
+                    "enabled": True,
+                    "model_count": len(self.full_models),
+                    "model_files": [str(p) for p in self.full_model_files],
+                    "model_weights": full_model_weights.tolist(),
+                    "pred_mean": float(np.mean(score_full)),
+                    "pred_std": float(np.std(score_full)),
+                }
+        elif with_breakdown:
+            breakdown["single_full"] = {
+                "enabled": False,
+                "model_count": 0,
+                "model_files": [],
+                "model_weights": [],
+            }
 
         if not scores:
             raise ValueError("没有可用模型")
 
-        # 权重归一化
-        w = np.array(weights)
-        w = w / w.sum()
+        w = self._normalize_weights(np.asarray(weights, dtype=np.float64))
 
-        final = sum(s * wi for s, wi in zip(scores, w))
+        final = np.zeros_like(scores[0], dtype=np.float64)
+        for s, wi in zip(scores, w):
+            final += s * wi
+
+        if with_breakdown:
+            layer_names = []
+            if self.rolling_models:
+                layer_names.append("rolling")
+            if self.full_models:
+                layer_names.append("single_full")
+            breakdown["layer_weights"] = {
+                name: float(weight) for name, weight in zip(layer_names, w)
+            }
+            breakdown["final"] = {
+                "pred_mean": float(np.mean(final)),
+                "pred_std": float(np.std(final)),
+            }
+            return final, breakdown
+
         return final
+
+    def predict_from_dataframe(
+        self,
+        df: pd.DataFrame,
+        target_cols: Optional[List[str]] = None,
+        seq_len: int = 20,
+        batch_size: int = 2048,
+        with_breakdown: bool = False,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, Dict[str, Any]]]:
+        """
+        从原始特征 DataFrame 直接推断，自动应用 feature_selection 工件。
+
+        Args:
+            df: 增量特征数据（至少包含 ts_code, trade_date）
+            target_cols: 需要输出的目标列表
+            seq_len: GRU 序列长度
+            batch_size: 预测 batch 大小
+            with_breakdown: 是否返回可解释拆解
+
+        Returns:
+            preds_df: 包含 trade_date/ts_code 及 y_pred_{target} 的 DataFrame
+        """
+        if not self.rolling_models and not self.full_models:
+            self.load_models(device=self.device)
+
+        requested_targets = list(target_cols or self.target_cols)
+        if not requested_targets:
+            raise ValueError("target_cols is empty")
+
+        layer_frames: List[pd.DataFrame] = []
+        active_layer_names: List[str] = []
+        active_layer_weights: List[float] = []
+        breakdown_layers: Dict[str, Any] = {}
+
+        # ---- Rolling 层 ----
+        if self.rolling_models:
+            rolling_features, rolling_transforms, rolling_artifact_dir = self._load_feature_selection_artifacts(
+                mode="rolling",
+                model_dir=self.rolling_models_dir,
+            )
+
+            rolling_targets, rolling_num_cat, rolling_cards = self._validate_model_group(
+                models=self.rolling_models,
+                selected_features=rolling_features,
+                requested_targets=requested_targets,
+                group_name="rolling",
+            )
+
+            rolling_loader, rolling_meta = self._build_inference_loader_from_dataframe(
+                df=df,
+                selected_features=rolling_features,
+                transform_specs=rolling_transforms,
+                target_cols=rolling_targets,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                device=self.device,
+                num_cat_features=rolling_num_cat,
+                cat_cardinalities=rolling_cards,
+            )
+
+            rolling_weights = self._build_rolling_model_weights(self.rolling_model_files)
+            rolling_pred = self._predict_model_group(
+                loader=rolling_loader,
+                models=self.rolling_models,
+                model_weights=rolling_weights,
+            )
+
+            rolling_frame = rolling_meta.copy()
+            for i, t in enumerate(rolling_targets):
+                rolling_frame[f"rolling_y_pred_{t}"] = rolling_pred[:, i]
+
+            layer_frames.append(rolling_frame)
+            active_layer_names.append("rolling")
+            active_layer_weights.append(float(self.config.rolling_weight))
+
+            if with_breakdown:
+                breakdown_layers["rolling"] = {
+                    "enabled": True,
+                    "feature_selection_artifact_dir": str(rolling_artifact_dir),
+                    "selected_feature_count": len(rolling_features),
+                    "selected_feature_preview": rolling_features[:20],
+                    "transform_count": int(len(rolling_transforms)),
+                    "model_count": len(self.rolling_models),
+                    "model_files": [str(p) for p in self.rolling_model_files],
+                    "model_weights": rolling_weights.tolist(),
+                    "sample_count": int(len(rolling_frame)),
+                }
+
+        # ---- Single_Full 层 ----
+        if self.full_models:
+            full_features, full_transforms, full_artifact_dir = self._load_feature_selection_artifacts(
+                mode="single_full",
+                model_dir=self.full_models_dir,
+            )
+
+            full_targets, full_num_cat, full_cards = self._validate_model_group(
+                models=self.full_models,
+                selected_features=full_features,
+                requested_targets=requested_targets,
+                group_name="single_full",
+            )
+
+            full_loader, full_meta = self._build_inference_loader_from_dataframe(
+                df=df,
+                selected_features=full_features,
+                transform_specs=full_transforms,
+                target_cols=full_targets,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                device=self.device,
+                num_cat_features=full_num_cat,
+                cat_cardinalities=full_cards,
+            )
+
+            full_weights = self._normalize_weights(np.ones(len(self.full_models), dtype=np.float64))
+            full_pred = self._predict_model_group(
+                loader=full_loader,
+                models=self.full_models,
+                model_weights=full_weights,
+            )
+
+            full_frame = full_meta.copy()
+            for i, t in enumerate(full_targets):
+                full_frame[f"single_full_y_pred_{t}"] = full_pred[:, i]
+
+            layer_frames.append(full_frame)
+            active_layer_names.append("single_full")
+            active_layer_weights.append(float(self.config.full_weight))
+
+            if with_breakdown:
+                breakdown_layers["single_full"] = {
+                    "enabled": True,
+                    "feature_selection_artifact_dir": str(full_artifact_dir),
+                    "selected_feature_count": len(full_features),
+                    "selected_feature_preview": full_features[:20],
+                    "transform_count": int(len(full_transforms)),
+                    "model_count": len(self.full_models),
+                    "model_files": [str(p) for p in self.full_model_files],
+                    "model_weights": full_weights.tolist(),
+                    "sample_count": int(len(full_frame)),
+                }
+
+        if not layer_frames:
+            raise ValueError("没有可用于推断的 GRU 模型")
+
+        # 对齐两层输出（按 trade_date + ts_code 内连接）
+        merged = layer_frames[0]
+        for frame in layer_frames[1:]:
+            merged = merged.merge(frame, on=["trade_date", "ts_code"], how="inner")
+
+        if merged.empty:
+            raise ValueError("No overlapping samples between rolling and single_full prediction layers")
+
+        base_layer_weights = self._normalize_weights(np.asarray(active_layer_weights, dtype=np.float64))
+        layer_weight_map = {
+            layer_name: float(weight)
+            for layer_name, weight in zip(active_layer_names, base_layer_weights)
+        }
+
+        result = merged[["trade_date", "ts_code"]].copy()
+        for target_col in requested_targets:
+            available_layers = [
+                layer_name
+                for layer_name in active_layer_names
+                if f"{layer_name}_y_pred_{target_col}" in merged.columns
+            ]
+            if not available_layers:
+                raise ValueError(f"Target '{target_col}' has no prediction columns in any layer")
+
+            target_layer_weights = self._normalize_weights(
+                np.asarray([layer_weight_map[name] for name in available_layers], dtype=np.float64)
+            )
+
+            fused_pred = np.zeros(len(merged), dtype=np.float64)
+            for layer_name, w in zip(available_layers, target_layer_weights):
+                fused_pred += merged[f"{layer_name}_y_pred_{target_col}"].to_numpy(dtype=np.float64) * w
+
+            result[f"y_pred_{target_col}"] = fused_pred
+
+        rank_target = next((t for t in requested_targets if t.startswith("rank")), requested_targets[0])
+        if f"y_pred_{rank_target}" in result.columns:
+            result["y_pred"] = result[f"y_pred_{rank_target}"]
+
+        result = result.sort_values(["trade_date", "ts_code"]).reset_index(drop=True)
+
+        if with_breakdown:
+            return result, {
+                "targets": requested_targets,
+                "device": self.device,
+                "seq_len": seq_len,
+                "batch_size": batch_size,
+                "rolling_weight_strategy": self.config.rolling_weight_strategy,
+                "configured_layer_weights": {
+                    "rolling": float(self.config.rolling_weight),
+                    "single_full": float(self.config.full_weight),
+                },
+                "effective_layer_weights": layer_weight_map,
+                "layers": breakdown_layers,
+                "output_samples": int(len(result)),
+            }
+
+        return result
