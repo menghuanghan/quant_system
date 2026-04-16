@@ -167,20 +167,59 @@ class Top10HoldersCollector(BaseCollector):
         """
         if not ts_code:
             try:
-                all_codes = _get_all_a_share_ts_codes(self.source_manager)
-                df = _collect_all_market_in_batches(
-                    task_name="top10_holders",
-                    ts_codes=all_codes,
-                    fetch_one=lambda code: self._collect_from_tushare(
-                        ts_code=code,
+                # 1) 公告日精确查询：直接走全市场 ann_date（不按 ts_code 循环）
+                if ann_date:
+                    df = self._collect_from_tushare(
+                        ts_code=None,
                         period=period,
                         type=type,
                         ann_date=ann_date,
-                        start_date=start_date,
-                        end_date=end_date,
-                    ),
-                    output_fields=self.OUTPUT_FIELDS,
-                )
+                        start_date=None,
+                        end_date=None,
+                    )
+                # 2) 公告日范围查询：按日全市场采集并合并（ann_date 语义）
+                elif start_date and end_date:
+                    start_dt = pd.to_datetime(start_date, errors='coerce')
+                    end_dt = pd.to_datetime(end_date, errors='coerce')
+                    if pd.isna(start_dt) or pd.isna(end_dt):
+                        raise ValueError(f"非法日期范围: start_date={start_date}, end_date={end_date}")
+
+                    if start_dt > end_dt:
+                        start_dt, end_dt = end_dt, start_dt
+
+                    parts = []
+                    for dt in pd.date_range(start_dt, end_dt, freq='D'):
+                        ann_compact = dt.strftime('%Y%m%d')
+                        day_df = self._collect_from_tushare(
+                            ts_code=None,
+                            period=period,
+                            type=type,
+                            ann_date=ann_compact,
+                            start_date=None,
+                            end_date=None,
+                        )
+                        if not day_df.empty:
+                            parts.append(day_df)
+                        time.sleep(0.05)
+
+                    df = pd.concat(parts, ignore_index=True).drop_duplicates() if parts else pd.DataFrame(columns=self.OUTPUT_FIELDS)
+                # 3) 无日期上下文时，退回全市场按 ts_code 并发拉取
+                else:
+                    all_codes = _get_all_a_share_ts_codes(self.source_manager)
+                    df = _collect_all_market_in_batches(
+                        task_name="top10_holders",
+                        ts_codes=all_codes,
+                        fetch_one=lambda code: self._collect_from_tushare(
+                            ts_code=code,
+                            period=period,
+                            type=type,
+                            ann_date=ann_date,
+                            start_date=start_date,
+                            end_date=end_date,
+                        ),
+                        output_fields=self.OUTPUT_FIELDS,
+                    )
+
                 if not df.empty:
                     logger.info(f"从Tushare成功获取全市场股东数据 {len(df)} 条")
                     return df
@@ -235,7 +274,7 @@ class Top10HoldersCollector(BaseCollector):
     @retry_on_failure(max_retries=3, delay=1.0)
     def _collect_from_tushare(
         self,
-        ts_code: str,
+        ts_code: Optional[str],
         period: Optional[str],
         type: str,
         ann_date: Optional[str] = None,
@@ -249,7 +288,9 @@ class Top10HoldersCollector(BaseCollector):
         
         # 前十大股东
         if type in ['all', 'top10']:
-            params = {'ts_code': ts_code}
+            params = {}
+            if ts_code:
+                params['ts_code'] = ts_code
             if period:
                 params['period'] = period
             if ann_date:
@@ -265,7 +306,9 @@ class Top10HoldersCollector(BaseCollector):
         
         # 前十大流通股东
         if type in ['all', 'float']:
-            params = {'ts_code': ts_code}
+            params = {}
+            if ts_code:
+                params['ts_code'] = ts_code
             if period:
                 params['period'] = period
             if ann_date:

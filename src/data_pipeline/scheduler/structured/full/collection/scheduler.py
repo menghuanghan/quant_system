@@ -40,6 +40,18 @@ CORE_INDEX_CODES = [
     "000852.SH",  # 中证1000
 ]
 
+# 仅采集核心指数的任务
+CORE_INDEX_ONLY_TASKS = {
+    "index_weight",
+    "index_daily",
+}
+
+# 核心指数任务相邻采集间隔（秒）
+CORE_INDEX_TASK_DELAY_SECONDS = 65.0
+
+# 默认批量任务采集间隔（秒）
+DEFAULT_BATCH_TASK_DELAY_SECONDS = 0.3
+
 
 class TaskStatus(Enum):
     """任务状态"""
@@ -782,6 +794,7 @@ class FullCollectionScheduler:
         """执行批量采集任务（按股票代码遍历）"""
         results = []
         total = len(stock_list)
+        inter_request_delay = self._get_inter_request_delay(task)
         
         for i, ts_code in enumerate(stock_list):
             # 检查是否跳过已存在的文件
@@ -813,15 +826,42 @@ class FullCollectionScheduler:
                 results[-1] = result
             
             # 控制请求频率
-            time.sleep(0.3)  # 避免API限流
+            if i < total - 1 and inter_request_delay > 0:
+                time.sleep(inter_request_delay)
         
         return results
+
+    def _get_inter_request_delay(self, task: CollectionTask) -> float:
+        """获取批量任务相邻采集间隔（秒）"""
+        if task.name in CORE_INDEX_ONLY_TASKS:
+            return CORE_INDEX_TASK_DELAY_SECONDS
+        return DEFAULT_BATCH_TASK_DELAY_SECONDS
     
     def run_task(self, task: CollectionTask) -> List[TaskResult]:
         """执行单个采集任务"""
         self._load_collector_funcs()
         
         results = []
+
+        # top10_holders 使用公告日范围全市场采集（由采集器内部按公告日处理）
+        # 不按 ALL_A 股票列表逐只遍历，避免 start/end 参数语义差异导致的漏采。
+        if task.name == "top10_holders":
+            logger.info("任务 top10_holders 使用公告日范围全市场采集模式（不按股票列表遍历）")
+            result = self._execute_single_task(task)
+            results = [result]
+
+            if result.status == TaskStatus.FAILED and self.retry_failed:
+                for retry in range(self.max_retries):
+                    logger.warning(
+                        f"任务 {task.name} 重试 {retry+1}/{self.max_retries}"
+                    )
+                    time.sleep(self.retry_delay)
+                    result = self._execute_single_task(task)
+                    if result.status == TaskStatus.SUCCESS:
+                        break
+                results = [result]
+
+            return results
         
         if task.stock_scope == StockScope.ALL_A:
             # 需要遍历全A股
@@ -851,12 +891,13 @@ class FullCollectionScheduler:
                 return [result]
             results = self._execute_batch_task(task, fund_list)
         elif task.stock_scope == StockScope.ALL_INDEX:
-            # index_weight 仅采集核心指数；其余任务仍遍历全量指数
-            if task.name == "index_weight":
+            # index_weight/index_daily 仅采集核心指数；其余任务仍遍历全量指数
+            if task.name in CORE_INDEX_ONLY_TASKS:
                 index_list = CORE_INDEX_CODES
                 logger.info(
-                    "任务 %s 使用核心指数范围: %s",
+                    "任务 %s 使用核心指数范围（相邻采集间隔 %.0f 秒）: %s",
                     task.name,
+                    CORE_INDEX_TASK_DELAY_SECONDS,
                     ", ".join(index_list),
                 )
             else:

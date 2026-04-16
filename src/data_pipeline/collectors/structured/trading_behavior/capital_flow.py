@@ -33,7 +33,7 @@ class MoneyFlowCollector(BaseCollector):
     
     采集个股每日资金流向数据
     主数据源：Tushare (moneyflow)
-    备用数据源：AkShare
+    说明：统一仅使用 Tushare，不启用 AkShare 降级
     """
     
     OUTPUT_FIELDS = [
@@ -87,18 +87,8 @@ class MoneyFlowCollector(BaseCollector):
                 return df
         except Exception as e:
             logger.warning(f"Tushare获取资金流向失败: {e}")
-        
-        # 降级到AkShare
-        try:
-            if ts_code:
-                df = self._collect_from_akshare(ts_code)
-                if not df.empty:
-                    logger.info(f"从AkShare成功获取 {len(df)} 条资金流向数据")
-                    return df
-        except Exception as e:
-            logger.error(f"AkShare获取资金流向失败: {e}")
-        
-        logger.error("所有数据源均无法获取资金流向数据")
+
+        logger.error("Tushare获取资金流向失败，且已禁用AkShare fallback")
         return pd.DataFrame(columns=self.OUTPUT_FIELDS)
     
     @retry_on_failure(max_retries=3, delay=1.0)

@@ -433,9 +433,9 @@ FUNDAMENTAL_TASKS = [
     ),
     CollectionTask(
         name="top10_holders",
-        description="前十大股东/流通股东",
+        description="前十大股东/流通股东（公告日口径）",
         domain="fundamental",
-        category=DataCategory.TIME_INDEPENDENT,  # 该接口不接受日期参数
+        category=DataCategory.TIME_DEPENDENT,
         collector_func="get_top10_holders",
         stock_scope=StockScope.ALL_A,
         frequency=CollectionFrequency.QUARTERLY,
@@ -443,6 +443,7 @@ FUNDAMENTAL_TASKS = [
         output_file="top10_holders/{ts_code}.parquet",
         batch_size=50,
         split_by="ts_code",
+        date_field="ann_date",
     ),
     CollectionTask(
         name="pledge",
@@ -467,7 +468,7 @@ FUNDAMENTAL_TASKS = [
         frequency=CollectionFrequency.DAILY,
         priority=6,
         output_file="share_float.parquet",
-        date_field="ann_date",
+        date_field="float_date",
     ),
     CollectionTask(
         name="repurchase",

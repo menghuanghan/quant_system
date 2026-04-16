@@ -561,14 +561,31 @@ class StructuredIncrementScheduler:
         return report
 
     def _get_stock_list(self) -> List[str]:
-        stock_file = self.full_raw_dir / "metadata" / "stock_list_a.parquet"
-        if not stock_file.exists():
-            logger.warning("未找到 stock_list_a: %s", stock_file)
-            return []
-        df = pd.read_parquet(stock_file)
-        if "ts_code" not in df.columns:
-            return []
-        return df["ts_code"].dropna().astype(str).unique().tolist()
+        primary = self.full_raw_dir / "metadata" / "stock_list_a.parquet"
+        fallback = Path("data/raw/structured/metadata/stock_list_a.parquet")
+
+        candidates = [primary]
+        if fallback != primary:
+            candidates.append(fallback)
+
+        for stock_file in candidates:
+            if not stock_file.exists():
+                continue
+            try:
+                df = pd.read_parquet(stock_file)
+            except Exception as e:
+                logger.warning("读取 stock_list_a 失败: %s (%s)", stock_file, e)
+                continue
+
+            if "ts_code" not in df.columns:
+                logger.warning("stock_list_a 缺少 ts_code 字段: %s", stock_file)
+                continue
+
+            logger.info("使用股票池文件: %s", stock_file)
+            return df["ts_code"].dropna().astype(str).unique().tolist()
+
+        logger.warning("未找到可用 stock_list_a，尝试路径: %s", ", ".join(str(p) for p in candidates))
+        return []
 
     def _get_etf_codes(self) -> List[str]:
         if self.etf_codes:
@@ -706,27 +723,61 @@ class StructuredIncrementScheduler:
         return df[key == target].copy()
 
     def _apply_share_float_data_rules(self, df: pd.DataFrame, task: IncrementCollectionTask) -> pd.DataFrame:
-        """share_float 规则：仅过滤 ann_date > float_date；ann_date == float_date 保留。"""
+        """share_float 规则：过滤 ann_date > float_date，并对结果按全列去重。"""
         if task.name != "share_float" or df.empty:
             return df
 
-        if "ann_date" not in df.columns or "float_date" not in df.columns:
-            return df
+        out = df.copy()
 
-        ann = pd.to_datetime(df["ann_date"], errors="coerce")
-        flt = pd.to_datetime(df["float_date"], errors="coerce")
+        if "ann_date" in out.columns and "float_date" in out.columns:
+            ann = pd.to_datetime(out["ann_date"], errors="coerce")
+            flt = pd.to_datetime(out["float_date"], errors="coerce")
 
-        # 仅当两侧日期都有效且 ann_date > float_date 时过滤
-        invalid_mask = ann.notna() & flt.notna() & (ann > flt)
-        dropped = int(invalid_mask.sum())
+            # 仅当两侧日期都有效且 ann_date > float_date 时过滤
+            invalid_mask = ann.notna() & flt.notna() & (ann > flt)
+            dropped = int(invalid_mask.sum())
 
-        if dropped > 0:
+            if dropped > 0:
+                logger.info(
+                    "share_float 规则过滤: 删除 ann_date > float_date 记录 %s 条",
+                    dropped,
+                )
+
+            out = out.loc[~invalid_mask].copy()
+
+        before_dedup = len(out)
+        out = out.drop_duplicates(ignore_index=True)
+        dedup_dropped = before_dedup - len(out)
+        if dedup_dropped > 0:
             logger.info(
-                "share_float 规则过滤: 删除 ann_date > float_date 记录 %s 条",
-                dropped,
+                "share_float 去重: 删除重复记录 %s 条",
+                dedup_dropped,
             )
 
-        return df.loc[~invalid_mask].copy()
+        return out
+
+    def _apply_money_flow_stock_pool_rules(self, df: pd.DataFrame, task: IncrementCollectionTask) -> pd.DataFrame:
+        """money_flow 规则：按 stock_list_a 代码池过滤，保持与 full 调度口径一致。"""
+        if task.name != "money_flow" or df.empty:
+            return df
+
+        if "ts_code" not in df.columns:
+            return df
+
+        stock_list = self._get_stock_list()
+        if not stock_list:
+            logger.warning("money_flow 代码池过滤跳过：无法加载 stock_list_a")
+            return df
+
+        stock_set = {str(x) for x in stock_list}
+        before = len(df)
+        out = df[df["ts_code"].astype(str).isin(stock_set)].copy()
+        dropped = before - len(out)
+
+        if dropped > 0:
+            logger.info("money_flow 代码池过滤: 删除非 stock_list_a 记录 %s 条", dropped)
+
+        return out
 
     def _get_reference_path(self, task: IncrementCollectionTask, code: Optional[str] = None) -> Path:
         if task.output_mode == "by_code" and code:
@@ -942,6 +993,7 @@ class StructuredIncrementScheduler:
             if not df.empty:
                 df = self._apply_share_float_data_rules(df, task)
                 df = self._filter_by_target_date(df, task)
+                df = self._apply_money_flow_stock_pool_rules(df, task)
 
             ref_path = self._get_reference_path(task)
             df = self._align_to_reference_schema(df, ref_path)
