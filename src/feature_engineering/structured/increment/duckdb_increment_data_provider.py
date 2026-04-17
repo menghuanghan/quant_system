@@ -263,12 +263,30 @@ class DuckDBIncrementDWDProvider:
             full_sql = None
             increment_sql = None
             if full_files:
-                full_sql = f"SELECT * FROM read_parquet({self._sql_parquet_list(full_files)}, union_by_name=true)"
+                full_sql = (
+                    "SELECT * FROM read_parquet("
+                    f"{self._sql_parquet_list(full_files)}, "
+                    "union_by_name=true, "
+                    "hive_partitioning=false"
+                    ")"
+                )
             if increment_files:
-                increment_sql = f"SELECT * FROM read_parquet({self._sql_parquet_list(increment_files)}, union_by_name=true)"
+                increment_sql = (
+                    "SELECT * FROM read_parquet("
+                    f"{self._sql_parquet_list(increment_files)}, "
+                    "union_by_name=true, "
+                    "hive_partitioning=false"
+                    ")"
+                )
 
             all_files = self._uniq_sorted_paths([*full_files, *increment_files])
-            schema_sql = f"SELECT * FROM read_parquet({self._sql_parquet_list(all_files)}, union_by_name=true)"
+            schema_sql = (
+                "SELECT * FROM read_parquet("
+                f"{self._sql_parquet_list(all_files)}, "
+                "union_by_name=true, "
+                "hive_partitioning=false"
+                ")"
+            )
             columns = con.execute(f"SELECT * FROM ({schema_sql}) t LIMIT 0").fetch_df().columns.tolist()
             full_columns: List[str] = []
             increment_columns: List[str] = []

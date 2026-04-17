@@ -234,7 +234,13 @@ class DuckDBIncrementInputProvider:
             con.execute("PRAGMA threads=4")
 
             def rel_sql(files: Sequence[Path]) -> str:
-                return f"SELECT * FROM read_parquet({self._sql_parquet_list(files)}, union_by_name=true)"
+                return (
+                    "SELECT * FROM read_parquet("
+                    f"{self._sql_parquet_list(files)}, "
+                    "union_by_name=true, "
+                    "hive_partitioning=false"
+                    ")"
+                )
 
             all_files = self._uniq_sorted_paths([*full_files, *increment_files])
             all_sql = rel_sql(all_files)

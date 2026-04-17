@@ -213,12 +213,24 @@ class DuckDBIncrementProcessedProvider:
             con.execute("PRAGMA threads=4")
 
             all_files = self._uniq_sorted_paths([*full_files, *increment_files])
-            all_sql = f"SELECT * FROM read_parquet({self._sql_parquet_list(all_files)}, union_by_name=true)"
+            all_sql = (
+                "SELECT * FROM read_parquet("
+                f"{self._sql_parquet_list(all_files)}, "
+                "union_by_name=true, "
+                "hive_partitioning=false"
+                ")"
+            )
             merged_pdf = con.execute(f"SELECT DISTINCT * FROM ({all_sql}) t").fetch_df()
 
             # 按 full schema 对齐列顺序，保留新增列在尾部
             if full_files:
-                full_sql = f"SELECT * FROM read_parquet({self._sql_parquet_list(full_files)}, union_by_name=true)"
+                full_sql = (
+                    "SELECT * FROM read_parquet("
+                    f"{self._sql_parquet_list(full_files)}, "
+                    "union_by_name=true, "
+                    "hive_partitioning=false"
+                    ")"
+                )
                 full_cols = con.execute(f"SELECT * FROM ({full_sql}) t LIMIT 0").fetch_df().columns.tolist()
                 for col in full_cols:
                     if col not in merged_pdf.columns:
